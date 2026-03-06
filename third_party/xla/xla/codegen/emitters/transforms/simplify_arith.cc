@@ -85,7 +85,7 @@ struct RewriteCmpI : OpRewritePattern<CmpIOp> {
         EvaluateCmpI(op.getPredicate(), *lhs, *rhs);
     if (result != std::nullopt) {
       rewriter.replaceOpWithNewOp<mlir::arith::ConstantIntOp>(
-          op, *result, rewriter.getI1Type());
+          op, rewriter.getI1Type(), *result);
       return mlir::success();
     }
     return rewriter.notifyMatchFailure(op, "not a constant result");
@@ -189,13 +189,15 @@ struct RewriteTruncBitExt : OpRewritePattern<Op> {
       return rewriter.notifyMatchFailure(op, "mismatched truncation types");
     }
 
-    mlir::Value new_lhs = trunci_lhs ? trunci_lhs.getOperand()
-                                     : rewriter.create<mlir::arith::ExtUIOp>(
-                                           op.getLoc(), wide_type, lhs);
-    mlir::Value new_rhs = trunci_rhs ? trunci_rhs.getOperand()
-                                     : rewriter.create<mlir::arith::ExtUIOp>(
-                                           op.getLoc(), wide_type, rhs);
-    mlir::Value new_op = rewriter.create<Op>(op.getLoc(), new_lhs, new_rhs);
+    mlir::Value new_lhs = trunci_lhs
+                              ? trunci_lhs.getOperand()
+                              : mlir::arith::ExtUIOp::create(
+                                    rewriter, op.getLoc(), wide_type, lhs);
+    mlir::Value new_rhs = trunci_rhs
+                              ? trunci_rhs.getOperand()
+                              : mlir::arith::ExtUIOp::create(
+                                    rewriter, op.getLoc(), wide_type, rhs);
+    mlir::Value new_op = Op::create(rewriter, op.getLoc(), new_lhs, new_rhs);
     rewriter.replaceOpWithNewOp<mlir::arith::TruncIOp>(op, op.getType(),
                                                        new_op);
 
@@ -219,13 +221,43 @@ struct RewriteTruncExtShuffle : public OpRewritePattern<mlir::gpu::ShuffleOp> {
       return rewriter.notifyMatchFailure(op, "no trunc or type mismatch");
     }
     rewriter.setInsertionPointAfter(op);
-    auto new_trunc = rewriter.create<mlir::arith::TruncIOp>(
-        op.getLoc(), trunc.getType(), op.getResult(0));
-    auto new_ext = rewriter.create<mlir::arith::ExtUIOp>(
-        op.getLoc(), ext.getType(), new_trunc.getResult());
+    auto new_trunc = mlir::arith::TruncIOp::create(
+        rewriter, op.getLoc(), trunc.getType(), op.getResult(0));
+    auto new_ext = mlir::arith::ExtUIOp::create(
+        rewriter, op.getLoc(), ext.getType(), new_trunc.getResult());
     rewriter.modifyOpInPlace(op,
                              [&]() { op->setOperand(0, trunc.getOperand()); });
     rewriter.replaceAllUsesExcept(op.getResult(0), new_ext, new_trunc);
+    return mlir::success();
+  }
+};
+
+struct RewriteMinimumF : OpRewritePattern<mlir::arith::MinimumFOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(mlir::arith::MinimumFOp op,
+                                PatternRewriter& rewriter) const override {
+    auto cmp = mlir::arith::CmpFOp::create(rewriter, op.getLoc(),
+                                           mlir::arith::CmpFPredicate::ULE,
+                                           op.getLhs(), op.getRhs());
+    auto select = mlir::arith::SelectOp::create(
+        rewriter, op.getLoc(), op.getType(), cmp, op.getLhs(), op.getRhs());
+    rewriter.replaceOp(op, select);
+    return mlir::success();
+  }
+};
+
+struct RewriteMaximumF : OpRewritePattern<mlir::arith::MaximumFOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(mlir::arith::MaximumFOp op,
+                                PatternRewriter& rewriter) const override {
+    auto cmp = mlir::arith::CmpFOp::create(rewriter, op.getLoc(),
+                                           mlir::arith::CmpFPredicate::UGE,
+                                           op.getLhs(), op.getRhs());
+    auto select = mlir::arith::SelectOp::create(
+        rewriter, op.getLoc(), op.getType(), cmp, op.getLhs(), op.getRhs());
+    rewriter.replaceOp(op, select);
     return mlir::success();
   }
 };
@@ -347,6 +379,8 @@ struct RefineConstraints : public OpRewritePattern<ApplyIndexingOp> {
 class SimplifyArithPass
     : public impl::SimplifyArithPassBase<SimplifyArithPass> {
  public:
+  using impl::SimplifyArithPassBase<SimplifyArithPass>::SimplifyArithPassBase;
+
   void runOnOperation() override {
     auto ctx = &getContext();
     auto func = getOperation();
@@ -362,6 +396,12 @@ class SimplifyArithPass
       RewriteTruncBitExt<mlir::arith::OrIOp>,
       RewriteTruncExtShuffle
     >(ctx);
+
+    if (fast_min_max_)
+    {
+      patterns.add<RewriteMinimumF, RewriteMaximumF>(ctx);
+    }
+
     // clang-format on
     if (mlir::failed(mlir::applyPatternsGreedily(func, std::move(patterns)))) {
       signalPassFailure();
@@ -379,8 +419,10 @@ class SimplifyArithPass
 
 }  // namespace
 
-std::unique_ptr<mlir::Pass> CreateSimplifyArithPass() {
-  return std::make_unique<SimplifyArithPass>();
+std::unique_ptr<mlir::Pass> CreateSimplifyArithPass(bool fast_min_max) {
+  SimplifyArithPassOptions options;
+  options.fast_min_max_ = fast_min_max;
+  return std::make_unique<SimplifyArithPass>(options);
 }
 
 }  // namespace emitters

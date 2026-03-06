@@ -13,6 +13,9 @@
 # limitations under the License.
 # ==============================================================================
 
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//tensorflow:strict.default.bzl", "py_strict_binary")
 load("//tensorflow:tensorflow.bzl", "clean_dep")
 
@@ -23,7 +26,7 @@ load("build_defs.bzl", "cc_library_with_forced_in_process_benchmark_variant", "e
 load("special_rules.bzl", "libjpeg_deps", "libjpeg_handle_deps", "libjpeg_hdrs_deps", "minibenchmark_visibility_allowlist")
 
 package(
-    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = [
         "//tensorflow/lite/experimental/acceleration/mini_benchmark:__subpackages__",
         "//tensorflow/lite/tools/benchmark:__subpackages__",

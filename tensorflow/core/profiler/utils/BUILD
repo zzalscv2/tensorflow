@@ -24,7 +24,6 @@ cc_library(
     visibility = [
         "//perftools/accelerators/xprof/convert:__pkg__",
         "//perftools/gputools/profiler/collector:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
     ],
     deps = [
         "@org_xprof//xprof/utils:diagnostics",
@@ -38,7 +37,6 @@ cc_library(
     visibility = [
         "//perftools/accelerators/xprof/convert:__pkg__",
         "//perftools/gputools/profiler/collector:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
     ],
     deps = [
         "@org_xprof//xprof/utils:event_span",
@@ -49,10 +47,7 @@ cc_library(
     name = "hardware_type_utils",
     hdrs = ["hardware_type_utils.h"],
     copts = tf_profiler_copts(),
-    visibility = [
-        "//perftools/accelerators/xprof/convert:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
-    ],
+    visibility = ["//perftools/accelerators/xprof/convert:__pkg__"],
     deps = [
         "@org_xprof//xprof/utils:hardware_type_utils",
     ],
@@ -63,25 +58,20 @@ cc_library(
     hdrs = ["math_utils.h"],
     visibility = [
         "//perftools/accelerators/xprof/convert:__pkg__",
-        "//perftools/accelerators/xprof/service:__pkg__",
-        "//perftools/accelerators/xprof/xplane:__pkg__",
         "//perftools/accelerators/xprof/xprofilez/integration_tests:__pkg__",
         "//perftools/gputools/profiler/collector:__pkg__",
         "//tensorflow/core/profiler/rpc:__pkg__",
     ],
     deps = [
         "@com_google_absl//absl/base:core_headers",
-        "@local_xla//xla/tsl/profiler/utils:math_utils",
+        "@xla//xla/tsl/profiler/utils:math_utils",
     ],
 )
 
 cc_library(
     name = "html_utils",
     hdrs = ["html_utils.h"],
-    visibility = [
-        "//perftools/gputools/profiler/collector:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
-    ],
+    visibility = ["//perftools/gputools/profiler/collector:__pkg__"],
     deps = [
         "@org_xprof//xprof/utils:html_utils",
     ],
@@ -93,9 +83,7 @@ cc_library(
     copts = tf_profiler_copts(),
     visibility = [
         "//perftools/accelerators/xprof/convert:__pkg__",
-        "//perftools/accelerators/xprof/xplane:__pkg__",
         "//perftools/gputools/profiler/collector:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
     ],
     deps = [
         "@org_xprof//xprof/utils:op_metrics_db_utils",
@@ -106,10 +94,7 @@ cc_library(
     name = "op_utils",
     hdrs = ["op_utils.h"],
     copts = tf_profiler_copts(),
-    visibility = [
-        "//perftools/gputools/profiler/collector:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
-    ],
+    visibility = ["//perftools/gputools/profiler/collector:__pkg__"],
     deps = [
         "@org_xprof//xprof/utils:op_utils",
     ],
@@ -123,10 +108,9 @@ cc_library(
         "//perftools/accelerators/xprof/convert:__pkg__",
         "//perftools/accelerators/xprof/xprofilez/nvidia_gpu:__pkg__",
         "//perftools/gputools/profiler/collector:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
     ],
     deps = [
-        "@local_xla//xla/tsl/profiler/utils:trace_utils",
+        "@xla//xla/tsl/profiler/utils:trace_utils",
     ],
 )
 
@@ -136,7 +120,7 @@ cc_library(
     copts = tf_profiler_copts(),
     visibility = [":friends"],
     deps = [
-        "@local_xla//xla/tsl/profiler/utils:xplane_builder",
+        "@xla//xla/tsl/profiler/utils:xplane_builder",
     ],
 )
 
@@ -145,7 +129,7 @@ cc_library(
     hdrs = ["xplane_schema.h"],
     copts = tf_profiler_copts(),
     visibility = [":friends"],
-    deps = ["@local_xla//xla/tsl/profiler/utils:xplane_schema"],
+    deps = ["@xla//xla/tsl/profiler/utils:xplane_schema"],
 )
 
 cc_library(
@@ -154,7 +138,7 @@ cc_library(
     copts = tf_profiler_copts(),
     visibility = [":friends"],
     deps = [
-        "@local_xla//xla/tsl/profiler/utils:xplane_utils",
+        "@xla//xla/tsl/profiler/utils:xplane_utils",
     ],
 )
 
@@ -166,9 +150,8 @@ cc_library(
     visibility = [
         "//perftools/accelerators/xprof/db:__pkg__",
         "//perftools/gputools/profiler/collector:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
     ],
-    deps = ["@local_xla//xla/tsl/profiler/utils:xplane_test_utils"],
+    deps = ["@xla//xla/tsl/profiler/utils:xplane_test_utils"],
 )
 
 cc_library(
@@ -177,7 +160,7 @@ cc_library(
     copts = tf_profiler_copts(),
     visibility = [":friends"],
     deps = [
-        "@local_xla//xla/tsl/profiler/utils:xplane_visitor",
+        "@xla//xla/tsl/profiler/utils:xplane_visitor",
     ],
 )
 
@@ -185,11 +168,7 @@ cc_library(
     name = "cost_utils",
     hdrs = ["cost_utils.h"],
     copts = tf_profiler_copts(),
-    visibility = [
-        "//perftools/accelerators/xprof/convert:__pkg__",
-        "//perftools/gputools/profiler/collector:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
-    ],
+    visibility = ["//visibility:private"],
     deps = [
         "@org_xprof//xprof/utils:cost_utils",
     ],
@@ -203,7 +182,6 @@ cc_library(
         "//perftools/accelerators/xprof/convert:__pkg__",
         "//perftools/accelerators/xprof/xplane:__pkg__",
         "//platforms/darwinn/tools/xprof_trace:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
     ],
     deps = [
         "@org_xprof//xprof/utils:derived_timeline",
@@ -217,7 +195,6 @@ cc_library(
     visibility = [
         "//perftools/accelerators/xprof/convert:__pkg__",
         "//perftools/gputools/profiler/collector:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
     ],
     deps = ["@org_xprof//xprof/utils:kernel_stats_utils"],
 )
@@ -236,10 +213,7 @@ cc_library(
     name = "step_intersection",
     hdrs = ["step_intersection.h"],
     copts = tf_profiler_copts(),
-    visibility = [
-        "//perftools/accelerators/xprof/convert:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
-    ],
+    visibility = ["//perftools/accelerators/xprof/convert:__pkg__"],
     deps = [
         "@org_xprof//xprof/utils:step_intersection",
     ],
@@ -252,7 +226,6 @@ cc_library(
     visibility = [
         "//perftools/accelerators/xprof/xplane:__pkg__",
         "//platforms/xla/tools:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
     ],
     deps = ["@org_xprof//xprof/utils:device_caps_utils"],
 )
@@ -279,8 +252,6 @@ cc_library(
         "//perftools/accelerators/xprof/xplane:__pkg__",
         "//perftools/accelerators/xprof/xprofilez/integration_tests:__pkg__",
         "//perftools/gputools/profiler/collector:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
-        "@org_xprof//xprof/convert/google:__pkg__",
     ],
     deps = [
         "@org_xprof//xprof/utils:hlo_proto_map",
@@ -293,7 +264,6 @@ cc_library(
     visibility = [
         "//perftools/accelerators/xprof/convert:__pkg__",
         "//perftools/gputools/profiler/collector:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
     ],
     deps = [
         "@org_xprof//xprof/utils:hlo_proto_to_module",
@@ -303,10 +273,7 @@ cc_library(
 cc_library(
     name = "hlo_module_map",
     hdrs = ["hlo_module_map.h"],
-    visibility = [
-        "//perftools/accelerators/xprof/convert:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
-    ],
+    visibility = ["//perftools/accelerators/xprof/convert:__pkg__"],
     deps = [
         "@org_xprof//xprof/utils:hlo_module_map",
     ],
@@ -319,7 +286,6 @@ cc_library(
         "//perftools/accelerators/xprof/convert:__pkg__",
         "//perftools/gputools/profiler/collector:__pkg__",
         "//tensorflow/compiler/mlir/lite/experimental/google/tooling/hlo_adapter:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
     ],
     deps = [
         "@org_xprof//xprof/utils:hlo_module_utils",
@@ -329,10 +295,7 @@ cc_library(
 cc_library(
     name = "xprof_gpu_cost_analysis",
     hdrs = ["xprof_gpu_cost_analysis.h"],
-    visibility = [
-        "//perftools/accelerators/xprof/convert:__pkg__",
-        "//perftools/accelerators/xprof/xplane:__pkg__",
-    ],
+    visibility = ["//visibility:private"],
     deps = [
         "@org_xprof//xprof/utils:xprof_gpu_cost_analysis",
     ],
@@ -341,10 +304,7 @@ cc_library(
 cc_library(
     name = "tpu_step_breakdown_utils",
     hdrs = ["tpu_step_breakdown_utils.h"],
-    visibility = [
-        "//perftools/accelerators/xprof/convert:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
-    ],
+    visibility = ["//perftools/accelerators/xprof/convert:__pkg__"],
     deps = [
         "@org_xprof//xprof/utils:tpu_step_breakdown_utils",
     ],
@@ -353,10 +313,7 @@ cc_library(
 cc_library(
     name = "tpu_step_details_utils",
     hdrs = ["tpu_step_details_utils.h"],
-    visibility = [
-        "//perftools/gputools/profiler/collector:__pkg__",
-        "//tensorflow/core/profiler/convert:__pkg__",
-    ],
+    visibility = ["//perftools/gputools/profiler/collector:__pkg__"],
     deps = [
         "@org_xprof//xprof/utils:tpu_step_details_utils",
     ],

@@ -367,10 +367,20 @@ TfLiteStatus Prepare(KernelType kernel_type, TfLiteContext* context,
     const auto* affine_quantization =
         reinterpret_cast<TfLiteAffineQuantization*>(
             filter->quantization.params);
-    for (int i = 0; i < affine_quantization->zero_point->size; ++i) {
-      TF_LITE_ENSURE_EQ(context, affine_quantization->zero_point->data[i], 0);
+    if (affine_quantization->zero_point) {
+      for (int i = 0; i < affine_quantization->zero_point->size; ++i) {
+        TF_LITE_ENSURE_EQ(context, affine_quantization->zero_point->data[i], 0);
+      }
     }
   }
+
+  // Validate stride values
+  TF_LITE_ENSURE(context, params->stride_height > 0);
+  TF_LITE_ENSURE(context, params->stride_width > 0);
+
+  // Validate dilation values
+  TF_LITE_ENSURE(context, params->dilation_height_factor > 0);
+  TF_LITE_ENSURE(context, params->dilation_width_factor > 0);
 
   const TfLiteTensor* bias = nullptr;
 
@@ -704,9 +714,9 @@ void EvalQuantized(TfLiteContext* context, TfLiteNode* node,
   if (filter->type == kTfLiteInt4) {
     const size_t bytes_unpacked = filter->bytes * 2;
     unpacked_filter_data = std::make_unique<int8_t[]>(bytes_unpacked);
-    tflite::tensor_utils::UnpackDenseInt4IntoInt8(
+    tflite::tensor_utils::UnpackPackedIntToInt8(
         GetTensorData<int8_t>(filter), GetTensorShape(filter).FlatSize(),
-        unpacked_filter_data.get());
+        /*bit_width=*/4, unpacked_filter_data.get());
     filter_data = reinterpret_cast<const uint8_t*>(unpacked_filter_data.get());
   } else {
     filter_data = GetTensorData<uint8_t>(filter);
@@ -791,9 +801,9 @@ void EvalQuantizedPerChannel(TfLiteContext* context, TfLiteNode* node,
   if (filter->type == kTfLiteInt4) {
     const size_t bytes_unpacked = filter->bytes * 2;
     unpacked_filter_data = std::make_unique<int8_t[]>(bytes_unpacked);
-    tflite::tensor_utils::UnpackDenseInt4IntoInt8(
+    tflite::tensor_utils::UnpackPackedIntToInt8(
         GetTensorData<int8_t>(filter), GetTensorShape(filter).FlatSize(),
-        unpacked_filter_data.get());
+        /*bit_width=*/4, unpacked_filter_data.get());
     filter_data = unpacked_filter_data.get();
   } else {
     filter_data = GetTensorData<int8_t>(filter);
@@ -891,9 +901,9 @@ void EvalQuantizedPerChannel16x8(TfLiteContext* context, TfLiteNode* node,
   if (filter->type == kTfLiteInt4) {
     const size_t bytes_unpacked = filter->bytes * 2;
     unpacked_filter_data = std::make_unique<int8_t[]>(bytes_unpacked);
-    tflite::tensor_utils::UnpackDenseInt4IntoInt8(
+    tflite::tensor_utils::UnpackPackedIntToInt8(
         GetTensorData<int8_t>(filter), GetTensorShape(filter).FlatSize(),
-        unpacked_filter_data.get());
+        /*bit_width=*/4, unpacked_filter_data.get());
     filter_data = unpacked_filter_data.get();
   } else {
     filter_data = GetTensorData<int8_t>(filter);
@@ -1091,9 +1101,9 @@ TfLiteStatus EvalHybridPerChannel(TfLiteContext* context, TfLiteNode* node,
   if (filter->type == kTfLiteInt4) {
     const size_t bytes_unpacked = filter->bytes * 2;
     unpacked_filter_data = std::make_unique<int8_t[]>(bytes_unpacked);
-    tflite::tensor_utils::UnpackDenseInt4IntoInt8(
+    tflite::tensor_utils::UnpackPackedIntToInt8(
         GetTensorData<int8_t>(filter), GetTensorShape(filter).FlatSize(),
-        unpacked_filter_data.get());
+        /*bit_width=*/4, unpacked_filter_data.get());
     filter_data = unpacked_filter_data.get();
   } else {
     filter_data = GetTensorData<int8_t>(filter);
@@ -1202,9 +1212,9 @@ TfLiteStatus EvalHybrid(TfLiteContext* context, TfLiteNode* node,
   if (filter->type == kTfLiteInt4) {
     const size_t bytes_unpacked = filter->bytes * 2;
     unpacked_filter_data = std::make_unique<int8_t[]>(bytes_unpacked);
-    tflite::tensor_utils::UnpackDenseInt4IntoInt8(
+    tflite::tensor_utils::UnpackPackedIntToInt8(
         GetTensorData<int8_t>(filter), GetTensorShape(filter).FlatSize(),
-        unpacked_filter_data.get());
+        /*bit_width=*/4, unpacked_filter_data.get());
     filter_data = unpacked_filter_data.get();
   } else {
     filter_data = GetTensorData<int8_t>(filter);

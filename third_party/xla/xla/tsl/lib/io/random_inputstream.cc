@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <memory>
 
+#include "absl/status/status.h"
+
 namespace tsl {
 namespace io {
 
@@ -33,13 +35,14 @@ RandomAccessInputStream::~RandomAccessInputStream() {
 absl::Status RandomAccessInputStream::ReadNBytes(int64_t bytes_to_read,
                                                  tstring* result) {
   if (bytes_to_read < 0) {
-    return errors::InvalidArgument("Cannot read negative number of bytes");
+    return absl::InvalidArgumentError("Cannot read negative number of bytes");
   }
   result->clear();
   result->resize_uninitialized(bytes_to_read);
   char* result_buffer = &(*result)[0];
   absl::string_view data;
-  absl::Status s = file_->Read(pos_, bytes_to_read, &data, result_buffer);
+  absl::Status s =
+      file_->Read(pos_, data, absl::MakeSpan(result_buffer, bytes_to_read));
   if (data.data() != result_buffer) {
     memmove(result_buffer, data.data(), data.size());
   }
@@ -54,7 +57,7 @@ absl::Status RandomAccessInputStream::ReadNBytes(int64_t bytes_to_read,
 absl::Status RandomAccessInputStream::ReadNBytes(int64_t bytes_to_read,
                                                  absl::Cord* result) {
   if (bytes_to_read < 0) {
-    return errors::InvalidArgument("Cannot read negative number of bytes");
+    return absl::InvalidArgumentError("Cannot read negative number of bytes");
   }
   int64_t current_size = result->size();
   absl::Status s = file_->Read(pos_, bytes_to_read, result);
@@ -71,15 +74,15 @@ static constexpr int64_t kMaxSkipSize = 8 * 1024 * 1024;
 
 absl::Status RandomAccessInputStream::SkipNBytes(int64_t bytes_to_skip) {
   if (bytes_to_skip < 0) {
-    return errors::InvalidArgument("Can't skip a negative number of bytes");
+    return absl::InvalidArgumentError("Can't skip a negative number of bytes");
   }
   std::unique_ptr<char[]> scratch(new char[kMaxSkipSize]);
   // Try to read 1 bytes first, if we could complete the read then EOF is
   // not reached yet and we could return.
   if (bytes_to_skip > 0) {
     absl::string_view data;
-    absl::Status s =
-        file_->Read(pos_ + bytes_to_skip - 1, 1, &data, scratch.get());
+    absl::Status s = file_->Read(pos_ + bytes_to_skip - 1, data,
+                                 absl::MakeSpan(scratch.get(), 1));
     if ((s.ok() || absl::IsOutOfRange(s)) && data.size() == 1) {
       pos_ += bytes_to_skip;
       return absl::OkStatus();
@@ -89,14 +92,15 @@ absl::Status RandomAccessInputStream::SkipNBytes(int64_t bytes_to_skip) {
   while (bytes_to_skip > 0) {
     int64_t bytes_to_read = std::min<int64_t>(kMaxSkipSize, bytes_to_skip);
     absl::string_view data;
-    absl::Status s = file_->Read(pos_, bytes_to_read, &data, scratch.get());
+    absl::Status s =
+        file_->Read(pos_, data, absl::MakeSpan(scratch.get(), bytes_to_read));
     if (s.ok() || absl::IsOutOfRange(s)) {
       pos_ += data.size();
     } else {
       return s;
     }
     if (data.size() < static_cast<size_t>(bytes_to_read)) {
-      return errors::OutOfRange("reached end of file");
+      return absl::OutOfRangeError("reached end of file");
     }
     bytes_to_skip -= bytes_to_read;
   }

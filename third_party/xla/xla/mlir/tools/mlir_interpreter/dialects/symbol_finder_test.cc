@@ -18,8 +18,7 @@ limitations under the License.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
-#include "tsl/platform/status_matchers.h"
-#include "tsl/platform/test.h"
+#include "absl/status/status_matchers.h"
 
 namespace mlir::interpreter {
 
@@ -27,14 +26,13 @@ namespace mlir::interpreter {
 
 namespace {
 using ::testing::NotNull;
-using ::tsl::testing::IsOkAndHolds;
-using ::tsl::testing::StatusIs;
 
 TEST(SymbolFinderTest, FindSymbolInProcess) {
   // `malloc` should be available on every platform
-  EXPECT_THAT(FindSymbolInProcess("malloc"), IsOkAndHolds(NotNull()));
+  EXPECT_THAT(FindSymbolInProcess("malloc"),
+              absl_testing::IsOkAndHolds(NotNull()));
   EXPECT_THAT(FindSymbolInProcess("surely_this_does_not_exist"),
-              StatusIs(absl::StatusCode::kNotFound));
+              absl_testing::StatusIs(absl::StatusCode::kNotFound));
 }
 
 }  // namespace

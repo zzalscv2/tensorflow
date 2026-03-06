@@ -13,7 +13,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "xla/service/cpu/tests/cpu_codegen_test.h"
+#include "xla/hlo/transforms/simplifiers/tree_reduction_rewriter.h"
+
+#include <memory>
+
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
+#include "xla/hlo/ir/hlo_module.h"
+#include "xla/hlo/testlib/filecheck.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
+#include "xla/hlo/transforms/simplifiers/algebraic_simplifier.h"
+#include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
 
 namespace xla {
@@ -21,7 +32,21 @@ namespace cpu {
 
 namespace {
 
-class TreeReductionRewriterTest : public CpuCodegenTest {};
+class TreeReductionRewriterTest : public HloHardwareIndependentTestBase {
+ public:
+  void MatchTreeReducedHlo(absl::string_view hlo, absl::string_view pattern) {
+    auto optimized_module = ParseAndReturnVerifiedModule(hlo).value();
+    (void)TreeReductionRewriter().Run(optimized_module.get());
+    EXPECT_TRUE(RunFileCheck(optimized_module->ToString(), pattern).value());
+  }
+
+  void MatchOptimizedHlo(absl::string_view hlo, absl::string_view pattern) {
+    auto optimized_module = ParseAndReturnVerifiedModule(hlo).value();
+    (void)AlgebraicSimplifier(AlgebraicSimplifierOptions())
+        .Run(optimized_module.get());
+    EXPECT_TRUE(RunFileCheck(optimized_module->ToString(), pattern).value());
+  }
+};
 
 TEST_F(TreeReductionRewriterTest, SimpleRewrite) {
   const char* hlo_text = R"(
@@ -40,8 +65,8 @@ ENTRY main {
 }
   )";
 
-  MatchOptimizedHlo(hlo_text,
-                    R"(
+  MatchTreeReducedHlo(hlo_text,
+                      R"(
 ; CHECK-LABEL: ENTRY %main (input: f32[1000]) -> f32[] {
 ; CHECK-NEXT:    [[INSTR_0:%[^ ]+]] = f32[1000]{0} parameter(0)
 ; CHECK-NEXT:    [[INSTR_1:%[^ ]+]] = f32[] constant(0)
@@ -67,8 +92,8 @@ ENTRY main {
 }
   )";
 
-  MatchOptimizedHlo(hlo_text,
-                    R"(
+  MatchTreeReducedHlo(hlo_text,
+                      R"(
 ; CHECK:    [[INSTR_0:%[^ ]+]] = f32[4,4]{1,0} reduce-window([[INSTR_1:%[^ ]+]], [[INSTR_2:%[^ ]+]]), window={size=32x32 stride=32x32 pad=14_14x14_14}, to_apply=[[INSTR_3:%[^ ]+]]
 ; CHECK-NEXT: ROOT [[INSTR_4:%[^ ]+]] = f32[] reduce([[INSTR_0]], [[INSTR_2]]), dimensions={0,1}, to_apply=[[INSTR_3]]
       )");
@@ -91,8 +116,8 @@ ENTRY main {
 }
   )";
 
-  MatchOptimizedHlo(hlo_text,
-                    R"(
+  MatchTreeReducedHlo(hlo_text,
+                      R"(
 ; CHECK:    [[INSTR_0:%[^ ]+]] = f32[32,1]{1,0} reduce-window([[INSTR_1:%[^ ]+]], [[INSTR_2:%[^ ]+]]), window={size=32x31 stride=32x31 pad=12_12x0_0}, to_apply=[[INSTR_3:%[^ ]+]]
 ; CHECK-NEXT: ROOT [[INSTR_4:%[^ ]+]] = f32[] reduce([[INSTR_0]], [[INSTR_2]]), dimensions={0,1}, to_apply=[[INSTR_3]]
       )");
@@ -115,8 +140,8 @@ ENTRY main {
 }
   )";
 
-  MatchOptimizedHlo(hlo_text,
-                    R"(
+  MatchTreeReducedHlo(hlo_text,
+                      R"(
 // CHECK: ROOT [[INSTR_0:%[^ ]+]] = f32[] reduce([[INSTR_1:%[^ ]+]], [[INSTR_2:%[^ ]+]]), dimensions={0,1}, to_apply=[[INSTR_3:%[^ ]+]]
       )");
 }
@@ -140,7 +165,7 @@ ENTRY main {
 
   MatchOptimizedHlo(hlo_text,
                     R"(
-// CHECK: ROOT {{.*}} = f32[] copy
+// CHECK: ROOT {{.*}} = f32[] constant
       )");
 }
 

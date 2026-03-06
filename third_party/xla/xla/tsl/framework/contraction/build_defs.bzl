@@ -1,5 +1,6 @@
 """Defines the cc_binary_disable_onednn build rule to disable oneDNN."""
 
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load(
     "//xla/tsl:package_groups.bzl",
     "DEFAULT_LOAD_VISIBILITY",
@@ -26,6 +27,7 @@ def _disable_onednn_impl(ctx):
         inputs = [ctx.executable.cc_binary],
         outputs = [out],
         command = "cp %s %s" % (ctx.executable.cc_binary.path, out.path),
+        mnemonic = "TslDisableOnednnBinaryCopy",
     )
 
     wrapped_defaultinfo = ctx.attr.cc_binary[0][DefaultInfo]
@@ -91,7 +93,7 @@ def cc_binary_disable_onednn(name, visibility = [], **kwargs):
         cc_binary = ":%s" % wrapped_binary_name,
         visibility = visibility,
     )
-    native.cc_binary(
+    cc_binary(
         name = wrapped_binary_name,
         visibility = visibility,
         **kwargs

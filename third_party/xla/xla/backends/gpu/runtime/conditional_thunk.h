@@ -17,6 +17,7 @@ limitations under the License.
 #define XLA_BACKENDS_GPU_RUNTIME_CONDITIONAL_THUNK_H_
 
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
@@ -28,7 +29,10 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "xla/backends/gpu/runtime/host_memory_pool.h"
 #include "xla/backends/gpu/runtime/sequential_thunk.h"
+#include "xla/backends/gpu/runtime/shaped_slice.h"
 #include "xla/backends/gpu/runtime/thunk.h"
+#include "xla/backends/gpu/runtime/thunk.pb.h"
+#include "xla/runtime/buffer_use.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/stream_executor/stream_executor.h"
 
@@ -48,16 +52,13 @@ namespace gpu {
 class ConditionalThunk : public Thunk {
  public:
   ConditionalThunk(
-      ThunkInfo thunk_info,
-      const BufferAllocation::Slice& branch_index_buffer_index,
-      std::vector<std::unique_ptr<SequentialThunk>>&& branch_thunks,
-      bool branch_index_is_bool);
+      ThunkInfo thunk_info, const ShapedSlice& branch_index_buffer_index,
+      std::vector<std::unique_ptr<SequentialThunk>>&& branch_thunks);
 
   ConditionalThunk(const ConditionalThunk&) = delete;
   ConditionalThunk& operator=(const ConditionalThunk&) = delete;
 
-  absl::Status Prepare(const PrepareParams& params,
-                       ResourceRequestsInterface& resource_requests) override;
+  absl::Status Prepare(const PrepareParams& params) override;
   absl::Status Initialize(const InitializeParams& params) override;
   absl::Status ExecuteOnStream(const ExecuteParams& params) override;
 
@@ -65,17 +66,42 @@ class ConditionalThunk : public Thunk {
     return branch_thunks_;
   }
 
-  const BufferAllocation::Slice& branch_index_buffer() const {
+  const ShapedSlice& branch_index_buffer() const {
     return branch_index_buffer_index_;
   }
 
-  void ForAllThunks(absl::FunctionRef<void(const Thunk*)> fn) const override;
+  absl::Status WalkNested(Walker callback) override;
+  absl::Status TransformNested(Transformer callback) override;
+
   bool branch_index_is_bool() const { return branch_index_is_bool_; }
+
+  BufferUses buffer_uses() const override {
+    return {
+        BufferUse::Read(branch_index_buffer_index_.slice,
+                        branch_index_buffer_index_.shape),
+    };
+  }
 
   absl::StatusOr<ThunkProto> ToProto() const override;
 
+  // Deserializes a ConditionalThunk from its proto representation.
+  // Parameters:
+  // - thunk_info: Metadata about the thunk
+  // - thunk_proto: Serialized ConditionalThunk proto message.
+  // - buffer_allocations: Buffer allocations available for use by the thunk.
+  // - deserializer: Callable (e.g., lambda) for deserializing nested thunks.
+  //
+  // Returns a unique_ptr to a ConditionalThunk on success, or an error status
+  // on failure.
+  static absl::StatusOr<std::unique_ptr<ConditionalThunk>> FromProto(
+      ThunkInfo thunk_info, const ConditionalThunkProto& thunk_proto,
+      absl::Span<const BufferAllocation> buffer_allocations,
+      const Deserializer& deserializer);
+
+  std::string ToString(int indent) const override;
+
  private:
-  const BufferAllocation::Slice branch_index_buffer_index_;
+  const ShapedSlice branch_index_buffer_index_;
   std::vector<std::unique_ptr<SequentialThunk>> branch_thunks_;
   bool branch_index_is_bool_;
 

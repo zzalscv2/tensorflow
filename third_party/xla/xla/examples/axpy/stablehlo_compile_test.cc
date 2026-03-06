@@ -23,6 +23,7 @@ limitations under the License.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/log/check.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -37,19 +38,19 @@ limitations under the License.
 #include "xla/literal_util.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_cpu.h"
+#include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_api.h"
-#include "xla/pjrt/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/pjrt/plugin/xla_cpu/cpu_client_options.h"
 #include "xla/pjrt/plugin/xla_cpu/xla_cpu_pjrt_client.h"
 #include "xla/tests/literal_test_util.h"
 #include "xla/tsl/lib/core/status_test_util.h"
-#include "tsl/platform/env.h"
-#include "tsl/platform/errors.h"
+#include "xla/tsl/platform/env.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
+#include "xla/tsl/platform/test.h"
 #include "tsl/platform/path.h"
-#include "tsl/platform/status_matchers.h"
-#include "tsl/platform/test.h"
 
 namespace xla {
 namespace {
@@ -104,15 +105,15 @@ TEST_F(StableHloAxpyTest, UsePjrtCppWrapper) {
 
 TEST_F(StableHloAxpyTest, RegisterAPIAndRetrieve) {
   const char* device = "MyFancyCPUDevice";
-  EXPECT_THAT(GetCApiClient(device), ::testing::Not(::tsl::testing::IsOk()));
-  EXPECT_THAT(pjrt::PjrtApi(device), ::testing::Not(::tsl::testing::IsOk()));
+  EXPECT_THAT(GetCApiClient(device), ::testing::Not(absl_testing::IsOk()));
+  EXPECT_THAT(pjrt::PjrtApi(device), ::testing::Not(absl_testing::IsOk()));
 
   const PJRT_Api* c_api = GetPjrtApi();
   EXPECT_THAT(c_api, NotNull());
   TF_EXPECT_OK(pjrt::SetPjrtApi(device, c_api));
 
-  EXPECT_THAT(GetCApiClient(device), ::tsl::testing::IsOk());
-  EXPECT_THAT(pjrt::PjrtApi(device), ::tsl::testing::IsOk());
+  EXPECT_THAT(GetCApiClient(device), absl_testing::IsOk());
+  EXPECT_THAT(pjrt::PjrtApi(device), absl_testing::IsOk());
 }
 
 TEST_F(StableHloAxpyTest, CompileCPUTestProgram) {
@@ -175,7 +176,7 @@ TEST_F(StableHloAxpyTest, CompileAndExecuteCPUTestProgram) {
 
   // Convert result buffer back to literal.
   TF_ASSERT_OK_AND_ASSIGN(std::shared_ptr<Literal> axpy_result_literal,
-                          axpy_result[0][0]->ToLiteralSync());
+                          axpy_result[0][0]->ToLiteral().Await());
 
   // Check to make sure that our results match what we expect.
   xla::LiteralTestUtil::ExpectR1Near<float>({13.64f, 26.78f, 39.92f, 53.06f},

@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <cstdint>
 
+#include "absl/log/check.h"
 #include "absl/synchronization/mutex.h"
 #include "tsl/platform/logging.h"
 
@@ -40,12 +41,12 @@ void Semaphore::Acquire(int64_t amount) {
 
   mu_.LockWhen(absl::Condition(&CanAcquire, &args));
   value_ -= amount;
-  mu_.Unlock();
+  mu_.unlock();
 }
 
 bool Semaphore::TryAcquire(int64_t amount) {
   CHECK_GE(amount, 0);
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   if (value_ >= amount) {
     value_ -= amount;
     return true;
@@ -55,7 +56,7 @@ bool Semaphore::TryAcquire(int64_t amount) {
 
 void Semaphore::Release(int64_t amount) {
   CHECK_GE(amount, 0);
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   value_ += amount;
 }
 

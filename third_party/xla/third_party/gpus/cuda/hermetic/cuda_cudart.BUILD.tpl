@@ -1,8 +1,12 @@
 licenses(["restricted"])  # NVIDIA proprietary license
 load(
-    "@local_xla//xla/tsl/platform/default:cuda_build_defs.bzl",
+    "@xla//xla/tsl/platform/default:cuda_build_defs.bzl",
     "cuda_rpath_flags",
 )
+
+exports_files([
+    "include/cuda.h",
+])
 
 filegroup(
     name = "static",

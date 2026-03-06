@@ -15,18 +15,26 @@ limitations under the License.
 
 #include "xla/backends/gpu/runtime/gemm_thunk.h"
 
+#include <memory>
 #include <optional>
 #include <utility>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "xla/backends/gpu/runtime/thunk.h"
+#include "xla/backends/gpu/runtime/thunk.pb.h"
+#include "xla/runtime/buffer_use.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/gpu/buffer_allocations.h"
 #include "xla/service/gpu/matmul_utils.h"
-#include "xla/stream_executor/device_memory.h"
+#include "xla/shape_util.h"
+#include "xla/stream_executor/device_address.h"
+#include "xla/stream_executor/gpu/gpu_blas_lt.h"
 #include "xla/stream_executor/stream.h"
-#include "tsl/platform/logging.h"
-#include "tsl/platform/statusor.h"
+#include "xla/tsl/platform/statusor.h"
+#include "tsl/profiler/lib/nvtx_utils.h"
 
 namespace xla {
 namespace gpu {
@@ -48,7 +56,7 @@ GemmThunk::GemmThunk(ThunkInfo thunk_info, GemmConfig config,
 absl::Status GemmThunk::ExecuteOnStream(const ExecuteParams& params) {
   VLOG(3) << "Running GEMM thunk";
   const BufferAllocations& allocs = *params.buffer_allocations;
-  se::DeviceMemoryBase workspace(/*opaque=*/nullptr, /*size=*/0);
+  se::DeviceAddressBase workspace(/*opaque=*/nullptr, /*size=*/0);
   if (workspace_.has_value()) {
     workspace = allocs.GetDeviceAddress(workspace_.value());
   }
@@ -56,9 +64,15 @@ absl::Status GemmThunk::ExecuteOnStream(const ExecuteParams& params) {
       se::Stream * stream,
       GetStreamForExecution(Thunk::execution_stream_id(), params));
 
+  // Sanitizer initcheck may return false positives for TMA (DTCS-1123).
+  auto output = allocs.GetDeviceAddress(output_buffer_);
+  tsl::profiler::MarkMemoryInitialized(
+      output.opaque(), output.size(),
+      static_cast<tsl::profiler::StreamHandle>(
+          stream->platform_specific_handle().stream));
+
   return RunGemm(config_, allocs.GetDeviceAddress(lhs_buffer_),
-                 allocs.GetDeviceAddress(rhs_buffer_),
-                 allocs.GetDeviceAddress(output_buffer_), workspace,
+                 allocs.GetDeviceAddress(rhs_buffer_), output, workspace,
                  deterministic_, stream);
 }
 
@@ -67,6 +81,65 @@ absl::Status GemmThunk::Initialize(const InitializeParams& params) {
     return absl::InternalError("Failed to initialize BLAS support");
   }
   return absl::OkStatus();
+}
+
+Thunk::BufferUses GemmThunk::buffer_uses() const {
+  BufferUses res{
+      BufferUse::Read(lhs_buffer_, config_.lhs_layout.ToShape()),
+      BufferUse::Read(rhs_buffer_, config_.rhs_layout.ToShape()),
+      BufferUse::Write(output_buffer_, config_.output_layout.ToShape()),
+  };
+
+  if (workspace_.has_value()) {
+    res.push_back(BufferUse::Write(
+        *workspace_, ShapeUtil::MakeShape(S8, {workspace_->size()})));
+  }
+
+  return res;
+}
+
+absl::StatusOr<ThunkProto> GemmThunk::ToProto() const {
+  ThunkProto proto;
+  *proto.mutable_thunk_info() = thunk_info().ToProto();
+
+  auto* gemm_thunk_proto = proto.mutable_gemm_thunk();
+  *gemm_thunk_proto->mutable_gemm_config() = config_.ToProto();
+  TF_ASSIGN_OR_RETURN(*gemm_thunk_proto->mutable_lhs_buffer(),
+                      lhs_buffer_.ToProto());
+  TF_ASSIGN_OR_RETURN(*gemm_thunk_proto->mutable_rhs_buffer(),
+                      rhs_buffer_.ToProto());
+  TF_ASSIGN_OR_RETURN(*gemm_thunk_proto->mutable_output_buffer(),
+                      output_buffer_.ToProto());
+  if (workspace_.has_value()) {
+    TF_ASSIGN_OR_RETURN(*gemm_thunk_proto->mutable_workspace(),
+                        workspace_.value().ToProto());
+  }
+  gemm_thunk_proto->set_deterministic(deterministic_);
+  return proto;
+}
+
+absl::StatusOr<std::unique_ptr<GemmThunk>> GemmThunk::FromProto(
+    ThunkInfo thunk_info, const GemmThunkProto& proto,
+    absl::Span<const BufferAllocation> buffer_allocations) {
+  TF_ASSIGN_OR_RETURN(stream_executor::gpu::GemmConfig config,
+                      GemmConfig::FromProto(proto.gemm_config()));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice lhs_buffer,
+                      BufferAllocation::Slice::FromProto(proto.lhs_buffer(),
+                                                         buffer_allocations));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice rhs_buffer,
+                      BufferAllocation::Slice::FromProto(proto.rhs_buffer(),
+                                                         buffer_allocations));
+  TF_ASSIGN_OR_RETURN(BufferAllocation::Slice output_buffer,
+                      BufferAllocation::Slice::FromProto(proto.output_buffer(),
+                                                         buffer_allocations));
+  std::optional<BufferAllocation::Slice> workspace;
+  if (proto.has_workspace()) {
+    TF_ASSIGN_OR_RETURN(workspace, BufferAllocation::Slice::FromProto(
+                                       proto.workspace(), buffer_allocations));
+  }
+  return std::make_unique<GemmThunk>(thunk_info, GemmConfig(config), lhs_buffer,
+                                     rhs_buffer, output_buffer, workspace,
+                                     proto.deterministic());
 }
 
 }  // namespace gpu

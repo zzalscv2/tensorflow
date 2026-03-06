@@ -20,20 +20,22 @@ limitations under the License.
 
 #include <gmock/gmock.h>
 #include "absl/cleanup/cleanup.h"
+#include "absl/log/check.h"
 #include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
+#include "mlir/IR/MLIRContext.h"  // from @llvm-project
 #include "mlir/IR/OwningOpRef.h"  // from @llvm-project
 #include "mlir/Parser/Parser.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_dialect.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_saved_model.h"
-#include "xla/tsl/platform/status.h"
-#include "xla/tsl/platform/status_matchers.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/util/tensor_bundle/tensor_bundle.h"
 
@@ -46,7 +48,6 @@ using ::tensorflow::test::ExpectEqual;
 using ::testing::IsEmpty;
 using ::testing::Not;
 using ::testing::UnorderedElementsAre;
-using ::tsl::testing::IsOk;
 
 // This fixture simply wraps the Env and MLIRContext.
 class SaveVariablesToCheckpointTest : public ::testing::Test {
@@ -62,7 +63,7 @@ class SaveVariablesToCheckpointTest : public ::testing::Test {
       return absl::InternalError("Failed to create temp file.");
     }
 
-    TF_CHECK_OK(env_->CreateDir(tmp_dir));
+    CHECK_OK(env_->CreateDir(tmp_dir));
     return tmp_dir;
   }
 
@@ -102,8 +103,8 @@ TEST_F(SaveVariablesToCheckpointTest, VariableSavedToCheckpoint) {
 
   const absl::Cleanup checkpoint_prefix_cleanup = [this, &checkpoint_prefix]() {
     int64_t undeleted_files, undeleted_dirs;
-    TF_CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
-                                        &undeleted_dirs));
+    CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
+                                     &undeleted_dirs));
   };
 
   const absl::StatusOr<std::vector<std::string>> variable_shared_names =
@@ -148,8 +149,8 @@ TEST_F(SaveVariablesToCheckpointTest, MultipleVariablesSavedToCheckpoint) {
 
   const absl::Cleanup checkpoint_prefix_cleanup = [this, &checkpoint_prefix]() {
     int64_t undeleted_files, undeleted_dirs;
-    TF_CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
-                                        &undeleted_dirs));
+    CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
+                                     &undeleted_dirs));
   };
 
   const absl::StatusOr<std::vector<std::string>> variable_shared_names =
@@ -185,8 +186,8 @@ TEST_F(SaveVariablesToCheckpointTest,
 
   const absl::Cleanup checkpoint_prefix_cleanup = [this, &checkpoint_prefix]() {
     int64_t undeleted_files, undeleted_dirs;
-    TF_CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
-                                        &undeleted_dirs));
+    CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
+                                     &undeleted_dirs));
   };
 
   const absl::StatusOr<std::vector<std::string>> variable_shared_names =
@@ -196,7 +197,7 @@ TEST_F(SaveVariablesToCheckpointTest,
 
   // Verify that the checkpoint doesn't exist.
   BundleReader bundle_reader(env_, *checkpoint_prefix);
-  EXPECT_THAT(bundle_reader.status(), Not(IsOk()));
+  EXPECT_THAT(bundle_reader.status(), Not(absl_testing::IsOk()));
 }
 
 TEST_F(SaveVariablesToCheckpointTest,
@@ -217,8 +218,8 @@ TEST_F(SaveVariablesToCheckpointTest,
 
   const absl::Cleanup checkpoint_prefix_cleanup = [this, &checkpoint_prefix]() {
     int64_t undeleted_files, undeleted_dirs;
-    TF_CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
-                                        &undeleted_dirs));
+    CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
+                                     &undeleted_dirs));
   };
 
   EXPECT_TRUE(
@@ -226,7 +227,7 @@ TEST_F(SaveVariablesToCheckpointTest,
 
   // Verify that the checkpoint doesn't exist.
   BundleReader bundle_reader(env_, *checkpoint_prefix);
-  EXPECT_THAT(bundle_reader.status(), Not(IsOk()));
+  EXPECT_THAT(bundle_reader.status(), Not(absl_testing::IsOk()));
 }
 
 TEST_F(SaveVariablesToCheckpointTest,
@@ -252,8 +253,8 @@ TEST_F(SaveVariablesToCheckpointTest,
 
   const absl::Cleanup checkpoint_prefix_cleanup = [this, &checkpoint_prefix]() {
     int64_t undeleted_files, undeleted_dirs;
-    TF_CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
-                                        &undeleted_dirs));
+    CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
+                                     &undeleted_dirs));
   };
 
   const absl::StatusOr<std::vector<std::string>> variable_shared_names =
@@ -263,7 +264,7 @@ TEST_F(SaveVariablesToCheckpointTest,
 
   // Verify that the checkpoint doesn't exist.
   BundleReader bundle_reader(env_, *checkpoint_prefix);
-  EXPECT_THAT(bundle_reader.status(), Not(IsOk()));
+  EXPECT_THAT(bundle_reader.status(), Not(absl_testing::IsOk()));
 }
 
 TEST_F(SaveVariablesToCheckpointTest, MutableVariablesNotSaved) {
@@ -292,8 +293,8 @@ TEST_F(SaveVariablesToCheckpointTest, MutableVariablesNotSaved) {
 
   const absl::Cleanup checkpoint_prefix_cleanup = [this, &checkpoint_prefix]() {
     int64_t undeleted_files, undeleted_dirs;
-    TF_CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
-                                        &undeleted_dirs));
+    CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
+                                     &undeleted_dirs));
   };
 
   const absl::StatusOr<std::vector<std::string>> variable_shared_names =
@@ -302,7 +303,7 @@ TEST_F(SaveVariablesToCheckpointTest, MutableVariablesNotSaved) {
   EXPECT_THAT(*variable_shared_names, IsEmpty());
 
   BundleReader bundle_reader(env_, *checkpoint_prefix);
-  EXPECT_THAT(bundle_reader.status(), Not(IsOk()));
+  EXPECT_THAT(bundle_reader.status(), Not(absl_testing::IsOk()));
 }
 
 TEST_F(SaveVariablesToCheckpointTest,
@@ -329,8 +330,8 @@ TEST_F(SaveVariablesToCheckpointTest,
 
   const absl::Cleanup checkpoint_prefix_cleanup = [this, &checkpoint_prefix]() {
     int64_t undeleted_files, undeleted_dirs;
-    TF_CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
-                                        &undeleted_dirs));
+    CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
+                                     &undeleted_dirs));
   };
 
   const absl::StatusOr<std::vector<std::string>> variable_shared_names =
@@ -339,7 +340,7 @@ TEST_F(SaveVariablesToCheckpointTest,
   EXPECT_THAT(*variable_shared_names, IsEmpty());
 
   BundleReader bundle_reader(env_, *checkpoint_prefix);
-  EXPECT_THAT(bundle_reader.status(), Not(IsOk()));
+  EXPECT_THAT(bundle_reader.status(), Not(absl_testing::IsOk()));
 }
 
 TEST_F(SaveVariablesToCheckpointTest, FailsWhenDuplicateSharedName) {
@@ -370,8 +371,8 @@ TEST_F(SaveVariablesToCheckpointTest, FailsWhenDuplicateSharedName) {
 
   const absl::Cleanup checkpoint_prefix_cleanup = [this, &checkpoint_prefix]() {
     int64_t undeleted_files, undeleted_dirs;
-    TF_CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
-                                        &undeleted_dirs));
+    CHECK_OK(env_->DeleteRecursively(*checkpoint_prefix, &undeleted_files,
+                                     &undeleted_dirs));
   };
 
   EXPECT_FALSE(

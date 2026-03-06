@@ -19,9 +19,9 @@ cc_library(
     srcs = ["buffer_use.cc"],
     hdrs = ["buffer_use.h"],
     deps = [
+        "//xla:shape_util",
         "//xla/service:buffer_assignment",
         "@com_google_absl//absl/algorithm:container",
-        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/types:span",
     ],
 )
@@ -31,10 +31,11 @@ xla_cc_test(
     srcs = ["buffer_use_test.cc"],
     deps = [
         ":buffer_use",
+        "//xla:shape_util",
         "//xla/service:buffer_assignment",
+        "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-        "@local_tsl//tsl/platform:test",
     ],
 )
 
@@ -47,6 +48,7 @@ cc_library(
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:span",
     ],
 )
@@ -89,12 +91,44 @@ xla_cc_test(
         ":buffer_use",
         ":execution_graph",
         ":resource_use",
+        "//xla:shape_util",
         "//xla/service:buffer_assignment",
         "//xla/tsl/platform:statusor",
         "//xla/tsl/platform:test",
         "//xla/tsl/platform:test_main",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "hang_watchdog",
+    srcs = ["hang_watchdog.cc"],
+    hdrs = ["hang_watchdog.h"],
+    deps = [
+        "//xla/tsl/platform:env",
+        "@com_google_absl//absl/base",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/functional:any_invocable",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/time",
+    ],
+)
+
+xla_cc_test(
+    name = "hang_watchdog_test",
+    srcs = ["hang_watchdog_test.cc"],
+    deps = [
+        ":hang_watchdog",
+        "//xla/tsl/platform:env",
+        "//xla/tsl/platform:test",
+        "//xla/tsl/platform:test_main",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/time",
     ],
 )
 
@@ -129,22 +163,80 @@ xla_cc_test(
 )
 
 cc_library(
-    name = "thunk",
-    hdrs = ["thunk.h"],
-)
-
-cc_library(
-    name = "workgroup_dim",
-    hdrs = ["workgroup_dim.h"],
+    name = "work_cluster",
+    hdrs = ["work_cluster.h"],
     deps = [
         "@com_google_absl//absl/strings:str_format",
     ],
 )
 
 cc_library(
+    name = "work_group",
+    hdrs = ["work_group.h"],
+    deps = [
+        "@com_google_absl//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "work_item",
+    hdrs = ["work_item.h"],
+    deps = ["@com_google_absl//absl/strings:str_format"],
+)
+
+cc_library(
     name = "device_id",
     hdrs = ["device_id.h"],
     deps = [
+        "//xla/tsl/distributed_runtime/coordination:coordination_service",
         "//xla/tsl/lib/gtl:int_type",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "chip_id",
+    hdrs = ["chip_id.h"],
+    deps = [
+        "//xla/tsl/lib/gtl:int_type",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "process_id",
+    hdrs = ["process_id.h"],
+    deps = [
+        "//xla/tsl/lib/gtl:int_type",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "work_dimensions",
+    hdrs = ["work_dimensions.h"],
+    deps = [
+        ":work_cluster",
+        ":work_group",
+        ":work_item",
+        ":work_tile_size",
+        "@com_google_absl//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "work_tile_size",
+    hdrs = ["work_tile_size.h"],
+    deps = [
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
     ],
 )

@@ -1138,7 +1138,8 @@ to be batched.}]>:$captured_tensors,
     DefaultValuedOptionalAttr<I64Attr, "0">:$low_priority_max_enqueued_batches,
     DefaultValuedOptionalAttr<TF_AnyStrAttrOf<["low_priority_padding_with_max_batch_size", "low_priority_padding_with_next_allowed_batch_size", "priority_isolation", "priority_merge"]>, "\"low_priority_padding_with_max_batch_size\"">:$mixed_priority_policy,
     DefaultValuedOptionalAttr<TF_AnyStrAttrOf<["PAD_UP", "BATCH_DOWN", "MINIMIZE_TPU_COST_PER_REQUEST"]>, "\"PAD_UP\"">:$batch_padding_policy,
-    DefaultValuedOptionalAttr<BoolAttr, "false">:$enable_large_batch_splitting
+    DefaultValuedOptionalAttr<BoolAttr, "false">:$enable_large_batch_splitting,
+    DefaultValuedOptionalAttr<BoolAttr, "false">:$enable_priority_aware_batch_scheduler
   );
 
   let results = (outs
@@ -3475,6 +3476,31 @@ With `src_format` of `NHWC`, `dst_format` of `NCHW`, and input:
       return ArraysAreCastCompatible(inferred, actual);
     }
   }];
+}
+
+def TF_DebugIdentityOp : TF_Op<"DebugIdentity", [TF_SameOperandsAndResultTypeResolveRef]> {
+  let summary = [{
+Provides an identity mapping of the non-Ref type input tensor for debugging.
+  }];
+
+  let description = [{
+Provides an identity mapping of the non-Ref type input tensor for debugging.
+  }];
+
+  let arguments = (ins
+    Arg<TF_Tensor, [{Input tensor, non-Reference type}]>:$input,
+
+    DefaultValuedOptionalAttr<StrAttr, "\"\"">:$device_name,
+    DefaultValuedOptionalAttr<StrAttr, "\"\"">:$tensor_name,
+    DefaultValuedOptionalAttr<StrArrayAttr, "{}">:$debug_urls,
+    DefaultValuedOptionalAttr<BoolAttr, "false">:$gated_grpc
+  );
+
+  let results = (outs
+    TF_Tensor:$output
+  );
+
+  TF_DerivedOperandTypeAttr T = TF_DerivedOperandTypeAttr<0>;
 }
 
 def TF_DebugIdentityV2Op : TF_Op<"DebugIdentityV2", []> {
@@ -6122,6 +6148,90 @@ computation for better efficiency.}]>:$reserve_space_3
     StringRef GetOptimalLayout(const RuntimeDevices& devices);
     LogicalResult UpdateDataFormat(StringRef data_format);
   }];
+}
+
+def TF_FusedConv2DBiasActivationOp : TF_Op<"FusedConv2DBiasActivation", [Pure]> {
+  let summary = [{
+    Computes a fused kernel which implements: 2-D convolution, adds side input,
+  }];
+
+  let description = [{
+with separate scaling on convolution and side inputs, then adds bias and
+    applies the RELU activation function to the result. Supports both float and
+    qint8 data formats. In the case of qint8, the output is clipped to [0..127].
+
+    conv_input: A tensor with format as specified by `data_format` (see below).
+    filter: A tensor with format depending on `data_format` as follows:
+        "NHWC", "NCHW":
+             `float [ filter_height, filter_width, in_channels, out_channels ]`
+        "NCHW_VECT_C":
+             `qint8 [ out_channels, in_channels, filter_height, filter_width ]`
+    bias: 1-D float tensor with size matching the `out_channels` dimension of
+        `filter`.
+        Note: this tensor is still float, even if other inputs are qint8.
+    side_input: A tensor with format as specified by `data_format` (see below).
+        This tensor will be ignored and can be [] if side_input_scale == 0.
+        Otherwise, the size of each dimension must match the `output` tensor.
+    conv_input_scale: scalar float value to be multiplied by `conv_input`.
+        (conceptually.. in reality it is applied after convolution).
+        For the CPU version, this can also be a 1-D Tensor of per output-channel
+        scales.
+    side_input_scale: scalar float value to be multiplied by `side_input`.
+    output: A tensor with format as specified by `data_format` (see below).
+        The dimension sizes are determined automatically based on other inputs
+        and attributes.
+    T: The element data type of `conv_input`, `side_input` and `output` tensors.
+        Note: must match with the `data_format`.
+    Tbias: The element data type of `bias`.
+    strides: 1-D tensor of length 4.  The stride of the sliding window for each
+        dimension of `input`. The dimension order is determined by the value of
+        `data_format`, see below for details.
+        Note: the stride for batch and channel dimensions must be 1.
+    padding: The type of padding algorithm to use.
+    data_format: A string specifying the data format of `conv_input`,
+        `side_input` and `output` tensors with the following options:
+        "NHWC": `float [ batch, height, width, channels ]`
+        "NCHW": `float [ batch, channels, height, width ]`
+        "NCHW_VECT_C":
+            `qint8 [ batch, channels / 4, height, width, channels % 4 ]`
+        Note: for "NCHW_VECT_C", `channels` must be a multiple of 4.
+    filter_format: A string specifying the data format of `filter`,
+        "HWIO": `float [ kernel_height, kernel_width, input_channels,
+                         output_channels ]`
+        "OIHW_VECT_I":
+            `qint8 [ output_channels, input_channels / 4,
+                     kernel_height, kernel_width, input_channels % 4 ]`
+    activation_mode: The activation applied to the output.
+        Must be "Relu" or "None".
+    dilations: 1-D tensor of length 4.  The dilation factor for each dimension
+        of `input`. If set to k > 1, there will be k-1 skipped cells between
+        each filter element on that dimension. The dimension order is determined
+        by the value of `data_format`, see above for details. Dilations in the
+        batch and depth dimensions must be 1.
+  }];
+
+  let arguments = (ins
+    TensorOf<[TF_Float16, TF_Float32, TF_Qint8]>:$conv_input,
+    TensorOf<[TF_Float16, TF_Float32, TF_Qint8]>:$filter,
+    TensorOf<[TF_Float16, TF_Float32]>:$bias,
+    TensorOf<[TF_Float16, TF_Float32, TF_Qint8]>:$side_input,
+    TF_Float32Tensor:$conv_input_scale,
+    TF_Float32Tensor:$side_input_scale,
+
+    I64ArrayAttr:$strides,
+    TF_AnyStrAttrOf<["SAME", "VALID"]>:$padding,
+    DefaultValuedOptionalAttr<TF_AnyStrAttrOf<["NHWC", "NCHW", "NCHW_VECT_C"]>, "\"NHWC\"">:$data_format,
+    DefaultValuedOptionalAttr<TF_AnyStrAttrOf<["HWIO", "OIHW", "OIHW_VECT_I"]>, "\"HWIO\"">:$filter_format,
+    DefaultValuedOptionalAttr<TF_AnyStrAttrOf<["Relu", "None"]>, "\"Relu\"">:$activation_mode,
+    DefaultValuedOptionalAttr<I64ArrayAttr, "{1, 1, 1, 1}">:$dilations
+  );
+
+  let results = (outs
+    TensorOf<[TF_Float16, TF_Float32, TF_Qint8]>:$output
+  );
+
+  TF_DerivedOperandTypeAttr T = TF_DerivedOperandTypeAttr<0>;
+  TF_DerivedOperandTypeAttr Tbias = TF_DerivedOperandTypeAttr<2>;
 }
 
 def TF_GatherOp : TF_Op<"Gather", [Pure]> {
@@ -11388,6 +11498,26 @@ representation of that entry.
   TF_DerivedOperandTypeAttr T = TF_DerivedOperandTypeAttr<0>;
 }
 
+def TF_PostProcessPredictionOp : TF_Op<"PostProcessPrediction", []> {
+  let summary = [{
+Performs post-processing on prediction inputs. This op has no tensor outputs.
+  }];
+
+  let description = [{
+Send an rpc to the external service that builds rpc payload based on prediction result.
+  }];
+
+  let arguments = (ins
+    Arg<TF_Int64Tensor, [{Scalar int64 tensor representing steps.}]>:$steps,
+    Arg<TF_Int64Tensor, [{Scalar int64 tensor representing the GAIA ID.}]>:$gaia_id,
+    Arg<TF_Uint64Tensor, [{1-D uint64 tensor representing a list of video IDs.}]>:$video_id,
+
+    StrAttr:$op_config
+  );
+
+  let results = (outs);
+}
+
 def TF_PowOp : TF_Op<"Pow", [Pure, ResultsBroadcastableShape, TF_SameOperandsAndResultElementTypeResolveRef]>,
                WithBroadcastableBinOpBuilder {
   let summary = "Computes the power of one value to another.";
@@ -11957,7 +12087,7 @@ the dimension is padded with zeros.
   }];
 
   let arguments = (ins
-    Arg<TF_F32OrF64Tensor, [{A float32 tensor.}]>:$input,
+    Arg<TF_F32OrF64Tensor, [{A float32 or float64 tensor.}]>:$input,
     Arg<TF_Int32Tensor, [{An int32 tensor of shape [1]. The FFT length.}]>:$fft_length
   );
 
@@ -11993,7 +12123,7 @@ the dimension is padded with zeros.
   }];
 
   let arguments = (ins
-    Arg<TF_F32OrF64Tensor, [{A float32 tensor.}]>:$input,
+    Arg<TF_F32OrF64Tensor, [{A float32 or float64 tensor.}]>:$input,
     Arg<TF_Int32Tensor, [{An int32 tensor of shape [2]. The FFT length for each dimension.}]>:$fft_length
   );
 
@@ -12030,7 +12160,7 @@ the dimension is padded with zeros.
   }];
 
   let arguments = (ins
-    Arg<TF_F32OrF64Tensor, [{A float32 tensor.}]>:$input,
+    Arg<TF_F32OrF64Tensor, [{A float32 or float64 tensor.}]>:$input,
     Arg<TF_Int32Tensor, [{An int32 tensor of shape [3]. The FFT length for each dimension.}]>:$fft_length
   );
 
@@ -15382,7 +15512,7 @@ e.g. Max(segment_ids) should be equal to `num_segments` - 1 for a 1-d segment_id
 With inconsistent num_segments, the op still runs. only difference is,
 the output takes the size of num_segments irrespective of size of segment_ids and data.
 for num_segments less than expected output size, the last elements are ignored
-for num_segments more than the expected output size, last elements are assigned
+for num_segments more than the expected output size, last elements are assigned 
 smallest possible value for the specific numeric type.
 
 For example:
@@ -15552,7 +15682,7 @@ e.g. Max(segment_ids) should be equal to `num_segments` - 1 for a 1-d segment_id
 With inconsistent num_segments, the op still runs. only difference is,
 the output takes the size of num_segments irrespective of size of segment_ids and data.
 for num_segments less than expected output size, the last elements are ignored
-for num_segments more than the expected output size, last elements are assigned
+for num_segments more than the expected output size, last elements are assigned 
 the largest possible value for the specific numeric type.
 
 For example:
@@ -15658,7 +15788,7 @@ The only difference with SegmentProd is the additional input  `num_segments`.
 This helps in evaluating the output shape in compile time.
 `num_segments` should be consistent with segment_ids.
 e.g. Max(segment_ids) - 1 should be equal to `num_segments` for a 1-d segment_ids
-With inconsistent num_segments, the op still runs. only difference is,
+With inconsistent num_segments, the op still runs. only difference is, 
 the output takes the size of num_segments irrespective of size of segment_ids and data.
 for num_segments less than expected output size, the last elements are ignored
 for num_segments more than the expected output size, last elements are assigned 1.
@@ -18835,6 +18965,7 @@ This operation holds the metadata common to operations of a `tpu.replicate()` co
     DefaultValuedOptionalAttr<StrAttr, "\"STEP_MARK_AT_ENTRY\"">:$step_marker_location,
     DefaultValuedOptionalAttr<BoolAttr, "false">:$allow_soft_placement,
     DefaultValuedOptionalAttr<BoolAttr, "false">:$use_spmd_for_xla_partitioning,
+    DefaultValuedOptionalAttr<BoolAttr, "false">:$use_shardy_partitioner,
     DefaultValuedOptionalAttr<StrAttr, "\"\"">:$tpu_compile_options_proto
   );
 
@@ -19470,13 +19601,14 @@ def TF_TensorListGetItemOp : TF_Op<"TensorListGetItem", [Pure]> {
   let arguments = (ins
     TF_VariantTensor:$input_handle,
     TF_Int32Tensor:$index,
-    TF_Int32Tensor:$element_shape
+    TF_I32OrI64Tensor:$element_shape
   );
 
   let results = (outs
     TF_Tensor:$item
   );
 
+  TF_DerivedOperandTypeAttr Tshape = TF_DerivedOperandTypeAttr<2>;
   TF_DerivedResultTypeAttr element_dtype = TF_DerivedResultTypeAttr<0>;
 
   let hasCanonicalizer = 1;

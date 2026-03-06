@@ -1,3 +1,5 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//tensorflow:strict.default.bzl", "py_strict_binary", "py_strict_library")
 load(
     "//tensorflow:tensorflow.bzl",
@@ -6,6 +8,7 @@ load(
     "tf_features_nolayering_check_if_ios",
 )
 load("//tensorflow:tensorflow.default.bzl", "pybind_extension")
+load("//tensorflow/core/platform:build_config_root.bzl", "if_pywrap")
 load(
     "//tensorflow/lite:build_def.bzl",
     "tflite_custom_android_library",
@@ -23,7 +26,7 @@ load("//tensorflow/lite/testing:tflite_model_test.bzl", "tflite_model_test")
 # copybara:uncomment(oss-unused) load("//tools/build_defs/build_test:build_test.bzl", "build_test")
 
 package(
-    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = [
         "//visibility:public",
     ],
@@ -103,10 +106,10 @@ _test_size_override = {
         "@com_googlesource_code_re2//:re2",
     ] + select({
         "//conditions:default": [
-            "@local_tsl//tsl/platform:env",
-            "@local_tsl//tsl/platform:status",
-            "@local_xla//xla/tsl/platform:subprocess",
-            "@local_xla//xla/tsl/util:command_line_flags",
+            "@tsl//tsl/platform:env",
+            "@tsl//tsl/platform:status",
+            "@xla//xla/tsl/platform:subprocess",
+            "@xla//xla/tsl/util:command_line_flags",
         ],
         "//tensorflow:android": [
             "//tensorflow/core:portable_tensorflow_lib",
@@ -170,7 +173,6 @@ py_strict_library(
     name = "zip_test_utils",
     srcs = ["zip_test_utils.py"],
     deps = [
-        ":_pywrap_string_util",
         ":generate_examples_report",
         "//tensorflow:tensorflow_py",
         "//tensorflow/lite/python:lite",
@@ -179,7 +181,14 @@ py_strict_library(
         "//tensorflow/python/saved_model:signature_constants",
         "//third_party/py/numpy",
         "@ml_dtypes_py//ml_dtypes",
-    ],
+    ] + if_pywrap(
+        if_false = [
+            ":_pywrap_string_util",
+        ],
+        if_true = [
+            "//tensorflow/lite/python:pywrap_tflite",
+        ],
+    ),
 )
 
 py_strict_binary(
@@ -189,7 +198,9 @@ py_strict_binary(
         ":generate_examples_lib",
         ":mlir_convert",
         "//tensorflow:tensorflow_py",
-    ],
+    ] + if_pywrap(
+        if_true = ["//tensorflow/python:_pywrap_tensorflow"],
+    ),
 )
 
 py_strict_library(
@@ -264,6 +275,7 @@ cc_library(
     hdrs = ["split.h"],
     deps = [
         "//tensorflow/lite:string",
+        "//tensorflow/lite/types:half",
         "@eigen_archive//:eigen3",
     ],
 )
@@ -275,7 +287,9 @@ cc_test(
     deps = [
         ":split",
         "//tensorflow/lite:string",
+        "//tensorflow/lite/types:half",
         "@com_google_googletest//:gtest_main",
+        "@eigen_archive//:eigen3",
     ],
 )
 
@@ -322,6 +336,7 @@ cc_library(
         "//tensorflow/lite/tools:logging",
         "//tensorflow/lite/tools/delegates:delegate_provider_hdr",
         "//tensorflow/lite/tools/evaluation:utils",
+        "//tensorflow/lite/types:half",
         "@com_google_absl//absl/strings",
         "@eigen_archive//:eigen3",
     ] + select({
@@ -395,10 +410,10 @@ cc_library(
     name = "util",
     hdrs = ["util.h"],
     deps = [
-        "//tensorflow/lite:error_reporter",
         "//tensorflow/lite:string",
         "//tensorflow/lite/core/api",
-        "@local_tsl//tsl/platform:logging",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/log:flags",
     ],
 )
 
@@ -640,7 +655,7 @@ cc_library(
         "//tensorflow/lite/python/interpreter_wrapper:numpy",
         "//tensorflow/lite/python/interpreter_wrapper:python_utils",
         "@com_google_absl//absl/strings",
-        "@local_xla//third_party/python_runtime:headers",
+        "@xla//third_party/python_runtime:headers",
     ],
 )
 
@@ -698,17 +713,22 @@ pybind_extension(
     additional_stubgen_deps = [
         "//third_party/py/numpy:numpy",
     ],
+    common_lib_packages = [
+        "litert/python",
+        "tensorflow/lite/python",
+    ],
     enable_stub_generation = True,
     features = ["-use_header_modules"],
     pytype_srcs = [
         "_pywrap_string_util.pyi",
     ],
+    wrap_py_init = True,
     deps = [
         ":string_util_lib",
         "//tensorflow/lite/python/interpreter_wrapper:numpy",
         "//tensorflow/python/lib/core:pybind11_lib",
-        "@local_xla//third_party/python_runtime:headers",
         "@pybind11",
+        "@xla//third_party/python_runtime:headers",
     ],
 )
 

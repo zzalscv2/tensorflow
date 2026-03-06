@@ -15,6 +15,7 @@ filegroup(
         "async_value_ref.h",
         "chain.h",
         "concurrent_vector.h",
+        "executor.h",
         "ref_count.h",
     ],
     compatible_with = get_compatible_with_portable(),
@@ -43,9 +44,12 @@ cc_library(
     compatible_with = get_compatible_with_portable(),
     deps = [
         ":concurrent_vector",
+        ":executor",
         ":ref_count",
         "//xla/tsl/platform:logging",
+        "//xla/tsl/util:safe_reinterpret_cast",
         "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/base:no_destructor",
         "@com_google_absl//absl/container:inlined_vector",
         "@com_google_absl//absl/functional:any_invocable",
         "@com_google_absl//absl/status",
@@ -53,7 +57,7 @@ cc_library(
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/types:span",
-        "@local_tsl//tsl/platform:context",
+        "@tsl//tsl/platform:context",
     ],
 )
 
@@ -74,6 +78,7 @@ tsl_cc_test(
     srcs = ["async_value_ptr_test.cc"],
     deps = [
         ":async_value",
+        ":executor",
         "//xla/tsl/platform:test",
         "//xla/tsl/platform:test_benchmark",
         "//xla/tsl/platform:test_main",
@@ -89,10 +94,12 @@ tsl_cc_test(
     srcs = ["async_value_ref_test.cc"],
     deps = [
         ":async_value",
+        ":executor",
         ":ref_count",
         "//xla/tsl/platform:test",
         "//xla/tsl/platform:test_benchmark",
         "//xla/tsl/platform:test_main",
+        "@com_google_absl//absl/base:no_destructor",
         "@com_google_absl//absl/functional:any_invocable",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -117,9 +124,86 @@ tsl_cc_test(
     deps = [
         ":concurrent_vector",
         "//xla/tsl/platform:env",
-        "//xla/tsl/platform:env_impl",
+        "//xla/tsl/platform:env_impl",  # buildcleaner: keep
         "//xla/tsl/platform:test",
         "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "executor",
+    hdrs = ["executor.h"],
+    compatible_with = get_compatible_with_portable(),
+    deps = [
+        "@com_google_absl//absl/base:no_destructor",
+        "@com_google_absl//absl/functional:any_invocable",
+    ],
+)
+
+cc_library(
+    name = "future",
+    srcs = ["future.cc"],
+    hdrs = ["future.h"],
+    compatible_with = get_compatible_with_portable(),
+    deps = [
+        ":async_value",
+        ":executor",
+        ":ref_count",
+        "//xla/tsl/platform:logging",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/base:no_destructor",
+        "@com_google_absl//absl/functional:bind_front",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/meta:type_traits",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+tsl_cc_test(
+    name = "future_test",
+    srcs = ["future_test.cc"],
+    deps = [
+        ":executor",
+        ":future",
+        "//xla/tsl/platform:env",
+        "//xla/tsl/platform:statusor",
+        "//xla/tsl/platform:test",
+        "//xla/tsl/platform:test_benchmark",
+        "//xla/tsl/platform:test_main",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "interop",
+    srcs = ["interop.cc"],
+    hdrs = ["interop.h"],
+    compatible_with = get_compatible_with_portable(),
+    deps = [
+        ":async_value",
+        ":future",
+        ":ref_count",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+tsl_cc_test(
+    name = "interop_test",
+    srcs = ["interop_test.cc"],
+    deps = [
+        ":async_value",
+        ":interop",
+        ":ref_count",
+        "//xla/tsl/platform:test",
+        "//xla/tsl/platform:test_main",
+        "@com_google_absl//absl/status",
     ],
 )
 
@@ -127,4 +211,16 @@ cc_library(
     name = "ref_count",
     hdrs = ["ref_count.h"],
     compatible_with = get_compatible_with_portable(),
+    deps = ["@com_google_absl//absl/base:nullability"],
+)
+
+tsl_cc_test(
+    name = "ref_count_test",
+    srcs = ["ref_count_test.cc"],
+    deps = [
+        ":ref_count",
+        "//xla/tsl/platform:test",
+        "//xla/tsl/platform:test_main",
+        "@com_google_absl//absl/base:nullability",
+    ],
 )

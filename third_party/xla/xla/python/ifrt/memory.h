@@ -16,9 +16,11 @@ limitations under the License.
 #ifndef XLA_PYTHON_IFRT_MEMORY_H_
 #define XLA_PYTHON_IFRT_MEMORY_H_
 
+#include <cstdint>
 #include <optional>
 #include <string>
 
+#include "absl/base/attributes.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "llvm/Support/ExtensibleRTTI.h"
@@ -82,7 +84,7 @@ class MemoryKind {
 // TODO(b/356623715): Harden `MemoryKind` creation paths so that every
 // `MemoryKind` is canonicalized and does not require on-demand
 // canonicalization.
-MemoryKind CanonicalizeMemoryKind(MemoryKind memory_kind, Device* device);
+MemoryKind CanonicalizeMemoryKind(MemoryKind memory_kind, const Device* device);
 
 TSL_LIB_GTL_DEFINE_INT_TYPE(MemoryId, int32_t);
 
@@ -112,6 +114,7 @@ class Memory : public llvm::RTTIExtends<Memory, llvm::RTTIRoot> {
   // enough to describe the current device unambiguously.
   //
   // TODO(hyeontaek): Remove this method in favor of AbslStringify.
+  ABSL_DEPRECATED("Memory implements AbslStringify; rely on that instead.")
   virtual absl::string_view DebugString() const = 0;
 
   // The devices to which this memory space is attached.

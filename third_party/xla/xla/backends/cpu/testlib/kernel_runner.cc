@@ -16,31 +16,34 @@ limitations under the License.
 #include "xla/backends/cpu/testlib/kernel_runner.h"
 
 #include <memory>
-#include <string>
 #include <utility>
 #include <vector>
 
 #include "absl/log/check.h"
 #include "absl/status/status.h"
+#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Target/TargetOptions.h"
+#include "xla/backends/cpu/codegen/builtin_definition_generator.h"
 #include "xla/backends/cpu/codegen/cpu_features.h"
 #include "xla/backends/cpu/codegen/execution_engine.h"
 #include "xla/backends/cpu/codegen/fusion_compiler.h"
 #include "xla/backends/cpu/codegen/ir_compiler.h"
 #include "xla/backends/cpu/codegen/jit_compiler.h"
+#include "xla/backends/cpu/codegen/kernel_api_ir_builder.h"
 #include "xla/backends/cpu/runtime/function_library.h"
 #include "xla/backends/cpu/runtime/kernel.h"
 #include "xla/backends/cpu/runtime/kernel_c_api.h"
+#include "xla/backends/cpu/target_machine_options.h"
 #include "xla/codegen/kernel_definition.h"
 #include "xla/codegen/kernel_spec.h"
-#include "xla/codegen/llvm_ir_kernel_source.h"
+#include "xla/codegen/llvm_kernel_source.h"
 #include "xla/codegen/mlir_kernel_source.h"
-#include "xla/runtime/workgroup_dim.h"
+#include "xla/runtime/work_group.h"
+#include "xla/service/cpu/cpu_compiler.h"
 #include "xla/service/cpu/cpu_options.h"
-#include "xla/service/cpu/runtime_symbol_generator.h"
 #include "xla/service/hlo_module_config.h"
 #include "xla/service/llvm_ir/llvm_util.h"
 #include "xla/tsl/platform/errors.h"
@@ -50,33 +53,15 @@ limitations under the License.
 namespace xla::cpu {
 
 absl::StatusOr<KernelRunner> KernelRunner::Create(
-    KernelDefinition kernel_definition, JitCompiler compiler) {
-  const auto [kernel_spec, kernel_source] =
-      std::move(kernel_definition).release();
+    KernelDefinition<LlvmKernelSource> kernel, JitCompiler compiler) {
+  auto spec = kernel.spec();
+  auto thread_safe_module = std::move(kernel).TakeSource().thread_safe_module();
+  SetModuleMemoryRegionName(*thread_safe_module.getModuleUnlocked(),
+                            "kernel_runner_test");
 
-  // Use dynamic_cast rather than tsl::down_cast to allow for future
-  // creation of KernelRunner from different kernel spec types.
-  if (auto* llvm_kernel_source =
-          dynamic_cast<LlvmIrKernelSource*>(kernel_source.get())) {
-    return Create(kernel_spec, std::move(*llvm_kernel_source),
-                  std::move(compiler));
-  }
-  if (auto* mlir_kernel_source =
-          dynamic_cast<MlirKernelSource*>(kernel_source.get())) {
-    return Create(kernel_spec, std::move(*mlir_kernel_source),
-                  std::move(compiler));
-  }
+  TF_RETURN_IF_ERROR(compiler.AddModule(std::move(thread_safe_module)));
 
-  return absl::InvalidArgumentError("Unrecognised kernel spec type");
-}
-
-absl::StatusOr<KernelRunner> KernelRunner::Create(
-    const KernelSpec& kernel_spec, LlvmIrKernelSource llvm_ir_kernel_source,
-    JitCompiler compiler) {
-  TF_RETURN_IF_ERROR(compiler.AddModule(
-      std::move(llvm_ir_kernel_source).thread_safe_module()));
-
-  const std::string& kernel_name = kernel_spec.name();
+  absl::string_view kernel_name = spec.name();
   TF_ASSIGN_OR_RETURN(std::unique_ptr<FunctionLibrary> library,
                       std::move(compiler).Compile(
                           {FunctionLibrary::Sym<XLA_CPU_Kernel>(kernel_name)}));
@@ -84,28 +69,25 @@ absl::StatusOr<KernelRunner> KernelRunner::Create(
   TF_ASSIGN_OR_RETURN(XLA_CPU_Kernel * kernel_fn,
                       library->ResolveFunction<XLA_CPU_Kernel>(kernel_name));
 
-  // TODO(ezhulenev): Migrate KernelSpec to use WorkgroupDim.
-  WorkgroupDim workgroup_dim{kernel_spec.thread_dim().x,
-                             kernel_spec.thread_dim().y,
-                             kernel_spec.thread_dim().z};
-  return KernelRunner(std::move(library), Kernel(1, kernel_fn), workgroup_dim);
+  return KernelRunner(std::move(library), Kernel(1, kernel_fn),
+                      spec.num_workgroups());
 }
 
 absl::StatusOr<KernelRunner> KernelRunner::Create(
-    const KernelSpec& kernel_spec, MlirKernelSource mlir_kernel_source,
-    JitCompiler compiler) {
-  TF_ASSIGN_OR_RETURN(LlvmIrKernelSource llvm_ir_kernel_source,
-                      LowerToLlvm(mlir_kernel_source));
+    KernelDefinition<MlirKernelSource> kernel, JitCompiler compiler) {
+  auto spec = kernel.spec();
+  auto source = std::move(kernel).TakeSource();
+  TF_ASSIGN_OR_RETURN(LlvmKernelSource llvm_kernel_source, LowerToLlvm(source));
 
-  return Create(kernel_spec, std::move(llvm_ir_kernel_source),
+  return Create(KernelDefinition(spec, std::move(llvm_kernel_source)),
                 std::move(compiler));
 }
 
 KernelRunner::KernelRunner(std::unique_ptr<FunctionLibrary> library,
-                           Kernel kernel, WorkgroupDim workgroup_dim)
+                           Kernel kernel, NumWorkGroups num_workgroups)
     : library_(std::move(library)),
       kernel_(std::move(kernel)),
-      workgroup_dim_(workgroup_dim) {}
+      num_workgroups_(num_workgroups) {}
 
 absl::Status KernelRunner::Call(absl::Span<const Argument> arguments) {
   std::vector<XLA_CPU_KernelArg> kernel_args;
@@ -113,7 +95,7 @@ absl::Status KernelRunner::Call(absl::Span<const Argument> arguments) {
     kernel_args.push_back({arg.data(), arg.size()});
   }
 
-  return kernel_.Launch(workgroup_dim_, kernel_args);
+  return kernel_.Launch(num_workgroups_, kernel_args);
 }
 
 absl::StatusOr<JitCompiler> KernelRunner::CreateJitCompiler(
@@ -123,7 +105,8 @@ absl::StatusOr<JitCompiler> KernelRunner::CreateJitCompiler(
   IrCompiler::Options ir_compiler_options{
       /*optimization_level=*/IrCompiler::GetCodeGenOptLevel(config),
       /*optimize_for_size=*/options::OptimizeForSizeRequested(config),
-      /*max_cpu_isa=*/CpuFeatureFromString(debug_options.xla_cpu_max_isa()),
+      /*target_machine_options=*/
+      TargetMachineOptions(debug_options),
       /*fast_math_flags=*/llvm_ir::GetCpuFastMathFlags(config),
       /*disable_expensive_passes=*/
       debug_options.xla_llvm_disable_expensive_passes(),
@@ -136,7 +119,7 @@ absl::StatusOr<JitCompiler> KernelRunner::CreateJitCompiler(
   // Needed to resolve symbols such as built in intrinsics (sin, cos etc).
   ExecutionEngine::DefinitionGenerator definition_generator =
       [](const llvm::DataLayout& data_layout) {
-        return std::make_unique<RuntimeSymbolGenerator>(data_layout);
+        return std::make_unique<BuiltinDefinitionGenerator>(data_layout);
       };
 
   JitCompiler::Options jit_compiler_options{
@@ -155,16 +138,21 @@ absl::StatusOr<JitCompiler> KernelRunner::CreateJitCompiler(
                              std::move(ir_compiler));
 }
 
-absl::StatusOr<LlvmIrKernelSource> LowerToLlvm(
+absl::StatusOr<LlvmKernelSource> LowerToLlvm(
     MlirKernelSource& mlir_kernel_source) {
   auto llvm_context = std::make_unique<llvm::LLVMContext>();
 
-  FusionCompiler fusion_compiler(FusionCompiler::Options{});
+  FusionCompiler::Options options;
+  options.vector_width = 256;
+  options.verification_level = 1;
+  options.fast_min_max = true;
+  FusionCompiler fusion_compiler(mlir_kernel_source.module().getContext(),
+                                 options);
   TF_ASSIGN_OR_RETURN(
       std::unique_ptr<llvm::Module> llvm_module,
       fusion_compiler.Compile(*llvm_context, mlir_kernel_source.module()));
 
-  return LlvmIrKernelSource(std::move(llvm_context), std::move(llvm_module));
+  return LlvmKernelSource(std::move(llvm_context), std::move(llvm_module));
 }
 
 }  // namespace xla::cpu

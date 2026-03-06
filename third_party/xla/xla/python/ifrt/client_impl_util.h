@@ -37,8 +37,7 @@ namespace ifrt {
 absl::StatusOr<std::vector<ArrayRef>> ClientMakeArraysFromHostBufferShards(
     Client* client,
     absl::Span<Client::MakeArraysFromHostBufferShardsSpec> specs,
-    Client::HostBufferSemantics semantics,
-    tsl::RCReference<UserContext> user_context);
+    Client::HostBufferSemantics semantics);
 
 }  // namespace ifrt
 }  // namespace xla

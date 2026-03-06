@@ -72,7 +72,7 @@ Tensor GenerateRandomTensorInRange(const TensorShape& shape, double minval,
 
 void VerifyGraphsEquivalent(const GraphDef& original_graph,
                             const GraphDef& optimized_graph,
-                            const string& func) {
+                            const std::string& func) {
   EXPECT_EQ(original_graph.node_size(), optimized_graph.node_size()) << func;
   GraphView optimized_view(&optimized_graph);
   for (int i = 0; i < original_graph.node_size(); ++i) {
@@ -146,10 +146,10 @@ class AutoMixedPrecisionTest : public GrapplerTest {
 
   void TearDown() override { TF_CHECK_OK(virtual_cluster_->Shutdown()); }
 
-  NodeDef* AddSimpleNode(const string& name, const string& op,
-                         const std::vector<string>& inputs,
+  NodeDef* AddSimpleNode(const std::string& name, const std::string& op,
+                         const std::vector<std::string>& inputs,
                          GraphDef* graph) const {
-    std::vector<std::pair<string, AttrValue>> attributes;
+    std::vector<std::pair<std::string, AttrValue>> attributes;
     if (op == "AddN" || op == "ShapeN") {
       AttrValue num_inputs;
       num_inputs.set_i(inputs.size());
@@ -203,7 +203,8 @@ class AutoMixedPrecisionTest : public GrapplerTest {
     TF_CHECK_OK(s.ToGraphDef(&item.graph));
     auto input_tensor = GenerateRandomTensorInRange<DT_FLOAT>(
         TensorShape({size, size}), input_min, input_max);
-    std::vector<std::pair<string, Tensor>> feed = {{"input", input_tensor}};
+    std::vector<std::pair<std::string, Tensor>> feed = {
+        {"input", input_tensor}};
     auto tensors_expected = EvaluateNodes(item.graph, item.fetch, feed);
 
     AutoMixedPrecision optimizer(mode_);
@@ -535,7 +536,7 @@ TEST_P(AutoMixedPrecisionParamTest, PreserveCPUNodes) {
   EXPECT_EQ(output_view.GetNode("input")->attr().at("dtype").type(), DT_FLOAT);
   EXPECT_EQ(output_view.GetNode("clr1")->attr().at("T").type(), DT_HALF);
   EXPECT_EQ(output_view.GetNode("allow1")->attr().at("T").type(), DT_HALF);
-  EXPECT_EQ(output_view.GetNode("infer1")->attr().at("T").type(), DT_FLOAT);
+  EXPECT_EQ(output_view.GetNode("infer1")->attr().at("T").type(), DT_HALF);
   EXPECT_EQ(output_view.GetNode("allow2")->attr().at("T").type(), DT_FLOAT);
   EXPECT_EQ(output_view.GetNode("clr2")->attr().at("T").type(), DT_FLOAT);
 
@@ -543,7 +544,7 @@ TEST_P(AutoMixedPrecisionParamTest, PreserveCPUNodes) {
   EXPECT_EQ(tensors.size(), tensors_expected.size());
   EXPECT_EQ(tensors.size(), item.fetch.size());
   for (int i = 0; i < item.fetch.size(); ++i) {
-    test::ExpectTensorNear<float>(tensors_expected[i], tensors[i], 1e-6);
+    test::ExpectTensorNear<float>(tensors_expected[i], tensors[i], 1e-4);
   }
 }
 
@@ -564,7 +565,7 @@ TEST_P(AutoMixedPrecisionParamTest, PreserveIdentityAfterVariable) {
   TF_CHECK_OK(s.ToGraphDef(&item.graph));
   auto var1_tensor =
       GenerateConstantTensor<DT_FLOAT>(TensorShape({32, 32}), 3.141593f);
-  std::vector<std::pair<string, Tensor>> feed = {{"var1", var1_tensor}};
+  std::vector<std::pair<std::string, Tensor>> feed = {{"var1", var1_tensor}};
   auto tensors_expected = EvaluateNodes(item.graph, item.fetch, feed);
 
   AutoMixedPrecision optimizer(mode_);
@@ -1035,7 +1036,7 @@ TEST_P(AutoMixedPrecisionParamTest, TensorListThroughFunction) {
   // A separate Tensor List cluster is added to test that it is still changed to
   // DT_HALF.
   FunctionDefLibrary function_lib;
-  const Tensor kShape = test::AsTensor<int32>({32, 32});
+  const Tensor kShape = test::AsTensor<int32_t>({32, 32});
   FunctionDef func1 = FunctionDefHelper::Define(
       "Func1", {"ihandle: variant", "x: float"},
       {"ohandle: variant", "y: float"}, {},
@@ -1120,7 +1121,7 @@ int GetCudaVersion(const Cluster& cluster) {
       const auto& device_env = device_properties.environment();
       auto it = device_env.find("cuda");
       if (it != device_env.end()) {
-        string cuda_version_str = it->second;
+        std::string cuda_version_str = it->second;
         return std::stoi(cuda_version_str);
       }
     }
@@ -1407,7 +1408,7 @@ TEST_F(AutoMixedPrecisionCpuTest, MixedFanout) {
 class AutoMixedPrecisionSimulateGpuTest : public GrapplerTest {
  protected:
   void SetUp() override {
-    std::unordered_map<string, DeviceProperties> devices;
+    std::unordered_map<std::string, DeviceProperties> devices;
     DeviceProperties cpu_device;
     cpu_device.set_type("CPU");
     cpu_device.set_frequency(1000);
@@ -1506,10 +1507,13 @@ TEST_F(AutoMixedPrecisionSimulateGpuTest, Simple_SimulatedGpu_CpuScope) {
 
 class AutoMixedPrecisionMklTest : public GrapplerTest {
  protected:
+  void SetMode(AutoMixedPrecisionMode mode) { mode_ = mode; }
   void SetUp() override {
     virtual_cluster_.reset(new SingleMachine(/* timeout_s = */ 10, 1, 0));
     TF_CHECK_OK(virtual_cluster_->Provision());
   }
+  AutoMixedPrecisionMode mode_;
+
   void TearDown() override { TF_CHECK_OK(virtual_cluster_->Shutdown()); }
 
   std::unique_ptr<Cluster> virtual_cluster_;
@@ -1681,9 +1685,34 @@ TEST_F(AutoMixedPrecisionMklTest, TensorListSetGet) {
   }
 }
 
-TEST_F(AutoMixedPrecisionMklTest, InferFollowUpStreamAllow) {
-  if (!IsMKLEnabled())
+class AutoMixedPrecisionMklParamTest
+    : public AutoMixedPrecisionMklTest,
+      public ::testing::WithParamInterface<AutoMixedPrecisionMode> {
+ protected:
+  void SetUp() override {
+    mode_ = GetParam();
+    if (mode_ == AutoMixedPrecisionMode::BF16) {
+      dtype_ = DT_BFLOAT16;
+    } else if (mode_ == AutoMixedPrecisionMode::FP16_CPU) {
+      dtype_ = DT_HALF;
+      // oneDNN supports FP16 on some platforms by converting to and from FP32
+      is_fp16_supported = IsAMXDataTypeSupportedByOneDNNOnThisCPU(DT_HALF) ||
+                          IsAVXConvertSupportedByOneDNNOnThisCPU();
+    } else {
+      GTEST_SKIP() << "Mode not supported on this device";
+    }
+
+    AutoMixedPrecisionMklTest::SetMode(mode_);
+    AutoMixedPrecisionMklTest::SetUp();
+  }
+  DataType dtype_;
+  bool is_fp16_supported;
+};
+
+TEST_P(AutoMixedPrecisionMklParamTest, InferFollowUpStreamAllow) {
+  if (!IsMKLEnabled() || (dtype_ == DT_HALF && !is_fp16_supported))
     GTEST_SKIP() << "Test only applicable to MKL auto-mixed precision.";
+
   tensorflow::Scope s = tensorflow::Scope::NewRootScope().WithDevice(
       "/job:localhost/replica:0/task:0/device:CPU:0");
   Output input1 = ops::Const(s.WithOpName("input1"), 1.f / 32, {8, 56, 56, 16});
@@ -1701,7 +1730,7 @@ TEST_F(AutoMixedPrecisionMklTest, InferFollowUpStreamAllow) {
   TF_CHECK_OK(s.ToGraphDef(&item.graph));
   auto tensors_expected = EvaluateNodes(item.graph, item.fetch);
 
-  AutoMixedPrecision optimizer{AutoMixedPrecisionMode::BF16};
+  AutoMixedPrecision optimizer{mode_};
   GraphDef output;
   TF_ASSERT_OK(optimizer.Optimize(virtual_cluster_.get(), item, &output));
 
@@ -1712,9 +1741,9 @@ TEST_F(AutoMixedPrecisionMklTest, InferFollowUpStreamAllow) {
   EXPECT_EQ(output_view.GetNode("input1")->attr().at("dtype").type(), DT_FLOAT);
   EXPECT_EQ(output_view.GetNode("weight")->attr().at("dtype").type(), DT_FLOAT);
   EXPECT_EQ(output_view.GetNode("input2")->attr().at("dtype").type(), DT_FLOAT);
-  EXPECT_EQ(output_view.GetNode("allow")->attr().at("T").type(), DT_BFLOAT16);
-  EXPECT_EQ(output_view.GetNode("infer")->attr().at("T").type(), DT_BFLOAT16);
-  EXPECT_EQ(output_view.GetNode("clr")->attr().at("T").type(), DT_BFLOAT16);
+  EXPECT_EQ(output_view.GetNode("allow")->attr().at("T").type(), dtype_);
+  EXPECT_EQ(output_view.GetNode("infer")->attr().at("T").type(), dtype_);
+  EXPECT_EQ(output_view.GetNode("clr")->attr().at("T").type(), dtype_);
 
   auto tensors = EvaluateNodes(output, item.fetch);
   EXPECT_EQ(tensors.size(), tensors_expected.size());
@@ -1724,9 +1753,10 @@ TEST_F(AutoMixedPrecisionMklTest, InferFollowUpStreamAllow) {
   }
 }
 
-TEST_F(AutoMixedPrecisionMklTest, InferFollowUpStreamDeny) {
-  if (!IsMKLEnabled())
+TEST_P(AutoMixedPrecisionMklParamTest, InferFollowUpStreamDeny) {
+  if (!IsMKLEnabled() || (dtype_ == DT_HALF && !is_fp16_supported))
     GTEST_SKIP() << "Test only applicable to MKL auto-mixed precision.";
+
   tensorflow::Scope s = tensorflow::Scope::NewRootScope().WithDevice(
       "/job:localhost/replica:0/task:0/device:CPU:0");
   Output input1 = ops::Const(s.WithOpName("input1"), 1.f / 32, {8, 56, 56, 16});
@@ -1742,7 +1772,7 @@ TEST_F(AutoMixedPrecisionMklTest, InferFollowUpStreamDeny) {
   TF_CHECK_OK(s.ToGraphDef(&item.graph));
   auto tensors_expected = EvaluateNodes(item.graph, item.fetch);
 
-  AutoMixedPrecision optimizer{AutoMixedPrecisionMode::BF16};
+  AutoMixedPrecision optimizer{mode_};
   GraphDef output;
   TF_ASSERT_OK(optimizer.Optimize(virtual_cluster_.get(), item, &output));
 
@@ -1764,6 +1794,15 @@ TEST_F(AutoMixedPrecisionMklTest, InferFollowUpStreamDeny) {
     test::ExpectClose(tensors_expected[i], tensors[i]);
   }
 }
+
+constexpr AutoMixedPrecisionMode kMklTestValues[] = {
+    AutoMixedPrecisionMode::BF16,
+    AutoMixedPrecisionMode::FP16_CPU,
+};
+INSTANTIATE_TEST_SUITE_P(AutoMixedPrecisionMklTest,
+                         AutoMixedPrecisionMklParamTest,
+                         ::testing::ValuesIn(kMklTestValues));
+
 #endif  // INTEL_MKL
 
 }  // namespace

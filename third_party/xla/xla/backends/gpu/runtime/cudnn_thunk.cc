@@ -15,41 +15,52 @@ limitations under the License.
 
 #include "xla/backends/gpu/runtime/cudnn_thunk.h"
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "absl/base/call_once.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "xla/backends/gpu/runtime/thunk.h"
+#include "xla/backends/gpu/runtime/thunk.pb.h"
 #include "xla/service/buffer_assignment.h"
-#include "xla/service/gpu/kernel_arguments.h"
-#include "xla/stream_executor/device_memory.h"
+#include "xla/service/buffer_assignment.pb.h"
+#include "xla/service/shaped_slice.h"
+#include "xla/stream_executor/device_address.h"
 #include "xla/stream_executor/dnn.h"
-#include "tsl/platform/errors.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
+#include "tsl/profiler/lib/nvtx_utils.h"
+#include "xla/tsl/platform/status_macros.h"
 
 namespace xla {
 namespace gpu {
 
 CuDnnThunk::CuDnnThunk(std::string fingerprint, ThunkInfo thunk_info,
-                       absl::Span<const KernelArgument> kernel_arguments,
+                       std::vector<ShapedSlice> args,
+                       std::vector<bool> output_args,
                        std::optional<int64_t> sdpa_dropout_seed)
     : Thunk(Kind::kCuDnn, std::move(thunk_info)),
       fingerprint_(std::move(fingerprint)),
       graph_(std::make_shared<se::dnn::LazyDnnGraph>(nullptr)),
-      sdpa_dropout_seed_(sdpa_dropout_seed) {
-  args_.reserve(kernel_arguments.size());
-  for (const KernelArgument& kernel_argument : kernel_arguments) {
-    args_.push_back(kernel_argument.slice());
-  };
-}
+      args_(std::move(args)),
+      output_args_(std::move(output_args)),
+      sdpa_dropout_seed_(sdpa_dropout_seed) {}
 
 absl::Status CuDnnThunk::Initialize(const InitializeParams& params) {
   absl::Status ret = absl::OkStatus();
+  // Calling AsDnn outside call_once ensures that cuDNN handles get created for
+  // all GPUs in programs using cuDNN during the executable initialization
+  // phase. It's sufficient to deserialize the graph once using just one of
+  // them.
+  se::dnn::DnnSupport* dnn = params.stream->parent()->AsDnn();
   absl::call_once(once_flag_, [&] {
-    auto result = params.stream->parent()->AsDnn()->DeserializeGraph(
+    auto result = dnn->DeserializeGraph(
         *params.stream, params.src.dnn_compiled_graphs.at(fingerprint_));
     std::string().swap(fingerprint_);
     if (result.ok()) {
@@ -68,14 +79,62 @@ absl::Status CuDnnThunk::ExecuteOnStream(const ExecuteParams& params) {
   InitializeParams initialize_params;
   initialize_params.stream = params.stream;
   TF_RETURN_IF_ERROR(Initialize(initialize_params));
-  std::vector<se::DeviceMemoryBase> buffer_args;
+  std::vector<se::DeviceAddressBase> buffer_args;
   buffer_args.reserve(args_.size());
-  for (const BufferAllocation::Slice& arg : args_) {
-    buffer_args.push_back(params.buffer_allocations->GetDeviceAddress(arg));
+  for (const ShapedSlice& arg : args_) {
+    auto addr = params.buffer_allocations->GetDeviceAddress(arg.slice);
+    if (output_args_[buffer_args.size()]) {
+      tsl::profiler::MarkMemoryInitialized(
+          addr.opaque(), addr.size(),
+          static_cast<tsl::profiler::StreamHandle>(
+              params.stream->platform_specific_handle().stream));
+    }
+    buffer_args.push_back(addr);
   }
-  return graph_->get()->Execute(*params.stream,
-                                absl::Span<se::DeviceMemoryBase>(buffer_args),
-                                params.collective_params->local_device_ordinal);
+  return graph_->get()->Execute(
+      *params.stream, absl::Span<se::DeviceAddressBase>(buffer_args),
+      params.collective_params->local_device_id.value());
+}
+
+absl::StatusOr<ThunkProto> CuDnnThunk::ToProto() const {
+  ThunkProto proto;
+  *proto.mutable_thunk_info() = thunk_info().ToProto();
+  proto.mutable_cudnn_thunk()->set_fingerprint(fingerprint_);
+
+  for (const ShapedSlice& arg : args_) {
+    ASSIGN_OR_RETURN(*proto.mutable_cudnn_thunk()->add_args(), arg.ToProto());
+  }
+  for (const bool is_output : output_args_) {
+    proto.mutable_cudnn_thunk()->add_output_args(is_output);
+  }
+  if (sdpa_dropout_seed_.has_value()) {
+    proto.mutable_cudnn_thunk()->set_sdpa_dropout_seed(
+        static_cast<int64_t>(*sdpa_dropout_seed_));
+  }
+  return proto;
+}
+
+absl::StatusOr<std::unique_ptr<CuDnnThunk>> CuDnnThunk::FromProto(
+    ThunkInfo thunk_info, const CudnnThunkProto& proto,
+    absl::Span<const BufferAllocation> buffer_allocations) {
+  std::vector<ShapedSlice> args;
+  args.reserve(proto.args_size());
+  for (const ShapedSliceProto& arg : proto.args()) {
+    ASSIGN_OR_RETURN(args.emplace_back(),
+                     ShapedSlice::FromProto(arg, buffer_allocations));
+  }
+  std::vector<bool> output_args;
+  output_args.reserve(proto.output_args_size());
+  for (const bool output_arg : proto.output_args()) {
+    output_args.push_back(output_arg);
+  }
+  std::optional<uint64_t> sdpa_dropout_seed;
+  if (proto.has_sdpa_dropout_seed()) {
+    sdpa_dropout_seed = static_cast<uint64_t>(proto.sdpa_dropout_seed());
+  }
+  return std::make_unique<CuDnnThunk>(
+      proto.fingerprint(), std::move(thunk_info), std::move(args),
+      std::move(output_args), sdpa_dropout_seed);
 }
 
 }  // namespace gpu

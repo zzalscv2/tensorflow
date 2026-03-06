@@ -26,7 +26,7 @@ limitations under the License.
 #include "xla/service/platform_util.h"
 #include "xla/stream_executor/command_buffer.h"
 #include "xla/stream_executor/cuda/cuda_platform_id.h"
-#include "xla/stream_executor/device_memory.h"
+#include "xla/stream_executor/device_address.h"
 #include "xla/stream_executor/gpu/gpu_test_kernels.h"
 #include "xla/stream_executor/kernel.h"
 #include "xla/stream_executor/kernel_spec.h"
@@ -37,7 +37,6 @@ limitations under the License.
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
 #include "xla/stream_executor/trace_command_buffer_factory.h"
-#include "xla/stream_executor/typed_kernel_factory.h"
 #include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
@@ -51,18 +50,6 @@ static Platform* GpuPlatform() {
       xla::PlatformUtil::CanonicalPlatformName("gpu").value());
   return PlatformManager::PlatformWithName(name).value();
 }
-
-using AddI32Kernel =
-    TypedKernelFactory<DeviceMemory<int32_t>, DeviceMemory<int32_t>,
-                       DeviceMemory<int32_t>>;
-using MulI32Kernel =
-    TypedKernelFactory<DeviceMemory<int32_t>, DeviceMemory<int32_t>,
-                       DeviceMemory<int32_t>>;
-using IncAndCmpKernel =
-    TypedKernelFactory<DeviceMemory<int32_t>, DeviceMemory<bool>,
-                       DeviceMemory<int32_t>>;
-
-using AddI32Ptrs3 = TypedKernelFactory<internal::Ptrs3<int32_t>>;
 
 static constexpr auto nested = CommandBuffer::Mode::kNested;    // NOLINT
 static constexpr auto primary = CommandBuffer::Mode::kPrimary;  // NOLINT
@@ -92,18 +79,15 @@ TEST(GpuCommandBufferTest, LaunchSingleKernel) {
   StreamExecutor* executor = platform->ExecutorForDevice(0).value();
 
   TF_ASSERT_OK_AND_ASSIGN(auto stream, executor->CreateStream());
-
-  MultiKernelLoaderSpec spec(/*arity=*/3);
-  spec.AddInProcessSymbol(internal::GetAddI32Kernel(), "AddI32");
-  TF_ASSERT_OK_AND_ASSIGN(auto add, AddI32Kernel::Create(executor, spec));
+  TF_ASSERT_OK_AND_ASSIGN(auto add, LoadAddI32TestKernel(executor));
 
   int64_t length = 4;
   int64_t byte_length = sizeof(int32_t) * length;
 
   // Prepare arguments: a=1, b=2, c=0
-  DeviceMemory<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
-  DeviceMemory<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
-  DeviceMemory<int32_t> c = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> c = executor->AllocateArray<int32_t>(length, 0);
 
   TF_ASSERT_OK(stream->Memset32(&a, 1, byte_length));
   TF_ASSERT_OK(stream->Memset32(&b, 2, byte_length));
@@ -127,7 +111,7 @@ TEST(GpuCommandBufferTest, LaunchSingleKernel) {
   ASSERT_EQ(dst, expected);
 
   // Prepare argument for graph update: d = 0
-  DeviceMemory<int32_t> d = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> d = executor->AllocateArray<int32_t>(length, 0);
   TF_ASSERT_OK(stream->MemZero(&d, byte_length));
 
   // Update command buffer to write into `d` buffer.
@@ -153,37 +137,22 @@ TEST(GpuCommandBufferTest, TraceSingleKernel) {
   }
 
   TF_ASSERT_OK_AND_ASSIGN(auto stream, executor->CreateStream());
-
-  // Register a kernel with a custom arguments packing function that packs
-  // device memory arguments into a struct with pointers.
-  MultiKernelLoaderSpec spec(/*arity=*/1, [&](const Kernel& kernel,
-                                              const KernelArgs& args) {
-    auto bufs = Cast<KernelArgsDeviceMemoryArray>(&args)->device_memory_args();
-    auto cast = [](auto m) { return reinterpret_cast<int32_t*>(m.opaque()); };
-    return PackKernelArgs(/*shmem_bytes=*/0, internal::Ptrs3<int32_t>{
-                                                 cast(bufs[0]),
-                                                 cast(bufs[1]),
-                                                 cast(bufs[2]),
-                                             });
-  });
-  spec.AddInProcessSymbol(internal::GetAddI32Ptrs3Kernel(), "AddI32Ptrs3");
-
-  TF_ASSERT_OK_AND_ASSIGN(auto add, AddI32Ptrs3::Create(executor, spec));
+  TF_ASSERT_OK_AND_ASSIGN(auto add, LoadAddI32Ptrs3TestKernel(executor));
 
   int64_t length = 4;
   int64_t byte_length = sizeof(int32_t) * length;
 
   // Prepare arguments: a=1, b=2, c=0
-  DeviceMemory<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
-  DeviceMemory<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
-  DeviceMemory<int32_t> c = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> c = executor->AllocateArray<int32_t>(length, 0);
 
   TF_ASSERT_OK(stream->Memset32(&a, 1, byte_length));
   TF_ASSERT_OK(stream->Memset32(&b, 2, byte_length));
   TF_ASSERT_OK(stream->MemZero(&c, byte_length));
 
   // Use an array of device memory base pointers as argument to test packing.
-  KernelArgsDeviceMemoryArray args({a, b, c}, 0);
+  KernelArgsDeviceAddressArray args({a, b, c}, 0);
 
   // Create a command buffer by tracing kernel launch operations.
   TF_ASSERT_OK_AND_ASSIGN(auto cmd_buffer, TraceCommandBufferFactory::Create(
@@ -211,16 +180,15 @@ TEST(GpuCommandBufferTest, LaunchNestedCommandBuffer) {
 
   TF_ASSERT_OK_AND_ASSIGN(auto stream, executor->CreateStream());
 
-  MultiKernelLoaderSpec spec = GetAddI32KernelSpec();
-  TF_ASSERT_OK_AND_ASSIGN(auto add, AddI32Kernel::Create(executor, spec));
+  TF_ASSERT_OK_AND_ASSIGN(auto add, LoadAddI32TestKernel(executor));
 
   int64_t length = 4;
   int64_t byte_length = sizeof(int32_t) * length;
 
   // Prepare arguments: a=1, b=2, c=0
-  DeviceMemory<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
-  DeviceMemory<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
-  DeviceMemory<int32_t> c = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> c = executor->AllocateArray<int32_t>(length, 0);
 
   TF_ASSERT_OK(stream->Memset32(&a, 1, byte_length));
   TF_ASSERT_OK(stream->Memset32(&b, 2, byte_length));
@@ -234,7 +202,7 @@ TEST(GpuCommandBufferTest, LaunchNestedCommandBuffer) {
   TF_ASSERT_OK(
       nested_cmd->CreateLaunch(add, ThreadDim(), BlockDim(4), {}, a, b, c));
   TF_ASSERT_OK_AND_ASSIGN(auto* nested_command,
-                          primary_cmd->CreateNestedCommand(*nested_cmd, {}));
+                          primary_cmd->CreateChildCommand(*nested_cmd, {}));
   TF_ASSERT_OK(primary_cmd->Finalize());
 
   TF_ASSERT_OK(primary_cmd->Submit(stream.get()));
@@ -247,7 +215,7 @@ TEST(GpuCommandBufferTest, LaunchNestedCommandBuffer) {
   ASSERT_EQ(dst, expected);
 
   // Prepare argument for graph update: d = 0
-  DeviceMemory<int32_t> d = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> d = executor->AllocateArray<int32_t>(length, 0);
   TF_ASSERT_OK(stream->MemZero(&d, byte_length));
 
   // Update command buffer to write into `d` buffer by creating a new nested
@@ -256,7 +224,7 @@ TEST(GpuCommandBufferTest, LaunchNestedCommandBuffer) {
   TF_ASSERT_OK(
       nested_cmd->CreateLaunch(add, ThreadDim(), BlockDim(4), {}, a, b, d));
   TF_ASSERT_OK(primary_cmd->Update());
-  TF_ASSERT_OK(primary_cmd->UpdateNestedCommand(nested_command, *nested_cmd));
+  TF_ASSERT_OK(primary_cmd->UpdateChildCommand(nested_command, *nested_cmd));
   TF_ASSERT_OK(primary_cmd->Finalize());
 
   TF_ASSERT_OK(primary_cmd->Submit(stream.get()));
@@ -277,8 +245,8 @@ TEST(GpuCommandBufferTest, MemcpyDeviceToDevice) {
   int64_t byte_length = sizeof(int32_t) * length;
 
   // Prepare arguments: a=42, b=uninitialized
-  DeviceMemory<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
-  DeviceMemory<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
 
   TF_ASSERT_OK(stream->Memset32(&a, 42, byte_length));
 
@@ -323,7 +291,7 @@ TEST(GpuCommandBufferTest, Memset) {
   int64_t length = 4;
   int64_t byte_length = sizeof(int32_t) * length;
 
-  DeviceMemory<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
 
   // Create a command buffer with a single memset command.
   auto cmd_buffer = executor->CreateCommandBuffer(primary).value();
@@ -367,20 +335,16 @@ TEST(GpuCommandBufferTest, ConditionalCaseEmptyGraph) {
   }
 
   TF_ASSERT_OK_AND_ASSIGN(auto stream, executor->CreateStream());
-
-  // Load addition kernel.
-  MultiKernelLoaderSpec add_spec(/*arity=*/3);
-  add_spec.AddInProcessSymbol(internal::GetAddI32Kernel(), "AddI32");
-  TF_ASSERT_OK_AND_ASSIGN(auto add, AddI32Kernel::Create(executor, add_spec));
+  TF_ASSERT_OK_AND_ASSIGN(auto add, LoadAddI32TestKernel(executor));
 
   int64_t length = 4;
   int64_t byte_length = sizeof(int32_t) * length;
 
   // Prepare arguments: a=2, b=3, c=0, index=0
-  DeviceMemory<int32_t> index = executor->AllocateArray<int32_t>(1, 0);
-  DeviceMemory<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
-  DeviceMemory<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
-  DeviceMemory<int32_t> c = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> index = executor->AllocateArray<int32_t>(1, 0);
+  DeviceAddress<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> c = executor->AllocateArray<int32_t>(length, 0);
 
   TF_ASSERT_OK(stream->Memset32(&index, 0, sizeof(int32_t)));
   TF_ASSERT_OK(stream->Memset32(&a, 2, byte_length));
@@ -465,22 +429,18 @@ TEST_P(GpuCommandBufferCaseTest, ConditionalMultiCase) {
   }
 
   TF_ASSERT_OK_AND_ASSIGN(auto stream, executor->CreateStream());
-
-  // Load multiplication kernel.
-  MultiKernelLoaderSpec mul_spec(/*arity=*/3);
-  mul_spec.AddInProcessSymbol(internal::GetMulI32Kernel(), "MulI32");
-  TF_ASSERT_OK_AND_ASSIGN(auto mul, MulI32Kernel::Create(executor, mul_spec));
+  TF_ASSERT_OK_AND_ASSIGN(auto mul, LoadMulI32TestKernel(executor));
 
   constexpr int64_t kLength = 1;
   int64_t byte_length = sizeof(int32_t) * kLength;
 
   // Prepare arguments: index=0
-  DeviceMemory<int32_t> index = executor->AllocateArray<int32_t>(1, 0);
+  DeviceAddress<int32_t> index = executor->AllocateArray<int32_t>(1, 0);
   TF_ASSERT_OK(stream->Memset32(&index, 0, sizeof(int32_t)));
 
   const int kNumCases = GetNumCases();
-  std::vector<DeviceMemory<int32_t>> values;
-  std::vector<DeviceMemory<int32_t>> results;
+  std::vector<DeviceAddress<int32_t>> values;
+  std::vector<DeviceAddress<int32_t>> results;
   std::vector<CommandBuffer::CreateCommands> branches;
   values.resize(kNumCases);
   results.resize(kNumCases);
@@ -551,25 +511,17 @@ TEST(GpuCommandBufferTest, ConditionalCase) {
   }
 
   TF_ASSERT_OK_AND_ASSIGN(auto stream, executor->CreateStream());
-
-  // Load addition kernel.
-  MultiKernelLoaderSpec add_spec(/*arity=*/3);
-  add_spec.AddInProcessSymbol(internal::GetAddI32Kernel(), "AddI32");
-  TF_ASSERT_OK_AND_ASSIGN(auto add, AddI32Kernel::Create(executor, add_spec));
-
-  // Load multiplication kernel.
-  MultiKernelLoaderSpec mul_spec(/*arity=*/3);
-  mul_spec.AddInProcessSymbol(internal::GetMulI32Kernel(), "MulI32");
-  TF_ASSERT_OK_AND_ASSIGN(auto mul, MulI32Kernel::Create(executor, mul_spec));
+  TF_ASSERT_OK_AND_ASSIGN(auto add, LoadAddI32TestKernel(executor));
+  TF_ASSERT_OK_AND_ASSIGN(auto mul, LoadMulI32TestKernel(executor));
 
   int64_t length = 4;
   int64_t byte_length = sizeof(int32_t) * length;
 
   // Prepare arguments: a=2, b=3, c=0, index=0
-  DeviceMemory<int32_t> index = executor->AllocateArray<int32_t>(1, 0);
-  DeviceMemory<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
-  DeviceMemory<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
-  DeviceMemory<int32_t> c = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> index = executor->AllocateArray<int32_t>(1, 0);
+  DeviceAddress<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> c = executor->AllocateArray<int32_t>(length, 0);
 
   TF_ASSERT_OK(stream->Memset32(&index, 0, sizeof(int32_t)));
   TF_ASSERT_OK(stream->Memset32(&a, 2, byte_length));
@@ -644,17 +596,8 @@ TEST(GpuCommandBufferTest, ConditionalWhile) {
   }
 
   TF_ASSERT_OK_AND_ASSIGN(auto stream, executor->CreateStream());
-
-  // Load addition kernel.
-  MultiKernelLoaderSpec add_spec(/*arity=*/3);
-  add_spec.AddInProcessSymbol(internal::GetAddI32Kernel(), "AddI32");
-  TF_ASSERT_OK_AND_ASSIGN(auto add, AddI32Kernel::Create(executor, add_spec));
-
-  // Load inc_and_cmp kernel.
-  MultiKernelLoaderSpec icmp_spec(/*arity=*/3);
-  icmp_spec.AddInProcessSymbol(internal::GetIncAndCmpKernel(), "IncAndCmp");
-  TF_ASSERT_OK_AND_ASSIGN(auto inc_and_cmp,
-                          IncAndCmpKernel::Create(executor, icmp_spec));
+  TF_ASSERT_OK_AND_ASSIGN(auto add, LoadAddI32TestKernel(executor));
+  TF_ASSERT_OK_AND_ASSIGN(auto inc_and_cmp, LoadCmpAndIncTestKernel(executor));
 
   int64_t length = 4;
   int64_t byte_length = sizeof(int32_t) * length;
@@ -662,11 +605,11 @@ TEST(GpuCommandBufferTest, ConditionalWhile) {
   // Prepare arguments: a=1, b=0, loop_counter=0, pred=false
   // Value of `pred` is not important, as it will be updated by `cond_builder`
   // below.
-  DeviceMemory<bool> pred = executor->AllocateArray<bool>(1, 0);
-  DeviceMemory<int32_t> loop_counter = executor->AllocateArray<int32_t>(1, 0);
-  DeviceMemory<int32_t> num_iters = executor->AllocateArray<int32_t>(1, 0);
-  DeviceMemory<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
-  DeviceMemory<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<bool> pred = executor->AllocateArray<bool>(1, 0);
+  DeviceAddress<int32_t> loop_counter = executor->AllocateArray<int32_t>(1, 0);
+  DeviceAddress<int32_t> num_iters = executor->AllocateArray<int32_t>(1, 0);
+  DeviceAddress<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
 
   static constexpr bool kFalse = false;
   TF_ASSERT_OK(stream->Memcpy(&pred, &kFalse, 1));
@@ -715,17 +658,8 @@ TEST(GpuCommandBufferTest, DISABLED_WhileNestedConditional) {
   }
 
   TF_ASSERT_OK_AND_ASSIGN(auto stream, executor->CreateStream());
-
-  // Load addition kernel.
-  MultiKernelLoaderSpec add_spec(/*arity=*/3);
-  add_spec.AddInProcessSymbol(internal::GetAddI32Kernel(), "AddI32");
-  TF_ASSERT_OK_AND_ASSIGN(auto add, AddI32Kernel::Create(executor, add_spec));
-
-  // Load inc_and_cmp kernel.
-  MultiKernelLoaderSpec icmp_spec(/*arity=*/3);
-  icmp_spec.AddInProcessSymbol(internal::GetIncAndCmpKernel(), "IncAndCmp");
-  TF_ASSERT_OK_AND_ASSIGN(auto inc_and_cmp,
-                          IncAndCmpKernel::Create(executor, icmp_spec));
+  TF_ASSERT_OK_AND_ASSIGN(auto add, LoadAddI32TestKernel(executor));
+  TF_ASSERT_OK_AND_ASSIGN(auto cmp_and_inc, LoadCmpAndIncTestKernel(executor));
 
   int64_t length = 4;
   int64_t byte_length = sizeof(int32_t) * length;
@@ -733,12 +667,12 @@ TEST(GpuCommandBufferTest, DISABLED_WhileNestedConditional) {
   // Prepare arguments: a=1, b=0, loop_counter=0, pred=false
   // Value of `pred` is not important, as it will be updated by `cond_builder`
   // below.
-  DeviceMemory<bool> pred = executor->AllocateArray<bool>(1, 0);
-  DeviceMemory<bool> pred_then = executor->AllocateArray<bool>(1, 0);
-  DeviceMemory<int32_t> loop_counter = executor->AllocateArray<int32_t>(1, 0);
-  DeviceMemory<int32_t> num_iters = executor->AllocateArray<int32_t>(1, 0);
-  DeviceMemory<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
-  DeviceMemory<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<bool> pred = executor->AllocateArray<bool>(1, 0);
+  DeviceAddress<bool> pred_then = executor->AllocateArray<bool>(1, 0);
+  DeviceAddress<int32_t> loop_counter = executor->AllocateArray<int32_t>(1, 0);
+  DeviceAddress<int32_t> num_iters = executor->AllocateArray<int32_t>(1, 0);
+  DeviceAddress<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
 
   static constexpr bool kFalse = false;
   static constexpr bool kTrue = true;
@@ -775,14 +709,14 @@ TEST(GpuCommandBufferTest, DISABLED_WhileNestedConditional) {
   // Loop cond: loop_counter++ < num_iters;
   CommandBuffer::CreateCommands create_cond = [&](CommandBuffer* cond_cmd,
                                                   auto deps) {
-    return Wrap(cond_cmd->CreateLaunch(inc_and_cmp, ThreadDim(),
+    return Wrap(cond_cmd->CreateLaunch(cmp_and_inc, ThreadDim(),
                                        BlockDim(length), deps, loop_counter,
                                        pred, num_iters));
   };
 
   CommandBuffer::CreateCommands create_body = [&](CommandBuffer* body_cmd,
                                                   auto deps) {
-    return Wrap(body_cmd->CreateNestedCommand(*nested_cmd, deps));
+    return Wrap(body_cmd->CreateChildCommand(*nested_cmd, deps));
   };
 
   // Create a command buffer with a single conditional operation.
@@ -801,6 +735,30 @@ TEST(GpuCommandBufferTest, DISABLED_WhileNestedConditional) {
   ASSERT_EQ(dst, expected);
 }
 
+struct TestResource : public CommandBuffer::Resource {
+  TestResource() = default;
+  explicit TestResource(int32_t value) : value(value) {}
+  int32_t value = 0;
+};
+
+TEST(GpuCommandBufferTest, GetOrCreateResource) {
+  Platform* platform = GpuPlatform();
+  StreamExecutor* executor = platform->ExecutorForDevice(0).value();
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto command_buffer,
+      executor->CreateCommandBuffer(CommandBuffer::Mode::kNested));
+
+  EXPECT_EQ(command_buffer->GetOrNullResource<TestResource>(), nullptr);
+
+  TestResource* resource = command_buffer->GetOrCreateResource<TestResource>(
+      [] { return std::make_unique<TestResource>(42); });
+  EXPECT_NE(resource, nullptr);
+  EXPECT_EQ(resource->value, 42);
+
+  EXPECT_EQ(command_buffer->GetOrNullResource<TestResource>(), resource);
+}
+
 //===----------------------------------------------------------------------===//
 // Performance benchmarks below
 //===----------------------------------------------------------------------===//
@@ -813,12 +771,9 @@ TEST(GpuCommandBufferTest, DISABLED_WhileNestedConditional) {
 static void BM_CreateCommandBuffer(benchmark::State& state) {
   Platform* platform = GpuPlatform();
   StreamExecutor* executor = platform->ExecutorForDevice(0).value();
+  TF_ASSERT_OK_AND_ASSIGN(auto add, LoadAddI32TestKernel(executor));
 
-  MultiKernelLoaderSpec spec(/*arity=*/3);
-  spec.AddInProcessSymbol(internal::GetAddI32Kernel(), "AddI32");
-  TF_ASSERT_OK_AND_ASSIGN(auto add, AddI32Kernel::Create(executor, spec));
-
-  DeviceMemory<int32_t> b = executor->AllocateArray<int32_t>(1, 0);
+  DeviceAddress<int32_t> b = executor->AllocateArray<int32_t>(1, 0);
 
   for (auto s : state) {
     auto cmd_buffer = executor->CreateCommandBuffer(nested).value();
@@ -837,12 +792,9 @@ static void BM_TraceCommandBuffer(benchmark::State& state) {
   StreamExecutor* executor = platform->ExecutorForDevice(0).value();
 
   TF_ASSERT_OK_AND_ASSIGN(auto stream, executor->CreateStream());
+  TF_ASSERT_OK_AND_ASSIGN(auto add, LoadAddI32TestKernel(executor));
 
-  MultiKernelLoaderSpec spec(/*arity=*/3);
-  spec.AddInProcessSymbol(internal::GetAddI32Kernel(), "AddI32");
-  TF_ASSERT_OK_AND_ASSIGN(auto add, AddI32Kernel::Create(executor, spec));
-
-  DeviceMemory<int32_t> b = executor->AllocateArray<int32_t>(1, 0);
+  DeviceAddress<int32_t> b = executor->AllocateArray<int32_t>(1, 0);
 
   for (auto s : state) {
     auto launch_kernels = [&](Stream* stream) {
@@ -862,12 +814,9 @@ BENCHMARK_SIZES(BM_TraceCommandBuffer);
 static void BM_UpdateCommandBuffer(benchmark::State& state) {
   Platform* platform = GpuPlatform();
   StreamExecutor* executor = platform->ExecutorForDevice(0).value();
+  TF_ASSERT_OK_AND_ASSIGN(auto add, LoadAddI32TestKernel(executor));
 
-  MultiKernelLoaderSpec spec(/*arity=*/3);
-  spec.AddInProcessSymbol(internal::GetAddI32Kernel(), "AddI32");
-  TF_ASSERT_OK_AND_ASSIGN(auto add, AddI32Kernel::Create(executor, spec));
-
-  DeviceMemory<int32_t> b = executor->AllocateArray<int32_t>(1, 0);
+  DeviceAddress<int32_t> b = executor->AllocateArray<int32_t>(1, 0);
 
   auto cmd_buffer = executor->CreateCommandBuffer(primary).value();
   for (int i = 1; i < state.range(0); ++i) {

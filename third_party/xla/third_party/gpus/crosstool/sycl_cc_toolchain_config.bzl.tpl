@@ -16,6 +16,7 @@ load(
     "with_feature_set",
 )
 load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
+load("@rules_cc//cc/toolchains:cc_toolchain_config_info.bzl", "CcToolchainConfigInfo")
 
 def all_assembly_actions():
     return [
@@ -207,7 +208,7 @@ def _tool_paths(cpu, ctx):
     if cpu == "local":
         return [
             tool_path(name = "gcc", path = ctx.attr.host_compiler_path),
-            tool_path(name = "ar", path = ctx.attr.host_compiler_prefix + "/ar"),
+            tool_path(name = "ar", path = ctx.attr.ar_path),
             tool_path(name = "compat-ld", path = ctx.attr.host_compiler_prefix + "/ld"),
             tool_path(name = "cpp", path = ctx.attr.host_compiler_prefix + "/cpp"),
             tool_path(name = "dwp", path = ctx.attr.host_compiler_prefix + "/dwp"),
@@ -544,7 +545,7 @@ def _impl(ctx):
             assembly_path = ctx.attr.host_compiler_path,
             c_compiler_path = ctx.attr.host_compiler_path,
             cc_compiler_path = ctx.attr.host_compiler_path,
-            archiver_path = ctx.attr.host_compiler_prefix + "/ar",
+            archiver_path = ctx.attr.ar_path,
             linker_path = ctx.attr.host_compiler_path,
             strip_path = ctx.attr.host_compiler_prefix + "/strip",
         )
@@ -592,6 +593,7 @@ cc_toolchain_config = rule(
         "host_unfiltered_compile_flags": attr.string_list(),
         "linker_bin_path": attr.string(),
         "builtin_sysroot": attr.string(),
+        "ar_path": attr.string(),
     },
     provides = [CcToolchainConfigInfo],
     executable = True,

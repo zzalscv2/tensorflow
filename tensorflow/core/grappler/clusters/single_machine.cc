@@ -28,6 +28,8 @@ limitations under the License.
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/notification.h"
+#include "absl/time/time.h"
 #include "absl/types/optional.h"
 #include "tensorflow/cc/training/queue_runner.h"
 #include "tensorflow/core/common_runtime/device.h"
@@ -117,7 +119,7 @@ absl::Status SingleMachine::Provision() {
                          ": ", s.message()));
       }
       attr = GetLocalGPUInfo(platform_device_id);
-    } else if (dev.device_type().find("XLA") == string::npos) {
+    } else if (dev.device_type().find("XLA") == std::string::npos) {
       // Filter out the fake XLA devices to avoid double counting the actual
       // hardware resources that are available.
       attr.set_type(dev.device_type());
@@ -160,8 +162,8 @@ absl::Status SingleMachine::Shutdown() {
 
 absl::Status SingleMachine::Run(
     const GraphDef& graph_def,
-    const std::vector<std::pair<string, Tensor>>& feed,
-    const std::vector<string>& fetch, RunMetadata* metadata) {
+    const std::vector<std::pair<std::string, Tensor>>& feed,
+    const std::vector<std::string>& fetch, RunMetadata* metadata) {
   mutex_lock l(this->last_graph_mu_);
   if (last_graph_ != &graph_def) {
     TF_RETURN_IF_ERROR(ResetSession());
@@ -227,7 +229,7 @@ absl::Status SingleMachine::EnablePeakMemoryStats() {
 }
 
 absl::Status SingleMachine::GetPeakMemoryUsage(
-    std::unordered_map<string, uint64>* device_peak_memory) const {
+    std::unordered_map<std::string, uint64_t>* device_peak_memory) const {
   // Cpu_allocator->TracksAllocationSizes() returns true doesn't always mean the
   // the AllocatorStats would be collected.
   if (!cpu_allocator_stats_enabled_) {
@@ -255,14 +257,14 @@ absl::Status SingleMachine::GetPeakMemoryUsage(
 }
 
 absl::Status SingleMachine::RunWithTimeout(
-    const std::vector<std::pair<string, Tensor>>& feed,
-    const std::vector<string>& fetch, RunMetadata* run_metadata) {
+    const std::vector<std::pair<std::string, Tensor>>& feed,
+    const std::vector<std::string>& fetch, RunMetadata* run_metadata) {
   return RunWithTimeout(feed, fetch, run_metadata, timeout_s_);
 }
 
 absl::Status SingleMachine::RunWithTimeout(
-    const std::vector<std::pair<string, Tensor>>& feed,
-    const std::vector<string>& fetch, RunMetadata* run_metadata,
+    const std::vector<std::pair<std::string, Tensor>>& feed,
+    const std::vector<std::string>& fetch, RunMetadata* run_metadata,
     int64_t timeout_s) {
   // We shouldn't be running or closing the session at this point.
   {
@@ -342,13 +344,13 @@ absl::Status SingleMachine::ShutdownSession() {
   // therefore we need to delete the threadpool with the background thread.
   // That thread itself will also never complete, so the user should
   // abort the process to avoid leaking too many resources.
-  auto n = std::make_shared<Notification>();
+  auto n = std::make_shared<absl::Notification>();
   Env::Default()->SchedClosure([this, n]() {
     thread_pool_.reset();
     n->Notify();
   });
-  int64_t timeout_us = 1000000ll * timeout_s_;
-  const bool notified = WaitForNotificationWithTimeout(n.get(), timeout_us);
+  const bool notified =
+      n->WaitForNotificationWithTimeout(absl::Seconds(timeout_s_));
   if (!notified) {
     // Let the caller know that we can't shutdown the session properly since
     // there are calls to Session::Run() still running.
@@ -401,7 +403,7 @@ void SingleMachine::MergeCosts(CostGraphDef* graph_costs,
   graph_costs->mutable_node()->Reserve(graph_costs->node_size() +
                                        init_costs.node_size() +
                                        queue_costs.node_size());
-  std::unordered_set<string> nodes_seen;
+  std::unordered_set<std::string> nodes_seen;
   int queue_costs_id_offset = graph_costs->node_size();
   for (const auto& node : graph_costs->node()) {
     nodes_seen.insert(node.name());

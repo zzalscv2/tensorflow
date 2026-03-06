@@ -66,7 +66,7 @@ absl::StatusOr<bool> SliceConcatForwarding(HloInstruction* slice) {
     return false;
   }
 
-  if (slice->shape().dimensions_size() != 1) {
+  if (slice->shape().dimensions().size() != 1) {
     // Slice concat forwarding only work for size 1 tensor.
     return false;
   }
@@ -105,15 +105,15 @@ absl::StatusOr<bool> ReshapeBroadcastForwarding(HloInstruction* reshape) {
     return false;
   }
 
-  if (reshape->shape().dimensions_size() != 0) {
+  if (reshape->shape().dimensions().size() != 0) {
     return false;
   }
 
-  if (broadcast->shape().dimensions_size() != 1) {
+  if (broadcast->shape().dimensions().size() != 1) {
     return false;
   }
 
-  if (broadcast->mutable_operand(0)->shape().dimensions_size() != 0) {
+  if (broadcast->mutable_operand(0)->shape().dimensions().size() != 0) {
     return false;
   }
 
@@ -170,11 +170,11 @@ absl::StatusOr<bool> IdentityReshapeRemoving(HloInstruction* reshape) {
 
 }  // namespace
 
-absl::StatusOr<bool> DynamicDimensionSimplifier::Run(
+absl::StatusOr<bool> DynamicDimensionSimplifier::RunImpl(
     HloModule* module,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
-  XLA_VLOG_LINES(
-      2, "DynamicDimensionSimplifier::Run(), before:\n" + module->ToString());
+  XLA_VLOG_LINES(2, "DynamicDimensionSimplifier::RunImpl(), before:\n" +
+                        module->ToString());
   bool changed = false;
 
   for (auto* comp : module->MakeNonfusionComputations(execution_threads)) {
@@ -215,8 +215,8 @@ absl::StatusOr<bool> DynamicDimensionSimplifier::Run(
       changed |= local_changed;
     }
   }
-  XLA_VLOG_LINES(
-      2, "DynamicDimensionSimplifier::Run(), after:\n" + module->ToString());
+  XLA_VLOG_LINES(2, "DynamicDimensionSimplifier::RunImpl(), after:\n" +
+                        module->ToString());
   return changed;
 }
 }  // namespace xla

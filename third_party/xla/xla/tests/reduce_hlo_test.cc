@@ -16,11 +16,10 @@ limitations under the License.
 #include <array>
 #include <cstdint>
 #include <memory>
-#include <ostream>
 #include <string>
 #include <utility>
-#include <vector>
 
+#include <gtest/gtest.h>
 #include "absl/log/log.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
@@ -33,11 +32,10 @@ limitations under the License.
 #include "xla/literal.h"
 #include "xla/literal_util.h"
 #include "xla/shape.h"
-#include "xla/tests/hlo_test_base.h"
-#include "xla/tests/test_macros.h"
-#include "xla/tests/test_utils.h"
-#include "tsl/platform/statusor.h"
-#include "tsl/platform/test.h"
+#include "xla/shape_layout.h"
+#include "xla/tests/hlo_pjrt_interpreter_reference_mixin.h"
+#include "xla/tests/hlo_pjrt_test_base.h"
+#include "xla/tsl/platform/statusor.h"
 
 // Tests the Reduce HLO in ways that can't be done using the ComputationBuilder
 // API.
@@ -60,12 +58,8 @@ std::string PrintReduceLayout(
   return reduce_layout_param.param.ToString();
 }
 
-void PrintTo(const ReduceLayout& reduce_layout, ::std::ostream* os) {
-  *os << reduce_layout.ToString();
-}
-
 class ReduceWithLayoutTest
-    : public HloTestBase,
+    : public HloPjRtInterpreterReferenceMixin<HloPjRtTestBase>,
       public ::testing::WithParamInterface<ReduceLayout> {
  public:
   absl::StatusOr<std::unique_ptr<HloModule>> GetParsedModule() {
@@ -91,7 +85,7 @@ ENTRY reduce.1 {
   }
 };
 
-XLA_TEST_P(ReduceWithLayoutTest, Reduce) {
+TEST_P(ReduceWithLayoutTest, Reduce) {
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module, GetParsedModule());
   HloInstruction* reduce_instruction = module->entry_computation()
                                            ->root_instruction()
@@ -128,6 +122,11 @@ XLA_TEST_P(ReduceWithLayoutTest, Reduce) {
 
   Literal reduce_input_relaid =
       reduce_input.Relayout(reduce_input_shape->layout());
+
+  // Strict layout check in PjRt requires entry computation layout to match.
+  *module->mutable_entry_computation_layout()->mutable_parameter_layout(0) =
+      ShapeLayout(*reduce_input_shape);
+
   EXPECT_TRUE(RunAndCompareNoHloPasses(
       std::move(module), {&reduce_input_relaid}, ErrorSpec(1e-5)));
 }

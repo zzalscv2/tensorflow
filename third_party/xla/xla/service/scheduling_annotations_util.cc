@@ -44,6 +44,9 @@ constexpr absl::string_view delimiter = ":";
 
 absl::Status VerifyAnnotation(const HloInstruction* instr,
                               absl::string_view annotation) {
+  if (annotation == kXlaNoOpSchedulingGroup) {
+    return absl::OkStatus();
+  }
   auto verify_integer_or_empty =
       [instr, annotation](
           absl::string_view str, absl::string_view field_name,
@@ -90,6 +93,9 @@ absl::StatusOr<std::optional<Annotation>> ParseAnnotation(
   absl::string_view annotation_str = attrs.at(kXlaSchedulingGroupIdAttr);
   VLOG(2) << "Annotated instruction: " << instr->name() << " "
           << annotation_str;
+  if (annotation_str == kXlaNoOpSchedulingGroup) {
+    return std::nullopt;
+  }
   TF_RETURN_IF_ERROR(VerifyAnnotation(instr, annotation_str));
   std::vector<absl::string_view> annotation_fields =
       absl::StrSplit(annotation_str, delimiter);
@@ -195,18 +201,18 @@ absl::Status SetSchedulingAnnotationGroupId(HloInstruction* instr, int64_t id) {
 
 absl::StatusOr<AnnotationGroupId> NextSchedulingGroupId(
     const HloModule& module) {
-  int64_t next_scheduling_id = 1;
+  int64_t next_scheduling_id = 0;
   for (const HloComputation* comp : module.computations()) {
     for (const HloInstruction* hlo : comp->instructions()) {
       TF_ASSIGN_OR_RETURN(std::optional<int64_t> scheduling_id,
                           GetSchedulingAnnotationGroupId(hlo));
       if (scheduling_id.has_value()) {
         next_scheduling_id =
-            std::max(next_scheduling_id, scheduling_id.value() + 1);
+            std::max(next_scheduling_id, scheduling_id.value());
       }
     }
   }
-  return next_scheduling_id;
+  return next_scheduling_id + 1;
 }
 
 bool IsIterationIdConstentWithPipeliningDirection(

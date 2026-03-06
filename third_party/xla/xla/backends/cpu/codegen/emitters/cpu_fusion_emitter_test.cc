@@ -30,8 +30,9 @@ limitations under the License.
 #include "xla/backends/cpu/codegen/emitters/cpu_scatter_emitter.h"
 #include "xla/backends/cpu/codegen/fusion_compiler.h"
 #include "xla/codegen/kernel_definition.h"
-#include "xla/codegen/llvm_ir_kernel_source.h"
+#include "xla/codegen/llvm_kernel_source.h"
 #include "xla/codegen/mlir_kernel_source.h"
+#include "xla/hlo/analysis/alias_info.h"
 #include "xla/hlo/analysis/hlo_ordering.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_instructions.h"
@@ -43,25 +44,10 @@ limitations under the License.
 #include "xla/service/cpu/cpu_executable.h"
 #include "xla/service/logical_buffer.h"
 #include "xla/tsl/platform/statusor.h"
-#include "tsl/platform/casts.h"
 
 namespace xla {
 namespace cpu {
 namespace {
-
-std::string LlvmModuleToString(const llvm::Module& module) {
-  std::string dump;
-  llvm::raw_string_ostream stream(dump);
-  stream << module;
-  return dump;
-}
-
-std::string MlirModuleToString(const mlir::ModuleOp& module) {
-  std::string mlir_dump;
-  llvm::raw_string_ostream mlir_stream(mlir_dump);
-  module->print(mlir_stream);
-  return mlir_dump;
-}
 
 class CpuFusionEmitterTest : public HloHardwareIndependentTestBase {
  protected:
@@ -72,8 +58,11 @@ class CpuFusionEmitterTest : public HloHardwareIndependentTestBase {
         [](const BufferValue& buffer) {
           return CpuExecutable::ShapeSizeBytes(buffer.shape());
         },
-        [](LogicalBuffer::Color) { return /*alignment=*/1; });
+        &alias_info_, [](LogicalBuffer::Color) { return /*alignment=*/1; },
+        BufferAssigner::Options{});
   }
+
+  AliasInfo alias_info_;
 };
 
 static constexpr absl::string_view kScatterHlo = R"(
@@ -108,7 +97,7 @@ static constexpr absl::string_view kScatterHlo = R"(
 TEST_F(CpuFusionEmitterTest, ScatterMlir) {
   constexpr absl::string_view kExpected = R"(
     CHECK:       module @wrapped_scatter attributes {{{.*}}xla.extra_backend_options = #xla<extra_backend_options["xla_cpu_disable_loop_unrolling"]>{{.*}}}
-    CHECK:       @wrapped_scatter_entry(
+    CHECK:       @wrapped_scatter(
     CHECK-SAME:    xla.entry
     CHECK:           %[[XLA_LOOP:.+]] = xla.loop
     CHECK:           xla.pure_call
@@ -117,30 +106,20 @@ TEST_F(CpuFusionEmitterTest, ScatterMlir) {
     CHECK:             xla.pure_call
     CHECK:             arith.addf
     CHECK:           return %[[XLA_LOOP]]
-    CHECK:       @wrapped_scatter(
-    CHECK-SAME:    %[[CALL_FRAME:.+]]: !xla_cpu.call_frame)
-    CHECK-SAME:    -> !xla_cpu.error
-    CHECK-DAG:       xla_cpu.thread_id %[[CALL_FRAME]]
-    CHECK-DAG:       xla_cpu.load %[[CALL_FRAME]], 0
-    CHECK-DAG:       xla_cpu.load %[[CALL_FRAME]], 1
-    CHECK-DAG:       xla_cpu.load %[[CALL_FRAME]], 2
-    CHECK-DAG:       xla_cpu.load %[[CALL_FRAME]], 3
-    CHECK:           xla.pure_call @wrapped_scatter_entry({{.*}}) {noinline}
   )";
   TF_ASSERT_OK_AND_ASSIGN(auto hlo_module,
                           ParseAndReturnVerifiedModule(kScatterHlo));
   auto& debug_options = hlo_module->mutable_config().mutable_debug_options();
-  debug_options.set_xla_cpu_use_thunk_runtime(true);
   debug_options.set_xla_cpu_use_fusion_emitters(true);
   TF_ASSERT_OK_AND_ASSIGN(auto buffer_assignment,
                           RunBufferAssignment(*hlo_module));
   auto fusion = Cast<HloFusionInstruction>(
       hlo_module->entry_computation()->root_instruction());
-  CpuScatterFusion emitter(*buffer_assignment, fusion);
+  auto mlir_context = FusionCompiler::CreateContext();
+  CpuScatterFusion emitter(*buffer_assignment, fusion, mlir_context.get());
   TF_ASSERT_OK_AND_ASSIGN(KernelDefinition kernel_definition,
                           emitter.EmitKernelDefinition());
-  const auto& mlir_source =
-      tsl::down_cast<const MlirKernelSource&>(kernel_definition.source());
+  const auto& mlir_source = kernel_definition.source();
   auto mlir_dump = mlir_source.ToString();
   TF_ASSERT_OK_AND_ASSIGN(bool filecheck_matched,
                           RunFileCheck(mlir_dump, kExpected));
@@ -150,6 +129,7 @@ TEST_F(CpuFusionEmitterTest, ScatterMlir) {
 TEST_F(CpuFusionEmitterTest, ScatterLlvm) {
   constexpr absl::string_view kExpected = R"(
     CHECK-NOT:  @wrapped_scatter_entry(
+    CHECK-NOT:  @wrapped_scatter_kernel(
     CHECK:      @wrapped_scatter(
     CHECK:      uwtable "frame-pointer"="all"
     CHECK-SAME: "prefer-vector-width"="512"
@@ -157,21 +137,21 @@ TEST_F(CpuFusionEmitterTest, ScatterLlvm) {
   TF_ASSERT_OK_AND_ASSIGN(auto hlo_module,
                           ParseAndReturnVerifiedModule(kScatterHlo));
   auto& debug_options = hlo_module->mutable_config().mutable_debug_options();
-  debug_options.set_xla_cpu_use_thunk_runtime(true);
   debug_options.set_xla_cpu_use_fusion_emitters(true);
   debug_options.set_xla_cpu_prefer_vector_width(512);
   TF_ASSERT_OK_AND_ASSIGN(auto buffer_assignment,
                           RunBufferAssignment(*hlo_module));
   auto fusion = Cast<HloFusionInstruction>(
       hlo_module->entry_computation()->root_instruction());
-  CpuScatterFusion emitter(*buffer_assignment, fusion);
+  auto mlir_context = FusionCompiler::CreateContext();
+  CpuScatterFusion emitter(*buffer_assignment, fusion, mlir_context.get());
   TF_ASSERT_OK_AND_ASSIGN(KernelDefinition kernel_definition,
                           emitter.EmitKernelDefinition());
-  auto [spec, source] = std::move(kernel_definition).release();
-  auto& mlir_source = tsl::down_cast<MlirKernelSource&>(*source);
-  FusionCompiler compiler(FusionCompiler::Options{});
-  TF_ASSERT_OK_AND_ASSIGN(LlvmIrKernelSource llvm_source,
-                          compiler.Compile(std::move(mlir_source)));
+  FusionCompiler compiler(mlir_context.get(),
+                          FusionCompiler::Options{512, 1, true});
+  TF_ASSERT_OK_AND_ASSIGN(
+      LlvmKernelSource llvm_source,
+      compiler.Compile(std::move(kernel_definition).TakeSource()));
   auto llvm_dump = llvm_source.ToString();
   TF_ASSERT_OK_AND_ASSIGN(bool filecheck_matched,
                           RunFileCheck(llvm_dump, kExpected));

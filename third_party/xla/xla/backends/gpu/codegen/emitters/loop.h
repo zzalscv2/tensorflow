@@ -17,8 +17,10 @@ limitations under the License.
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "xla/backends/gpu/codegen/emitters/emitter_base.h"
@@ -33,25 +35,31 @@ namespace xla {
 namespace gpu {
 
 // Generic loop fusion. Lowers to LLVM via MLIR.
-class LoopFusion : public EmitterBase {
+class LoopFusion final : public EmitterBase {
  public:
-  explicit LoopFusion(const HloFusionAnalysis& analysis)
+  LoopFusion(const HloFusionAnalysis& analysis, mlir::MLIRContext* mlir_context)
       : analysis_(analysis), config_(ComputeLoopFusionConfig(analysis)) {}
   LaunchDimensions launch_dimensions() const override;
 
   std::optional<IndexingMap> ComputeThreadIdToOutputIndexing(
-      int64_t root_index, mlir::MLIRContext* ctx) const override;
+      int64_t root_index, mlir::MLIRContext* mlir_context) const override;
 
-  std::optional<IndexingMap> ComputeThreadIdToInputIndexing(
-      int64_t root_index, int64_t hero_operand_index,
-      mlir::MLIRContext* ctx) const override;
+  std::optional<std::vector<IndexingMap>> ComputeThreadIdToInputIndexing(
+      int64_t root_index, mlir::MLIRContext* mlir_context) const override;
 
- protected:
+ private:
+  absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> CreateMLIRModule(
+      mlir::MLIRContext& context, const HloFusionInstruction& fusion,
+      const std::string& entry_function_name,
+      const BufferAssignment* buffer_assignment) const override;
+
   absl::Status EmitEntryFunction(
       const emitters::PartitionedComputations& computations,
       const emitters::CallTargetProvider& call_targets,
       mlir::func::FuncOp entry_function,
       const HloFusionInstruction& fusion) const override;
+
+  WorkDimensions GetWorkDimensions() const;
 
  private:
   const HloFusionAnalysis& analysis_;

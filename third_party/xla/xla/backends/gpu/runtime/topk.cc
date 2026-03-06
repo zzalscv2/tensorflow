@@ -21,7 +21,6 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <memory>
 #include <string>
 #include <utility>
 
@@ -30,11 +29,10 @@ limitations under the License.
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
-#include "xla/service/gpu/kernels/custom_kernel.h"
-#include "xla/stream_executor/device_memory.h"
+#include "xla/backends/gpu/codegen/kernels/custom_kernel.h"
 #include "xla/stream_executor/gpu/gpu_kernel_registry.h"
 #include "xla/stream_executor/gpu/topk_kernel.h"
-#include "xla/stream_executor/kernel.h"
+#include "xla/stream_executor/kernel_args_packing_spec.h"
 #include "xla/stream_executor/kernel_spec.h"
 #include "xla/stream_executor/launch_dim.h"
 #include "xla/stream_executor/platform.h"
@@ -46,8 +44,6 @@ limitations under the License.
 namespace xla::gpu::kernel::topk {
 
 namespace {
-
-using KernelArgsPacking = se::MultiKernelLoaderSpec::KernelArgsPacking;
 
 // The optimal number of threads is the smaller value between the number of
 // threads available per block and the number of slices of data.
@@ -66,27 +62,21 @@ size_t EstimateOptimalNumThreads(size_t n, size_t k, size_t batch_size) {
   return std::min(threads_per_block, min_slice);
 }
 
-// Returns the function creating packed arguments for TopK kernel.
-template <typename T>
-KernelArgsPacking CreateTopKArgsPacking(size_t num_elements, size_t k) {
-  using Packed = absl::StatusOr<std::unique_ptr<se::KernelArgsPackedArrayBase>>;
-
-  return [=](const se::Kernel& kernel, const se::KernelArgs& args) -> Packed {
-    auto* mem_args = se::Cast<se::KernelArgsDeviceMemoryArray>(&args);
-
-    se::DeviceMemory<T> data(mem_args->device_memory_args()[0]);
-    se::DeviceMemory<T> top_elements(mem_args->device_memory_args()[1]);
-    se::DeviceMemory<uint32_t> top_indices(mem_args->device_memory_args()[2]);
-
-    return se::PackKernelArgs(args.number_of_shared_bytes(), data, num_elements,
-                              top_elements, top_indices, k);
-  };
+// Returns a packing spec for invoking the TopK kernel.
+se::KernelArgsPackingSpec CreateTopKArgsPacking(size_t num_elements, size_t k) {
+  se::KernelArgsPackingSpec spec;
+  spec.AddAddressArgument(0);  // data
+  spec.AddConstantArgument(num_elements);
+  spec.AddAddressArgument(1);  // top_elements
+  spec.AddAddressArgument(2);  // top_indices
+  spec.AddConstantArgument(k);
+  return spec;
 }
 
 // Finds the TopK kernel for the given platform registered in the global
 // registry.
 template <size_t K, typename T, typename VT>
-absl::StatusOr<se::MultiKernelLoaderSpec> GetTopKKernelForPlatform(
+absl::StatusOr<se::KernelLoaderSpec> GetTopKKernelForPlatform(
     se::Platform::Id id) {
   return se::gpu::GpuKernelRegistry::GetGlobalRegistry()
       .FindKernel<se::gpu::TopKKernel<K, T, VT>>(id);
@@ -94,7 +84,7 @@ absl::StatusOr<se::MultiKernelLoaderSpec> GetTopKKernelForPlatform(
 
 // Gets the right version of TopK kernel based on the value of `k`.
 template <typename T, typename VT>
-absl::StatusOr<se::MultiKernelLoaderSpec> GetTopKKernelForKAndPlatform(
+absl::StatusOr<se::KernelLoaderSpec> GetTopKKernelForKAndPlatform(
     size_t k, se::Platform::Id id) {
   if (k <= 1) {
     return GetTopKKernelForPlatform<1, T, VT>(id);
@@ -116,7 +106,7 @@ absl::StatusOr<se::MultiKernelLoaderSpec> GetTopKKernelForKAndPlatform(
 
 // Gets the right version of TopK kernel based on the value of `n`.
 template <typename T>
-absl::StatusOr<se::MultiKernelLoaderSpec> GetTopKKernelForKAndPlatformAndN(
+absl::StatusOr<se::KernelLoaderSpec> GetTopKKernelForKAndPlatformAndN(
     size_t k, se::Platform::Id id, size_t n) {
   // TODO(doak): Switch to uint32_t if we don't have an efficient
   // implementation for uint16_t.
@@ -124,6 +114,15 @@ absl::StatusOr<se::MultiKernelLoaderSpec> GetTopKKernelForKAndPlatformAndN(
     return GetTopKKernelForKAndPlatform<T, uint16_t>(k, id);
   }
   return GetTopKKernelForKAndPlatform<T, uint32_t>(k, id);
+}
+
+// GetTopKKernelForKAndPlatformAndN specialization for float type.
+template <>
+absl::StatusOr<se::KernelLoaderSpec> GetTopKKernelForKAndPlatformAndN<float>(
+    size_t k, se::Platform::Id id, size_t n) {
+  // For float data on the H100, using uint32_t indices provides better overall
+  // performance than uint16_t, even for smaller values of n.
+  return GetTopKKernelForKAndPlatform<float, uint32_t>(k, id);
 }
 
 // Implementation for creating a CustomKernel for TopK operation with element
@@ -146,10 +145,10 @@ absl::StatusOr<CustomKernel> GetTypedTopK(std::string name, size_t num_elements,
   TF_ASSIGN_OR_RETURN(se::Platform * platform,
                       se::PlatformManager::PlatformWithName(platform_name));
   TF_ASSIGN_OR_RETURN(
-      se::MultiKernelLoaderSpec spec,
+      se::KernelLoaderSpec spec,
       GetTopKKernelForKAndPlatformAndN<T>(k, platform->id(), num_elements));
 
-  spec.set_kernel_args_packing(CreateTopKArgsPacking<T>(num_elements, k));
+  spec.set_kernel_args_packing(CreateTopKArgsPacking(num_elements, k));
   return CustomKernel(std::move(name), std::move(spec),
                       se::BlockDim(batch_size, 1, 1),
                       se::ThreadDim(num_threads, 1, 1), shmem_size);

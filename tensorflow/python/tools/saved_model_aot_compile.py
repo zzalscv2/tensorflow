@@ -367,6 +367,7 @@ def aot_compile_cpu_meta_graph_def(checkpoint_path,
     else:
       xla_flags += ' --xla_cpu_multi_thread_eigen={}'.format(
           'true' if multithreading else 'false')
+    xla_flags += ' --xla_cpu_experimental_ynn_fusion_type= '
     os.environ['XLA_FLAGS'] = xla_flags
 
   temp_dir = test.get_temp_dir()
@@ -402,9 +403,11 @@ def aot_compile_cpu_meta_graph_def(checkpoint_path,
       out_function_object='{}.o'.format(output_prefix),
       out_header='{}.h'.format(output_prefix),
       out_metadata_object='{}_metadata.o'.format(output_prefix),
+      out_constant_buffers_object='{}_constants.o'.format(output_prefix),
       gen_name_to_index=True,
       # ProgramShape isn't uniquefied by entry_point.
-      gen_program_shape=False)
+      gen_program_shape=False,
+  )
 
 
 def _optimize_graph(meta_graph_def, signature_def):

@@ -1,3 +1,5 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = [
@@ -39,13 +41,18 @@ cc_library(
         "@com_google_absl//absl/container:flat_hash_set",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:TranslateLib",
-        "@local_tsl//tsl/platform:protobuf",
-        "@local_xla//xla/client:client_library",
-        "@local_xla//xla/client:compile_only_client",
-        "@local_xla//xla/service/cpu:cpu_compiler",
-        "@local_xla//xla/service/cpu:cpu_transfer_manager",
-        "@local_xla//xla/stream_executor/host:host_platform",
-        "@local_xla//xla/stream_executor/host:host_platform_id",
+        "@tsl//tsl/platform:protobuf",
+        "@xla//xla/client:client_library",
+        "@xla//xla/client:compile_only_client",
+        "@xla//xla/service/cpu:cpu_compiler",
+        "@xla//xla/service/cpu:cpu_transfer_manager",
+        "@xla//xla/stream_executor/host:host_platform",
+        "@xla//xla/stream_executor/host:host_platform_id",
     ],
     alwayslink = 1,
+)
+
+cc_library(
+    name = "safe_cast",
+    hdrs = ["safe_cast.h"],
 )

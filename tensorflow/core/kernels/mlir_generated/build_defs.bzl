@@ -6,11 +6,14 @@ load(
     "@local_config_rocm//rocm:build_defs.bzl",
     "rocm_gpu_architectures",
 )
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load(
-    "@local_xla//xla/stream_executor:build_defs.bzl",
+    "@xla//xla/stream_executor:build_defs.bzl",
     "if_gpu_is_configured",
 )
-load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 def _lookup_file(filegroup, path):
     """Extracts file at (relative) path in filegroup."""
@@ -84,6 +87,7 @@ def _gen_mlir_op_impl(ctx):
             )
         ),
         use_default_shell_env = True,
+        mnemonic = "GenMlirOp",
     )
 
 _gen_mlir_op_rule = rule(
@@ -426,8 +430,7 @@ def _gen_kernel_library(
         )
         for (type, output_type, jit, jit_i64_indexed_for_large_tensors) in all_kernels
     ] + ["//tensorflow/compiler/mlir/tools/kernel_gen:tf_framework_c_interface"]
-
-    native.cc_library(
+    cc_library(
         name = name,
         deps = if_gpu_is_configured(kernel_deps + [
             "//tensorflow/compiler/mlir/tools/kernel_gen:tf_gpu_runtime_wrappers",

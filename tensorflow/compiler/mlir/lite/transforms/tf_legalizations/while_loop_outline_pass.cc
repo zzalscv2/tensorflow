@@ -59,10 +59,10 @@ bool IsCompatibleTypeWithTFLCastOp(Type type) {
       elemType.isF64())
     return true;
 
-  // I1, I4, I8, I16, I32, I64 types are allowed.
-  if (elemType.isInteger(1) || elemType.isInteger(4) || elemType.isInteger(8) ||
-      elemType.isInteger(16) || elemType.isInteger(32) ||
-      elemType.isInteger(64))
+  // I1, I2, I4, I8, I16, I32, I64 types are allowed.
+  if (elemType.isInteger(1) || elemType.isInteger(2) || elemType.isInteger(4) ||
+      elemType.isInteger(8) || elemType.isInteger(16) ||
+      elemType.isInteger(32) || elemType.isInteger(64))
     return true;
 
   // Complex<F<32>> is allowed.
@@ -70,9 +70,11 @@ bool IsCompatibleTypeWithTFLCastOp(Type type) {
       mlir::cast<ComplexType>(elemType).getElementType().isF32())
     return true;
 
-  // QUINT8 and UI8 are allowed.
+  // QUINT8, UI4, UI8, UI16, and UI32 are allowed.
   if (mlir::isa<TF::Quint8Type>(elemType) ||
-      (elemType.isInteger(8) && mlir::cast<IntegerType>(elemType).isUnsigned()))
+      (elemType.isInteger() && mlir::cast<IntegerType>(elemType).isUnsigned() &&
+       (elemType.isInteger(4) || elemType.isInteger(8) ||
+        elemType.isInteger(16) || elemType.isInteger(32))))
     return true;
 
   return false;
@@ -95,7 +97,7 @@ func::FuncOp CreateOutlineFunc(StringRef name, Region& region,
     type = FunctionType::get(context, types, result_types);
   }
 
-  auto outlined_func = builder.create<func::FuncOp>(loc, name, type);
+  auto outlined_func = func::FuncOp::create(builder, loc, name, type);
   outlined_func.getBody().takeBody(region);
   Region& func_region = outlined_func.getBody();
 
@@ -126,10 +128,10 @@ func::FuncOp CreateOutlineFunc(StringRef name, Region& region,
       } else {
         if (IsCompatibleTypeWithTFLCastOp(value.getType()) &&
             IsCompatibleTypeWithTFLCastOp(type)) {
-          auto cast = b.create<CastOp>(yield_op->getLoc(), type, value);
+          auto cast = CastOp::create(b, yield_op->getLoc(), type, value);
           args.push_back(cast);
         } else {
-          auto cast = b.create<TF::CastOp>(yield_op->getLoc(), type, value);
+          auto cast = TF::CastOp::create(b, yield_op->getLoc(), type, value);
           args.push_back(cast);
         }
       }
@@ -138,7 +140,7 @@ func::FuncOp CreateOutlineFunc(StringRef name, Region& region,
   } else {
     args.append(yield_op->operand_begin(), yield_op->operand_end());
   }
-  b.create<func::ReturnOp>(yield_op->getLoc(), args);
+  func::ReturnOp::create(b, yield_op->getLoc(), args);
   yield_op->erase();
   SymbolTable(region.getParentOfType<ModuleOp>()).insert(outlined_func);
   outlined_func.setPrivate();
@@ -160,8 +162,8 @@ void ReplaceRegionWithCall(StringRef name, Region& region,
   for (Type t : llvm::ArrayRef(types).drop_back(extern_values.size()))
     new_operands.push_back(block->addArgument(t, loc));
   for (Value v : extern_values) new_operands.push_back(v);
-  auto call = b.create<func::CallOp>(loc, func, new_operands);
-  b.create<YieldOp>(loc, call.getResults());
+  auto call = func::CallOp::create(b, loc, func, new_operands);
+  YieldOp::create(b, loc, call.getResults());
 }
 }  // namespace
 
@@ -248,8 +250,9 @@ void WhileOutlinePass::OutlineWhile(WhileOp while_op) {
   for (auto extra_operand : extra_operands)
     new_types.push_back(extra_operand.getType());
 
-  auto new_while_op = OpBuilder(while_op).create<WhileOp>(
-      while_op.getLoc(), new_types, operands, while_op->getAttrs());
+  builder.setInsertionPoint(while_op);
+  auto new_while_op = WhileOp::create(builder, while_op.getLoc(), new_types,
+                                      operands, while_op->getAttrs());
   new_while_op.getCond().takeBody(while_op.getCond());
   new_while_op.getBody().takeBody(while_op.getBody());
   while_op.replaceAllUsesWith(

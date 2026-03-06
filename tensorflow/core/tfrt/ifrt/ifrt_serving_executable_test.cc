@@ -24,16 +24,30 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include "absl/log/check.h"
 #include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "xla/python/ifrt/future.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
+#include "mlir/IR/BuiltinOps.h"  // from @llvm-project
+#include "mlir/IR/DialectRegistry.h"  // from @llvm-project
+#include "mlir/IR/MLIRContext.h"  // from @llvm-project
+#include "mlir/IR/OwningOpRef.h"  // from @llvm-project
+#include "mlir/InitAllDialects.h"  // from @llvm-project
+#include "mlir/Parser/Parser.h"  // from @llvm-project
+#include "mlir/Support/LLVM.h"  // from @llvm-project
+#include "tensorflow/compiler/mlir/tensorflow/dialect_registration.h"
+#include "tensorflow/compiler/mlir/tfrt/transforms/ifrt/ifrt_types.h"
 #include "xla/python/ifrt/test_util.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
+#include "xla/tsl/concurrency/future.h"
 #include "xla/tsl/framework/serving_device_selector.h"
 #include "xla/tsl/framework/test_util/mock_serving_device_selector.h"
 #include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/tsl/platform/statusor.h"
+#include "xla/xla_data.pb.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_matcher.h"
 #include "tensorflow/core/framework/tensor_shape.h"
@@ -52,7 +66,6 @@ using ::tensorflow::test::AsTensor;
 using ::tensorflow::test::TensorEq;
 using ::testing::ElementsAre;
 using ::testing::Return;
-using ::tsl::testing::StatusIs;
 
 struct VariableInputTestParam {
   std::vector<tensorflow::Tensor> in_tensors;
@@ -177,7 +190,8 @@ TEST_F(IfrtServingExecutableTest, ReturnFailOnUncompiledShapeAfterFrozen) {
   std::vector<tensorflow::Tensor> outputs2;
   auto status = executable->Execute(absl::MakeSpan(inputs2), {});
 
-  EXPECT_THAT(status, StatusIs(absl::StatusCode::kFailedPrecondition));
+  EXPECT_THAT(status,
+              absl_testing::StatusIs(absl::StatusCode::kFailedPrecondition));
 }
 
 TEST_F(IfrtServingExecutableTest, Spmd) {
@@ -232,6 +246,73 @@ TEST_F(IfrtServingExecutableTest, SpmdTwoReturns) {
               ElementsAre(TensorEq(expected_out0), TensorEq(expected_out1)));
 }
 
+TEST_F(IfrtServingExecutableTest, SpmdXlaCallModuleShardy) {
+  int64_t program_id = 111111;
+  EXPECT_CALL(selector_, ReserveDevice(absl::StrCat(program_id))).Times(0);
+  auto executable = helper_->MakeExecutable(
+      program_id,
+      GetMlirModulePath("spmd_executable_xla_call_module_shardy.mlir"));
+
+  auto x = AsTensor<int32_t>({11, 12, 13, 14, 15, 16, 17, 18},
+                             tensorflow::TensorShape({4, 2}));
+  auto y = AsTensor<int32_t>({8, 7, 6, 5, 4, 3, 2, 1},
+                             tensorflow::TensorShape({4, 2}));
+
+  const auto expected_out0 = AsTensor<int32_t>({3, 5, 7, 9, 11, 13, 15, 17},
+                                               tensorflow::TensorShape({4, 2}));
+  const auto expected_out1 = AsTensor<int32_t>({19, 19, 19, 19, 19, 19, 19, 19},
+                                               tensorflow::TensorShape({4, 2}));
+
+  std::vector<tensorflow::Tensor> inputs{x, y};
+
+  TF_ASSERT_OK_AND_ASSIGN(auto result,
+                          executable->Execute(absl::MakeSpan(inputs), {}));
+
+  EXPECT_THAT(result,
+              ElementsAre(TensorEq(expected_out0), TensorEq(expected_out1)));
+}
+
+TEST_F(IfrtServingExecutableTest, EncodeLayout) {
+  mlir::DialectRegistry registry;
+  mlir::registerAllDialects(registry);
+  mlir::RegisterAllTensorFlowDialects(registry);
+  mlir::MLIRContext context(registry);
+  context.loadAllAvailableDialects();
+
+  const char* const kMlirModuleStr = R"(
+    module {
+      func.func @main(%arg0: tensor<2x2xf32>, %arg1: tensor<2x2xf32>) -> tensor<2x2xf32> {
+        %0 = "tf.Add"(%arg0, %arg1) : (tensor<2x2xf32>, tensor<2x2xf32>) -> tensor<2x2xf32>
+        return %0 : tensor<2x2xf32>
+      }
+    }
+  )";
+
+  mlir::OwningOpRef<mlir::ModuleOp> module =
+      mlir::parseSourceString<mlir::ModuleOp>(kMlirModuleStr, &context);
+  ASSERT_TRUE(module);
+
+  // Create shapes with layout
+  xla::Shape shape0 = xla::ShapeUtil::MakeShapeWithDenseLayout(
+      xla::PrimitiveType::F32, {2, 2}, {1, 0});
+  xla::Shape shape1 = xla::ShapeUtil::MakeShapeWithDenseLayout(
+      xla::PrimitiveType::F32, {2, 2}, {0, 1});  // Different layout
+  std::vector<xla::Shape> input_shapes = {shape0, shape1};
+
+  TF_ASSERT_OK(EncodeLayout(absl::MakeSpan(input_shapes), *module));
+
+  auto func = module->lookupSymbol<mlir::func::FuncOp>("main");
+  ASSERT_TRUE(func);
+
+  auto attr0 = func.getArgAttr(0, "mhlo.layout_mode");
+  ASSERT_TRUE(attr0);
+  EXPECT_EQ(mlir::cast<mlir::StringAttr>(attr0).getValue(), "{1,0}");
+
+  auto attr1 = func.getArgAttr(1, "mhlo.layout_mode");
+  ASSERT_TRUE(attr1);
+  EXPECT_EQ(mlir::cast<mlir::StringAttr>(attr1).getValue(), "{0,1}");
+}
+
 TEST_F(IfrtServingExecutableTest, NoReturn) {
   int64_t program_id = 111111;
   EXPECT_CALL(selector_, ReserveDevice(absl::StrCat(program_id)))
@@ -272,13 +353,12 @@ TEST_P(VariableInputTest, InterleaveVariable) {
   std::vector<int> loaded_variable_indices;
   for (int i = 0; i < GetParam().in_tensors.size(); i++) {
     if (GetParam().is_variable[i]) {
-      auto input_tensor_promise =
-          xla::ifrt::Future<tensorflow::Tensor>::CreatePromise();
-      auto input_tensor_future =
-          xla::ifrt::Future<tensorflow::Tensor>(input_tensor_promise);
+      auto [input_tensor_promise, input_tensor_future] =
+          tsl::MakePromise<tensorflow::Tensor>();
       IfrtRestoreTensorRegistry::RestoredTensorInfo restore_tensor_info = {
-          .dtype_and_shape{.dtype = GetParam().in_tensors[i].dtype(),
-                           .shape = GetParam().in_tensors[i].shape()},
+          .dtype_and_shape = tsl::Future<DtypeAndShape>(
+              DtypeAndShape{.dtype = GetParam().in_tensors[i].dtype(),
+                            .shape = GetParam().in_tensors[i].shape()}),
           .tensor_future = input_tensor_future};
       std::string variable_name = absl::StrCat("variable_", i);
       ASSERT_OK(ifrt_restore_tensor_registry->TryRegister(variable_name,

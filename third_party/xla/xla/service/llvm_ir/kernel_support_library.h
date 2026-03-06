@@ -18,20 +18,16 @@ limitations under the License.
 
 #include <cstdint>
 #include <functional>
-#include <string>
 
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Value.h"
 #include "xla/service/hlo_module_config.h"
 #include "xla/service/llvm_ir/llvm_loop.h"
-#include "xla/service/llvm_ir/llvm_util.h"
-#include "xla/tsl/platform/status.h"
 
 namespace xla {
 // A thin wrapper around llvm_loop.h to make code generating structured control
@@ -184,7 +180,7 @@ class KernelSupportLibrary {
           const std::function<void()>& true_block_generator,
           const std::function<void()>& false_block_generator = nullptr) {
     if (false_block_generator != nullptr) {
-      TF_CHECK_OK(IfWithStatus(
+      CHECK_OK(IfWithStatus(
           name, condition,
           [&]() {
             true_block_generator();
@@ -195,7 +191,7 @@ class KernelSupportLibrary {
             return absl::OkStatus();
           }));
     } else {
-      TF_CHECK_OK(IfWithStatus(name, condition, [&]() {
+      CHECK_OK(IfWithStatus(name, condition, [&]() {
         true_block_generator();
         return absl::OkStatus();
       }));
@@ -251,6 +247,20 @@ class KernelSupportLibrary {
         module_config, b, kernel_name, {arg0, arg1, arg2, arg3},
         [&](ArgumentVector args) {
           kernel_body_generator(args[0], args[1], args[2], args[3]);
+        });
+  }
+
+  static void EmitAndCallOutlinedKernel(
+      const HloModuleConfig& module_config, llvm::IRBuilderBase* b,
+      absl::string_view kernel_name, llvm::Value* arg0, llvm::Value* arg1,
+      llvm::Value* arg2, llvm::Value* arg3, llvm::Value* arg4,
+      const std::function<void(llvm::Value*, llvm::Value*, llvm::Value*,
+                               llvm::Value*, llvm::Value*)>&
+          kernel_body_generator) {
+    EmitAndCallOutlinedKernel(
+        module_config, b, kernel_name, {arg0, arg1, arg2, arg3, arg4},
+        [&](ArgumentVector args) {
+          kernel_body_generator(args[0], args[1], args[2], args[3], args[4]);
         });
   }
 

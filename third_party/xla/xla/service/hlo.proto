@@ -42,6 +42,19 @@ enum CustomCallSchedule {
   SCHEDULE_EARLIEST = 2;
 }
 
+enum TriState {
+  TRI_STATE_UNSPECIFIED = 0;
+  TRI_STATE_TRUE = 1;
+  TRI_STATE_FALSE = 2;
+}
+
+enum ConvolutionKind {
+  CONVOLUTION_KIND_UNSET = 0;
+  CONVOLUTION_KIND_FPROP = 1;
+  CONVOLUTION_KIND_DGRAD = 2;
+  CONVOLUTION_KIND_WGRAD = 3;
+}
+
 // The version of the API used by the custom call function. The signatures for
 // each version are given below.
 // TODO(b/189822916): Remove this enum when all clients are migrated to the
@@ -113,7 +126,7 @@ enum CustomCallApiVersion {
 }
 
 // Serialization of HloInstruction.
-// Next ID: 92
+// Next ID: 99
 message HloInstructionProto {
   reserved 10;
   reserved "parameter_name";
@@ -381,11 +394,15 @@ message HloInstructionProto {
   // Used to be wait_on_operation_queues.
   reserved 84;
 
-  // Sparsity descriptor for dot operation.
-  repeated xla.SparsityDescriptor dot_sparsity = 86;
+  // Used to be dot_sparsity.
+  reserved 86;
 
   // Represents the list of devices that participate in a collective operation.
-  xla.CollectiveDeviceListProto collective_device_list = 87;
+  oneof replica_group_list {
+    xla.CollectiveDeviceListProto collective_device_list = 87;
+    xla.IotaReplicaGroupListProto iota_collective_device_list = 92;
+    xla.MeshAxesReplicaGroupListProto mesh_axes_replica_group_list = 93;
+  }
 
   // For HLO value tracking.
   xla.OriginalValueProto original_value = 88;
@@ -395,6 +412,21 @@ message HloInstructionProto {
 
   // Accuracy for unary functions with multiple implementations.
   xla.ResultAccuracy result_accuracy = 91;
+
+  // Whether the scan instruction is in reverse order.
+  bool is_reverse = 94;
+
+  // The number of carries in the scan instruction.
+  int64 num_carries = 95;
+
+  // Whether the scan instruction is associative.
+  TriState is_associative = 96;
+
+  // Conv type (fprop, dgrad, wgrad)
+  ConvolutionKind conv_kind = 97;
+
+  // Convolution sparsity config.
+  SparsityConfig sparsity_config = 98;
 }
 
 // Serialization of HloComputation.
@@ -523,8 +555,12 @@ message StackFrameIndexProto {
     int32 function_name_id = 2;
     // Line number.
     int32 line = 3;
+    // End line number.
+    int32 end_line = 5;
     // Column number.
     int32 column = 4;
+    // End column number.
+    int32 end_column = 6;
   }
 
   // Serialization of frame.
@@ -546,6 +582,7 @@ message StackFrameIndexProto {
 }
 
 // Serialization of HloModule.
+// Next ID: 22
 message HloModuleProto {
   string name = 1;
   string entry_computation_name = 2;
@@ -593,13 +630,7 @@ message HloModuleProto {
     SHARDING = 6;
     SCHEDULE = 7;
   }
-  // The type of profile generation strategy used to generate the profile.
-  enum ProfileGenerationStrategy {
-    PROFILE_GENERATION_STRATEGY_UNKNOWN = 0;
-    PROFILE_GENERATION_STRATEGY_GA = 1;
-    PROFILE_GENERATION_STRATEGY_FANTA = 2;
-    PROFILE_GENERATION_STRATEGY_CFO = 3;
-  }
+
   // Information about the optimization profile that this module contains.
   message ProfileInfo {
     // The optimization profiles that this module contains.
@@ -614,7 +645,7 @@ message HloModuleProto {
     // in the profile table.
     string fingerprint = 5;
     // The type of profile generation strategy used to generate the profile.
-    ProfileGenerationStrategy profile_generation_strategy = 6;
+    xla.ProfileGenerationStrategy profile_generation_strategy = 6;
     // The original changelist the profile was generated at.
     int64 original_changelist = 7;
     // The changelist this profile was last updated at.
@@ -632,6 +663,11 @@ message HloModuleProto {
 
   // Frontend attributes to pass to the XLA backend.
   xla.FrontendAttributes frontend_attributes = 19;
+
+  xla.OriginalValueRecoveryTableProto original_value_recovery_table = 20;
+
+  // The type of the device that the module is targeted for.
+  string device_type = 21;
 
   reserved 9;
   reserved "dynamic_parameter_binding";
@@ -667,6 +703,7 @@ message BufferAllocationProto {
     int64 logical_buffer_id = 1;
     int64 offset = 2;
     int64 size = 3;
+    xla.PrimitiveType element_type = 4;
   }
 
   int64 index = 1;
@@ -677,6 +714,7 @@ message BufferAllocationProto {
   bool is_constant = 12;
   int64 parameter_number = 6;
   repeated int64 parameter_shape_index = 10;
+  bool is_parameter_aliased_with_output = 13;
   bool maybe_live_out = 7;
   int64 color = 8;
   repeated Assigned assigned = 9;
@@ -858,4 +896,13 @@ message HloPassMetadata {
 
   // Used to log any number of key, value pair stats per pass.
   repeated KeyValueMetric kv_metrics = 11;
+}
+
+message OriginalValueRecoveryTableProto {
+  message Entry {
+    OriginalArrayProto old_original_array = 1;
+    OriginalArrayProto new_original_array = 2;
+    HloModuleProto recovery_module = 3;
+  }
+  repeated Entry entries = 1;
 }

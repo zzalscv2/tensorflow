@@ -1,4 +1,5 @@
-load("@local_xla//xla/tsl/platform:build_config_root.bzl", "if_pywrap")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@xla//xla/tsl/platform:build_config_root.bzl", "if_pywrap")
 load("//tensorflow:pytype.default.bzl", "pytype_strict_library")
 load(
     "//tensorflow:tensorflow.default.bzl",
@@ -138,8 +139,8 @@ cc_library(
     deps = [
         "//tensorflow/compiler/mlir/quantization/stablehlo:quantization_config_proto_cc",
         "//tensorflow/compiler/mlir/quantization/stablehlo/cc:config",
-        "//tensorflow/compiler/mlir/quantization/stablehlo/cc:tf_static_range_ptq",
-        "//tensorflow/compiler/mlir/quantization/stablehlo/cc:tf_weight_only_ptq",
+        "//tensorflow/compiler/mlir/quantization/stablehlo/cc:static_range_ptq",
+        "//tensorflow/compiler/mlir/quantization/stablehlo/cc:weight_only_ptq",
         "//tensorflow/compiler/mlir/quantization/tensorflow/python:py_function_lib",
         "//tensorflow/core/protobuf:for_core_protos_cc",
         "@com_google_absl//absl/container:flat_hash_map",

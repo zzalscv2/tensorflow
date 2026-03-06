@@ -34,11 +34,10 @@ class TupleSimplifier : public HloModulePass {
   ~TupleSimplifier() override {}
   absl::string_view name() const override { return "tuple-simplifier"; }
 
+ protected:
   // Runs tuple simplification on the given module. Returns whether the module
   // was changed.
-  using HloPassInterface::Run;
-  using HloPassInterface::RunOnModuleGroup;
-  absl::StatusOr<bool> Run(
+  absl::StatusOr<bool> RunImpl(
       HloModule* module,
       const absl::flat_hash_set<absl::string_view>& execution_threads) override;
 
@@ -61,7 +60,8 @@ class TupleSimplifier : public HloModulePass {
   //         |
   //       Tuple
   //
-  absl::StatusOr<bool> RemoveWholeTuple(HloInstruction* tuple);
+  // Returns 'Tuple-shaped Op' if removing succeeds otherwise nullptr.
+  absl::StatusOr<HloInstruction*> RemoveWholeTuple(HloInstruction* tuple);
 };
 
 }  // namespace xla

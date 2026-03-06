@@ -16,6 +16,7 @@ limitations under the License.
 #include "xla/service/collective_ops_utils.h"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -23,24 +24,28 @@ limitations under the License.
 #include <vector>
 
 #include "absl/algorithm/container.h"
-#include "absl/container/flat_hash_map.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "xla/hlo/ir/collective_device_list.h"
+#include "xla/core/collectives/reduction_kind.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/ir/replica_group.h"
 #include "xla/literal.h"
 #include "xla/literal_util.h"
+#include "xla/primitive_util.h"
+#include "xla/runtime/device_id.h"
 #include "xla/service/collective_permute_cycle.h"
 #include "xla/service/computation_placer.h"
-#include "xla/service/global_device_id.h"
 #include "xla/service/pattern_matcher.h"
+#include "xla/service/source_target_pairs.h"
+#include "xla/shape_util.h"
 #include "xla/status_macros.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
@@ -48,20 +53,6 @@ limitations under the License.
 
 namespace xla {
 using CycleType = collective_permute_cycle::CycleType;
-
-absl::StatusOr<ReductionKind> StringToReductionKind(
-    absl::string_view reduction_kind) {
-  if (reduction_kind == "sum") {
-    return ReductionKind::SUM;
-  } else if (reduction_kind == "prod") {
-    return ReductionKind::PRODUCT;
-  } else if (reduction_kind == "min") {
-    return ReductionKind::MIN;
-  } else if (reduction_kind == "max") {
-    return ReductionKind::MAX;
-  }
-  return InvalidArgument("Invalid reduction kind: %s", reduction_kind);
-}
 
 // Match the instruction to a reduction kind. We can represent and/or of pred as
 // min/max. This works because pred is stored as an 8-bit int of value 0 or 1.
@@ -102,6 +93,33 @@ std::optional<ReductionKind> MatchReductionComputation(
   return kind;
 }
 
+std::unique_ptr<HloComputation> MakeReductionComputation(
+    ReductionKind reduction_kind, PrimitiveType element_type) {
+  auto builder = HloComputation::Builder("make_reduction_computation");
+  auto lhs = builder.AddInstruction(HloInstruction::CreateParameter(
+      0, ShapeUtil::MakeShape(element_type, {}), "lhs"));
+  auto rhs = builder.AddInstruction(HloInstruction::CreateParameter(
+      1, ShapeUtil::MakeShape(element_type, {}), "rhs"));
+  builder.AddInstruction(HloInstruction::CreateBinary(
+      lhs->shape(), *ReductionKindToOpcode(reduction_kind), lhs, rhs));
+  return builder.Build();
+}
+
+std::optional<HloOpcode> ReductionKindToOpcode(ReductionKind reduction_kind) {
+  switch (reduction_kind) {
+    case ReductionKind::SUM:
+      return HloOpcode::kAdd;
+    case ReductionKind::PRODUCT:
+      return HloOpcode::kMultiply;
+    case ReductionKind::MIN:
+      return HloOpcode::kMinimum;
+    case ReductionKind::MAX:
+      return HloOpcode::kMaximum;
+    default:
+      return std::nullopt;
+  }
+}
+
 std::optional<Literal> GetReductionIdentity(ReductionKind kind,
                                             PrimitiveType type) {
   switch (kind) {
@@ -110,8 +128,14 @@ std::optional<Literal> GetReductionIdentity(ReductionKind kind,
     case ReductionKind::PRODUCT:
       return LiteralUtil::One(type);
     case ReductionKind::MIN:
+      if (primitive_util::IsComplexType(type)) {
+        return std::nullopt;
+      }
       return LiteralUtil::MaxValue(type);
     case ReductionKind::MAX:
+      if (primitive_util::IsComplexType(type)) {
+        return std::nullopt;
+      }
       return LiteralUtil::MinValue(type);
     default:
       return std::nullopt;
@@ -214,49 +238,14 @@ absl::StatusOr<CollectiveOpGroupMode> GetCollectiveOpGroupMode(
   return Internal("Unexpected instruction type.");
 }
 
-const CollectiveDeviceList& GetCollectiveDeviceList(const HloInstruction* hlo) {
+const CollectiveDeviceListBase& GetCollectiveDeviceList(
+    const HloInstruction* hlo) {
   return Cast<HloCollectiveInstruction>(hlo)->device_list();
 }
 
 const std::vector<ReplicaGroup>& GetCollectiveReplicaGroups(
     const HloInstruction* hlo) {
   return Cast<HloCollectiveInstruction>(hlo)->replica_groups();
-}
-
-// Returns the group formation mode implied by (a) whether the operation has
-// channel_id and (b) if it has use_global_device_ids and if yes, its value.
-absl::StatusOr<CollectiveOpGroupMode> GetCollectiveOpGroupMode(
-    bool has_channel_id, std::optional<bool> use_global_device_ids) {
-  if (!has_channel_id) {
-    if (!use_global_device_ids.has_value() || !*use_global_device_ids) {
-      return CollectiveOpGroupMode::kCrossReplica;
-    } else {
-      return InvalidArgument(
-          "Invalid combination of has_channel_id and use_global_device_ids");
-    }
-  } else {
-    if (!use_global_device_ids.has_value()) {
-      return CollectiveOpGroupMode::kCrossPartition;
-    } else if (!*use_global_device_ids) {
-      return CollectiveOpGroupMode::kCrossReplicaAndPartition;
-    } else {
-      return CollectiveOpGroupMode::kFlattenedID;
-    }
-  }
-}
-
-absl::string_view CollectiveOpGroupModeToString(
-    CollectiveOpGroupMode group_mode) {
-  switch (group_mode) {
-    case CollectiveOpGroupMode::kCrossReplica:
-      return "kCrossReplica";
-    case CollectiveOpGroupMode::kCrossPartition:
-      return "kCrossPartition";
-    case CollectiveOpGroupMode::kCrossReplicaAndPartition:
-      return "kCrossReplicaAndPartition";
-    case CollectiveOpGroupMode::kFlattenedID:
-      return "kFlattenedID";
-  }
 }
 
 absl::StatusOr<std::vector<std::vector<GlobalDeviceId>>>
@@ -271,14 +260,17 @@ GetParticipatingDevicesGroups(const DeviceAssignment& device_assignment,
 
   // If replica groups are empty, assume a group with all replicas.
   if (replica_groups.empty()) {
-    if (group_mode == CollectiveOpGroupMode::kFlattenedID) {
+    if (group_mode ==
+        CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_FLATTENED_ID) {
       // replica groups contain flattened-ids and cannot be empty.
       TF_RET_CHECK(!replica_groups.empty())
-          << "replica groups cannot be empty for kFlattenedID mode";
+          << "replica groups cannot be empty for "
+             "COLLECTIVE_OP_GROUP_MODE_FLATTENED_ID mode";
     }
 
     int total_participant_count;
-    if (group_mode == CollectiveOpGroupMode::kCrossPartition) {
+    if (group_mode ==
+        CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_CROSS_PARTITION) {
       // replica group are partition ids.
       total_participant_count = partition_count;
     } else {
@@ -295,7 +287,7 @@ GetParticipatingDevicesGroups(const DeviceAssignment& device_assignment,
 
   std::vector<std::vector<GlobalDeviceId>> groups;
   switch (group_mode) {
-    case CollectiveOpGroupMode::kCrossReplica: {
+    case CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_CROSS_REPLICA: {
       for (const auto& replica_group : participating_replica_groups) {
         // replica_group contains replica id, participants contains all
         // replica_group's replica_ids for the current partition.
@@ -313,7 +305,7 @@ GetParticipatingDevicesGroups(const DeviceAssignment& device_assignment,
       }
       return groups;
     }
-    case CollectiveOpGroupMode::kCrossPartition: {
+    case CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_CROSS_PARTITION: {
       for (const auto& replica_group : participating_replica_groups) {
         // replica_group contains partition id, participants contains all
         // replica_group's partition_ids for the current replica_id.
@@ -330,7 +322,8 @@ GetParticipatingDevicesGroups(const DeviceAssignment& device_assignment,
       }
       return groups;
     }
-    case CollectiveOpGroupMode::kCrossReplicaAndPartition: {
+    case CollectiveOpGroupMode::
+        COLLECTIVE_OP_GROUP_MODE_CROSS_REPLICA_AND_PARTITION: {
       for (const auto& replica_group : participating_replica_groups) {
         std::vector<GlobalDeviceId> participants;
         participants.reserve(replica_group.replica_ids().size() *
@@ -349,7 +342,7 @@ GetParticipatingDevicesGroups(const DeviceAssignment& device_assignment,
       }
       return groups;
     }
-    case CollectiveOpGroupMode::kFlattenedID: {
+    case CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_FLATTENED_ID: {
       for (const auto& replica_group : participating_replica_groups) {
         std::vector<GlobalDeviceId> participants;
         participants.reserve(replica_group.replica_ids().size());
@@ -365,6 +358,10 @@ GetParticipatingDevicesGroups(const DeviceAssignment& device_assignment,
       }
       return groups;
     }
+    default: {
+      return InvalidArgument("Invalid collective op group mode: %d",
+                             static_cast<int>(group_mode));
+    }
   }
 }
 
@@ -379,20 +376,23 @@ GetParticipatingDevicesGroups(const HloInstruction* collective) {
       device_assignment, GetCollectiveReplicaGroups(collective), mode);
 }
 
-absl::StatusOr<CollectiveDeviceList> GetParticipatingFlattenedIdGroups(
+absl::StatusOr<std::unique_ptr<CollectiveDeviceListBase>>
+GetParticipatingFlattenedIdGroups(
     const DeviceAssignment& device_assignment,
-    const CollectiveDeviceList& collective_device_list,
+    const CollectiveDeviceListBase& collective_device_list,
     CollectiveOpGroupMode group_mode) {
   return GetParticipatingFlattenedIdGroups(
       collective_device_list, group_mode, device_assignment.replica_count(),
       device_assignment.computation_count());
 }
 
-absl::StatusOr<CollectiveDeviceList> GetParticipatingFlattenedIdGroups(
-    const CollectiveDeviceList& collective_device_list,
+absl::StatusOr<std::unique_ptr<CollectiveDeviceListBase>>
+GetParticipatingFlattenedIdGroups(
+    const CollectiveDeviceListBase& collective_device_list,
     CollectiveOpGroupMode group_mode, int replica_count, int partition_count) {
-  if (group_mode == CollectiveOpGroupMode::kFlattenedID) {
-    return collective_device_list;
+  if (group_mode ==
+      CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_FLATTENED_ID) {
+    return collective_device_list.Clone();
   }
   std::vector<ReplicaGroup> filled_empty_replica_group;
   absl::Span<const ReplicaGroup> original_replica_groups =
@@ -401,14 +401,17 @@ absl::StatusOr<CollectiveDeviceList> GetParticipatingFlattenedIdGroups(
   if (collective_device_list.replica_groups().empty()) {
     filled_empty_replica_group.emplace_back();
     const int64_t id_count =
-        group_mode == CollectiveOpGroupMode::kCrossPartition ? partition_count
-                                                             : replica_count;
+        group_mode ==
+                CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_CROSS_PARTITION
+            ? partition_count
+            : replica_count;
     for (int i = 0; i < id_count; ++i) {
       filled_empty_replica_group.back().add_replica_ids(i);
     }
     original_replica_groups = filled_empty_replica_group;
   }
-  if (group_mode == CollectiveOpGroupMode::kCrossReplica) {
+  if (group_mode ==
+      CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_CROSS_REPLICA) {
     flattened_replica_groups.resize(original_replica_groups.size() *
                                     partition_count);
     for (int64_t i = 0, current_group_offset = 0;
@@ -424,7 +427,8 @@ absl::StatusOr<CollectiveDeviceList> GetParticipatingFlattenedIdGroups(
         }
       }
     }
-  } else if (group_mode == CollectiveOpGroupMode::kCrossPartition) {
+  } else if (group_mode ==
+             CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_CROSS_PARTITION) {
     flattened_replica_groups.resize(original_replica_groups.size() *
                                     replica_count);
     for (int64_t i = 0, current_group_offset = 0;
@@ -440,7 +444,9 @@ absl::StatusOr<CollectiveDeviceList> GetParticipatingFlattenedIdGroups(
       }
     }
   } else {
-    CHECK(group_mode == CollectiveOpGroupMode::kCrossReplicaAndPartition);
+    CHECK(group_mode ==
+          CollectiveOpGroupMode::
+              COLLECTIVE_OP_GROUP_MODE_CROSS_REPLICA_AND_PARTITION);
     flattened_replica_groups.resize(original_replica_groups.size());
     for (int64_t i = 0; i < original_replica_groups.size(); ++i) {
       for (int64_t replica_id : original_replica_groups.at(i).replica_ids()) {
@@ -453,29 +459,18 @@ absl::StatusOr<CollectiveDeviceList> GetParticipatingFlattenedIdGroups(
       }
     }
   }
-  return CollectiveDeviceList(flattened_replica_groups);
+  return std::make_unique<CollectiveDeviceList>(flattened_replica_groups);
 }
 
-absl::StatusOr<CollectiveDeviceList> GetParticipatingFlattenedIdGroups(
-    const HloInstruction* hlo, const DeviceAssignment& device_assignment) {
+absl::StatusOr<std::unique_ptr<CollectiveDeviceListBase>>
+GetParticipatingFlattenedIdGroups(const HloInstruction* hlo,
+                                  const DeviceAssignment& device_assignment) {
   TF_ASSIGN_OR_RETURN(CollectiveOpGroupMode mode,
                       GetCollectiveOpGroupMode(hlo));
   TF_ASSIGN_OR_RETURN(
-      CollectiveDeviceList collective_device_list,
+      std::unique_ptr<CollectiveDeviceListBase> collective_device_list,
       GetParticipatingFlattenedIdGroups(device_assignment,
                                         GetCollectiveDeviceList(hlo), mode));
-  return collective_device_list;
-}
-
-// Same as above, used for cases where static_device_assignment is not present.
-absl::StatusOr<CollectiveDeviceList> GetParticipatingFlattenedIdGroups(
-    const HloInstruction* hlo, int replica_count, int partition_count) {
-  TF_ASSIGN_OR_RETURN(CollectiveOpGroupMode mode,
-                      GetCollectiveOpGroupMode(hlo));
-  TF_ASSIGN_OR_RETURN(
-      CollectiveDeviceList collective_device_list,
-      GetParticipatingFlattenedIdGroups(GetCollectiveDeviceList(hlo), mode,
-                                        replica_count, partition_count));
   return collective_device_list;
 }
 
@@ -498,7 +493,7 @@ absl::StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
 
   std::vector<GlobalDeviceId> participants;
   switch (group_mode) {
-    case CollectiveOpGroupMode::kCrossReplica: {
+    case CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_CROSS_REPLICA: {
       // This is a cross replica operation. replica group contains replica id.
       // use current replica id to find the set of participating replicas. If
       // replica groups are empty, assume a group with all replicas.
@@ -518,7 +513,7 @@ absl::StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
       return participants;
     }
 
-    case CollectiveOpGroupMode::kCrossPartition: {
+    case CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_CROSS_PARTITION: {
       // replica_groups contain partition_id, group contains all partitions for
       // the current replica.
       TF_ASSIGN_OR_RETURN(std::vector<int> participating_partitions,
@@ -534,7 +529,8 @@ absl::StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
       return participants;
     }
 
-    case CollectiveOpGroupMode::kCrossReplicaAndPartition: {
+    case CollectiveOpGroupMode::
+        COLLECTIVE_OP_GROUP_MODE_CROSS_REPLICA_AND_PARTITION: {
       // replica_groups contain replica_ids. Group contains replicas for all
       // partitions.
       TF_ASSIGN_OR_RETURN(std::vector<int> participating_replicas,
@@ -553,7 +549,7 @@ absl::StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
       return participants;
     }
 
-    case CollectiveOpGroupMode::kFlattenedID: {
+    case CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_FLATTENED_ID: {
       // replica groups contain flattened-ids and cannot be empty.
       TF_RET_CHECK(!replica_groups.empty())
           << "replica groups cannot be empty for kFlattenedID mode";
@@ -580,6 +576,10 @@ absl::StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
       }
       return participants;
     }
+    default: {
+      return InvalidArgument("Invalid collective op group mode: %d",
+                             static_cast<int>(group_mode));
+    }
   }
 }
 
@@ -588,19 +588,20 @@ absl::StatusOr<std::vector<int64_t>> GetPariticipantCountsForReplicaGroups(
     absl::Span<const ReplicaGroup> replica_groups,
     CollectiveOpGroupMode group_mode) {
   std::vector<int64_t> participant_counts;
-  std::vector<ReplicaGroup> participating_replica_groups =
-      SpanToVector(replica_groups);
 
   // If replica groups are empty, assume a group with all replicas.
+  std::optional<ReplicaGroup> all_replica_groups;
   if (replica_groups.empty()) {
-    if (group_mode == CollectiveOpGroupMode::kFlattenedID) {
+    if (group_mode ==
+        CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_FLATTENED_ID) {
       // replica groups contain flattened-ids and cannot be empty.
       TF_RET_CHECK(!replica_groups.empty())
           << "replica groups cannot be empty for kFlattenedID mode";
     }
 
     int total_participant_count;
-    if (group_mode == CollectiveOpGroupMode::kCrossPartition) {
+    if (group_mode ==
+        CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_CROSS_PARTITION) {
       // replica group are partition ids.
       total_participant_count = num_partitions;
     } else {
@@ -608,16 +609,17 @@ absl::StatusOr<std::vector<int64_t>> GetPariticipantCountsForReplicaGroups(
       total_participant_count = num_replicas;
     }
 
-    ReplicaGroup replica_group = ReplicaGroup();
+    all_replica_groups.emplace();
+    all_replica_groups->mutable_replica_ids()->Reserve(total_participant_count);
     for (int id = 0; id < total_participant_count; id++) {
-      replica_group.add_replica_ids(id);
+      all_replica_groups->add_replica_ids(id);
     }
-    participating_replica_groups.push_back(replica_group);
+    replica_groups = absl::MakeConstSpan(&*all_replica_groups, 1);
   }
 
   switch (group_mode) {
-    case CollectiveOpGroupMode::kCrossReplica: {
-      for (const auto& replica_group : participating_replica_groups) {
+    case CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_CROSS_REPLICA: {
+      for (const auto& replica_group : replica_groups) {
         for (int partition_id = 0; partition_id < num_partitions;
              ++partition_id) {
           participant_counts.push_back(replica_group.replica_ids().size());
@@ -625,37 +627,41 @@ absl::StatusOr<std::vector<int64_t>> GetPariticipantCountsForReplicaGroups(
       }
       return participant_counts;
     }
-    case CollectiveOpGroupMode::kCrossPartition: {
-      for (const auto& replica_group : participating_replica_groups) {
+    case CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_CROSS_PARTITION: {
+      for (const auto& replica_group : replica_groups) {
         participant_counts.push_back(replica_group.replica_ids().size());
       }
       return participant_counts;
     }
-    case CollectiveOpGroupMode::kCrossReplicaAndPartition: {
-      for (const auto& replica_group : participating_replica_groups) {
+    case CollectiveOpGroupMode::
+        COLLECTIVE_OP_GROUP_MODE_CROSS_REPLICA_AND_PARTITION: {
+      for (const auto& replica_group : replica_groups) {
         participant_counts.push_back(replica_group.replica_ids().size() *
                                      num_partitions);
       }
       return participant_counts;
     }
-    case CollectiveOpGroupMode::kFlattenedID: {
-      for (const auto& replica_group : participating_replica_groups) {
+    case CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_FLATTENED_ID: {
+      for (const auto& replica_group : replica_groups) {
         participant_counts.push_back(replica_group.replica_ids().size());
       }
       return participant_counts;
+    }
+    default: {
+      return InvalidArgument("Invalid collective op group mode: %d",
+                             static_cast<int>(group_mode));
     }
   }
 }
 
 absl::StatusOr<std::optional<std::pair<int64_t, int64_t>>>
 GetReplicaGroupCountAndSize(const HloInstruction* hlo) {
-  const CollectiveDeviceList& device_list = GetCollectiveDeviceList(hlo);
+  const CollectiveDeviceListBase& device_list = GetCollectiveDeviceList(hlo);
   auto config = hlo->GetModule()->config();
 
-  if (device_list.iota_replica_group_list().has_value()) {
-    return std::make_pair(
-        device_list.iota_replica_group_list()->num_replica_groups(),
-        device_list.iota_replica_group_list()->num_devices_per_group());
+  if (device_list.version() == CollectiveDeviceListVersion::kIota) {
+    return std::make_pair(device_list.num_replica_groups(),
+                          device_list.num_devices_per_group());
   }
   TF_ASSIGN_OR_RETURN(CollectiveOpGroupMode group_mode,
                       GetCollectiveOpGroupMode(hlo));
@@ -815,59 +821,6 @@ HloInstruction* IsOrHasCollectiveWithChannelId(HloInstruction* instruction) {
   return nullptr;
 }
 
-using SourceTargetPairType = std::pair<int64_t, int64_t>;
-using SourceTargetPairsType = std::vector<SourceTargetPairType>;
-
-std::pair<CycleType, std::set<int>> GetCycleTypeAndIndices(
-    const SourceTargetPairsType& pairs) {
-  std::set<int> seen_replica_ids;
-  std::set<std::pair<int64_t, int64_t>> tentative_results;
-  // first figure out if we're dealing with a potential forward or backward
-  // cycle.
-  int forward_edge_counter = 0;
-  int backward_edge_counter = 0;
-  for (auto pair : pairs) {
-    pair.first < pair.second ? forward_edge_counter++ : backward_edge_counter++;
-  }
-  bool is_forward_cycle = forward_edge_counter > backward_edge_counter;
-  for (int64_t i = 0; i < pairs.size(); ++i) {
-    const SourceTargetPairType& pair = pairs[i];
-    if (is_forward_cycle) {
-      // check if the source of the current pair is smaller than the target
-      if (pair.first < pair.second) {
-        seen_replica_ids.insert(pair.first);
-      } else {
-        // the source of the current pair is larger than the target, so the
-        // current pair may be part of a cycle. We keep track of the target ID
-        // and the index of the pair in the original pairs array.
-        tentative_results.insert(std::make_pair(pair.second, i));
-      }
-    } else {
-      // The backward cycle check uses similar logic but in reverse.
-      if (pair.first > pair.second) {
-        seen_replica_ids.insert(pair.second);
-      } else {
-        tentative_results.insert(std::make_pair(pair.first, i));
-      }
-    }
-  }
-  std::set<int> final_results;
-  // Iterate over the tentative results and only keep the indices that form an
-  // actual cycle. This is done by checking if the target replica ID of the
-  // pair is in the set of seen replica IDs. Note that the tentative results
-  // array will be fairly small in practice, so this is not adding too much to
-  // the runtime.
-  for (auto& [replica_id, index] : tentative_results) {
-    if (seen_replica_ids.find(replica_id) != seen_replica_ids.end()) {
-      final_results.insert(index);
-    }
-  }
-  CycleType cycle_type = final_results.empty() ? CycleType::kNone
-                         : is_forward_cycle    ? CycleType::kForward
-                                               : CycleType::kBackward;
-  return std::make_pair(cycle_type, final_results);
-}
-
 bool IsExclusivelyCrossModule(absl::Span<const ReplicaGroup> replica_groups,
                               bool use_global_ids, bool has_channel_id,
                               const DeviceAssignment& device_assignment) {
@@ -931,4 +884,49 @@ bool IsExclusivelyCrossReplica(absl::Span<const ReplicaGroup> replica_groups,
   }
   return true;
 }
+
+bool HasDuplicateSourcesOrTargets(const SourceTargetPairs& pairs) {
+  std::set<int> sources;
+  std::set<int> targets;
+  for (int i = 0; i < pairs.size(); ++i) {
+    sources.insert(pairs[i].source);
+    targets.insert(pairs[i].target);
+  }
+  if (sources.size() != pairs.size() || targets.size() != pairs.size()) {
+    return true;
+  }
+  return false;
+}
+
+int64_t GetSubgroupSize(const HloCollectiveInstruction* hlo,
+                        CollectiveOpGroupMode group_mode) {
+  const HloModuleConfig& config = hlo->GetModule()->config();
+  switch (group_mode) {
+    case CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_CROSS_REPLICA:
+    case CollectiveOpGroupMode::
+        COLLECTIVE_OP_GROUP_MODE_CROSS_REPLICA_AND_PARTITION: {
+      int64_t replica_subgroup_size =
+          hlo->replica_groups().empty()
+              ? config.replica_count()
+              : hlo->replica_groups()[0].replica_ids_size();
+      if (group_mode ==
+          CollectiveOpGroupMode::
+              COLLECTIVE_OP_GROUP_MODE_CROSS_REPLICA_AND_PARTITION) {
+        // Replicas from all partitions participate.
+        replica_subgroup_size *= config.num_partitions();
+      }
+      return replica_subgroup_size;
+    }
+    case CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_FLATTENED_ID:
+      // Empty replica groups not allowed in this mode.
+      return hlo->replica_groups()[0].replica_ids_size();
+    case CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_CROSS_PARTITION:
+      return hlo->replica_groups().empty()
+                 ? config.num_partitions()
+                 : hlo->replica_groups()[0].replica_ids_size();
+    default:
+      LOG(FATAL) << "Invalid collective op group mode: " << group_mode;
+  }
+}
+
 }  // end namespace xla

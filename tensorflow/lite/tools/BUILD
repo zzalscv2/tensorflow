@@ -1,6 +1,8 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_python//python:proto.bzl", "py_proto_library")
 load("//tensorflow:strict.default.bzl", "py_strict_binary", "py_strict_library", "py_strict_test")
-
-# Placeholder: load py_proto_library
 load("//tensorflow:tensorflow.bzl", "tf_cc_binary", "tf_cc_test")
 load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 load(
@@ -12,7 +14,7 @@ load("//tensorflow/lite:special_rules.bzl", "tflite_portable_test_suite")
 load("//tensorflow/lite/core/shims:cc_library_with_tflite.bzl", "cc_library_with_tflite")
 
 package(
-    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = [
         "//visibility:public",
     ],
@@ -133,7 +135,7 @@ py_strict_library(
         "//tensorflow/lite/python:schema_py",
         "//tensorflow/lite/python:schema_util",
         "//tensorflow/python/platform:gfile",
-        "@flatbuffers//:runtime_py",
+        "@pypi_flatbuffers//:pkg",
     ],
 )
 
@@ -155,7 +157,7 @@ py_strict_library(
     srcs = ["test_utils.py"],
     deps = [
         "//tensorflow/lite/python:schema_py",
-        "@flatbuffers//:runtime_py",
+        "@pypi_flatbuffers//:pkg",
     ],
 )
 
@@ -396,7 +398,9 @@ cc_library(
         "//tensorflow/lite/c:common",
         "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/kernels:kernel_util",
+        "//tensorflow/lite/types:half",
         "@com_google_absl//absl/types:span",
+        "@eigen_archive//:eigen3",
     ],
 )
 
@@ -407,6 +411,7 @@ cc_test(
     deps = [
         ":utils",
         "//tensorflow/lite/c:common",
+        "//tensorflow/lite/types:half",
         "@com_google_absl//absl/types:span",
         "@com_google_googletest//:gtest_main",
     ],

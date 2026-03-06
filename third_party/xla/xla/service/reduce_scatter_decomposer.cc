@@ -34,9 +34,9 @@ limitations under the License.
 
 namespace xla {
 
-absl::StatusOr<bool> ReduceScatterDecomposer::Run(
-    HloModule *module,
-    const absl::flat_hash_set<absl::string_view> &execution_threads) {
+absl::StatusOr<bool> ReduceScatterDecomposer::RunImpl(
+    HloModule* module,
+    const absl::flat_hash_set<absl::string_view>& execution_threads) {
   bool changed = false;
   int64_t next_channel_id = hlo_query::NextChannelId(*module);
 
@@ -66,6 +66,7 @@ absl::StatusOr<bool> ReduceScatterDecomposer::Run(
               rs->operand(0)->shape(), rs->operands(), apply_clone,
               rs->device_list(), rs->constrain_layout(), channel_id,
               rs->use_global_device_ids()));
+      ar->set_frontend_attributes(rs->frontend_attributes());
 
       // Create start indices for a dynamic slice to decompose the all-reduce
       // results.

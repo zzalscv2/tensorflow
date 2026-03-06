@@ -1,9 +1,12 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
 # Custom Ops useful for GenAI models.
 load("//tensorflow:tensorflow.default.bzl", "pybind_extension")
 load("//tensorflow/lite:build_def.bzl", "tflite_copts")
 load("//tensorflow/lite:special_rules.bzl", "tflite_portable_test_suite")
 
-# copybara:uncomment package(default_applicable_licenses = ["//tensorflow:license"])
+# copybara:uncomment package(default_applicable_licenses = ["//tensorflow:LICENSE"])
 
 cc_library(
     name = "genai_ops",
@@ -73,6 +76,10 @@ pybind_extension(
     ],
     hdrs = ["genai_ops.h"],
     additional_exported_symbols = ["GenAIOpsRegisterer"],
+    common_lib_packages = [
+        "litert/python",
+        "tensorflow/lite/python",
+    ],
     enable_stub_generation = True,
     link_in_framework = True,
     module_name = "pywrap_genai_ops",
@@ -80,13 +87,14 @@ pybind_extension(
         "pywrap_genai_ops.pyi",
     ],
     visibility = ["//visibility:public"],
+    wrap_py_init = True,
     deps = [
         ":genai_ops",
         "//tensorflow/lite:framework_stable",
         "//tensorflow/lite:mutable_op_resolver",
         "//tensorflow/lite/c:common",
-        "@local_xla//third_party/python_runtime:headers",
         "@pybind11",
+        "@xla//third_party/python_runtime:headers",
     ],
 )
 

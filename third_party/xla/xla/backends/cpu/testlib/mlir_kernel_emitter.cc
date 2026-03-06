@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "xla/backends/cpu/testlib/mlir_kernel_emitter.h"
 
+#include <cstdint>
 #include <memory>
 #include <utility>
 
@@ -28,26 +29,30 @@ limitations under the License.
 #include "xla/codegen/kernel_spec.h"
 #include "xla/codegen/mlir_kernel_source.h"
 #include "xla/runtime/buffer_use.h"
+#include "xla/runtime/work_group.h"
 #include "xla/service/buffer_assignment.h"
-#include "xla/stream_executor/launch_dim.h"
+#include "xla/service/shaped_slice.h"
+#include "xla/shape_util.h"
 #include "xla/tsl/platform/statusor.h"
+#include "xla/xla_data.pb.h"
 
 namespace xla::cpu {
-MlirKernelEmitter::MlirKernelEmitter(absl::string_view mlir,
-                                     absl::string_view kernel_name,
-                                     se::ThreadDim thread_dim,
-                                     absl::Span<const KernelArg> args)
+MlirTestKernelEmitter::MlirTestKernelEmitter(absl::string_view mlir,
+                                             absl::string_view kernel_name,
+                                             NumWorkGroups num_workgroups,
+                                             absl::Span<const KernelArg> args)
     : mlir_(mlir),
       kernel_name_(kernel_name),
-      thread_dim_(thread_dim),
+      num_workgroups_(num_workgroups),
       args_(args.begin(), args.end()) {
-  for (const MlirKernelEmitter::KernelArg& arg : args_) {
+  for (const MlirTestKernelEmitter::KernelArg& arg : args_) {
     buffer_allocations_.emplace_back(buffer_allocations_.size(), arg.size_bytes,
                                      /*color=*/0);
   }
 }
 
-absl::StatusOr<KernelDefinition> MlirKernelEmitter::EmitKernelDefinition() {
+absl::StatusOr<MlirTestKernelEmitter::KernelDefinition>
+MlirTestKernelEmitter::EmitKernelDefinition() {
   std::unique_ptr<mlir::MLIRContext> context = FusionCompiler::CreateContext();
 
   TF_ASSIGN_OR_RETURN(
@@ -60,17 +65,18 @@ absl::StatusOr<KernelDefinition> MlirKernelEmitter::EmitKernelDefinition() {
 
   for (const auto& [arg, allocation] : llvm::zip(args_, buffer_allocations_)) {
     BufferAllocation::Slice slice(&allocation, 0, arg.size_bytes);
+    Shape shape =
+        ShapeUtil::MakeShape(U8, {static_cast<int64_t>(arg.size_bytes)});
     if (arg.memory_access == BufferUse::MemoryAccess::kRead) {
-      argument_buffers.push_back(slice);
+      argument_buffers.push_back({slice, shape});
     } else {
-      result_buffers.push_back(slice);
+      result_buffers.push_back({slice, shape});
     }
   }
 
-  KernelSpec kernel_spec(kernel_name_, thread_dim_, std::move(argument_buffers),
-                         std::move(result_buffers), /*invariant_arguments=*/{});
-  return KernelDefinition(
-      std::move(kernel_spec),
-      std::make_unique<MlirKernelSource>(std::move(source)));
+  KernelSpec kernel_spec(kernel_name_, num_workgroups_,
+                         std::move(argument_buffers), std::move(result_buffers),
+                         /*invariant_arguments=*/{});
+  return KernelDefinition(std::move(kernel_spec), std::move(source));
 }
 }  // namespace xla::cpu

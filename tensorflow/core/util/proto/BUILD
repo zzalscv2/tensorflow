@@ -72,7 +72,8 @@ cc_library(
         "//tensorflow/core:lib",
         "//tensorflow/core:platform_base",
         "@com_google_absl//absl/strings",
-        "@local_xla//xla/tsl/util/proto:proto_utils",
+        "@com_google_protobuf//:protobuf",
+        "@xla//xla/tsl/util/proto:proto_utils",
     ],
 )
 

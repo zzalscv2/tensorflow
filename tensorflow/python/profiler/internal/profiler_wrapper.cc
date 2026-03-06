@@ -41,14 +41,18 @@ using ::tensorflow::profiler::pywrap::ProfilerSessionWrapper;
 ToolOptions ToolOptionsFromPythonDict(const py::dict& dictionary) {
   ToolOptions map;
   for (const auto& item : dictionary) {
-    std::variant<int, std::string> value;
+    std::variant<bool, int, std::string> value;
     try {
-      value = item.second.cast<int>();
+      value = item.second.cast<bool>();
     } catch (...) {
       try {
-        value = item.second.cast<std::string>();
+        value = item.second.cast<int>();
       } catch (...) {
-        continue;
+        try {
+          value = item.second.cast<std::string>();
+        } catch (...) {
+          continue;
+        }
       }
     }
     map.emplace(item.first.cast<std::string>(), value);
@@ -76,7 +80,7 @@ PYBIND11_MODULE(_pywrap_profiler, m) {
            })
       .def("stop",
            [](ProfilerSessionWrapper& wrapper) {
-             tensorflow::string content;
+             std::string content;
              absl::Status status;
              {
                py::gil_scoped_release release;

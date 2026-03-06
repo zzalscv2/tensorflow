@@ -26,6 +26,7 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/shape_util.h"
 #include "tensorflow/compiler/tf2xla/tf2xla_util.h"
 #include "xla/service/maybe_owning_device_memory.h"
+#include "xla/shape.h"
 #include "xla/stream_executor/device_memory_allocator.h"
 #include "xla/stream_executor/tpu/tpu_executor.h"
 #include "xla/stream_executor/tpu/tpu_executor_interface.h"
@@ -146,7 +147,7 @@ absl::Status TPUReshardVariablesOpKernel::DoTpuExecute(
   tsl::profiler::TraceMe trace_me_init("TPUReshardVariablesOpKernel::Init",
                                        /*level=*/2);
 
-  string rendezvous_key_base;
+  std::string rendezvous_key_base;
   std::unique_ptr<tpu::CompilationCacheEntryRef> entry_ref;
   TF_RETURN_IF_ERROR(reshard_util::GetComputationCacheEntry(
       format_key, &rendezvous_key_base, &entry_ref, fetch_target));
@@ -171,7 +172,8 @@ absl::Status TPUReshardVariablesOpKernel::DoTpuExecute(
   se::Stream* stream = context->op_device_context()->stream();
 
   TF_RET_CHECK(executable->input_shapes_size() == 1);
-  xla::Shape host_shape(executable->input_shapes(0));
+  TF_ASSIGN_OR_RETURN(xla::Shape host_shape,
+                      xla::Shape::FromProto(executable->input_shapes(0)));
   std::vector<VariableInfo> variables;
   for (int i = 0; i < num_vars_; ++i) {
     TF_RET_CHECK(context->input_dtype(i) == DT_RESOURCE);
@@ -194,10 +196,11 @@ absl::Status TPUReshardVariablesOpKernel::DoTpuExecute(
                                               backend, device_ordinal, stream));
   xla::ShapedBuffer shaped_buffer(std::move(host_shape), input_buffers.shape(),
                                   device_ordinal);
-  shaped_buffer.set_buffers(input_buffers.Map<se::DeviceMemoryBase>(
-      [](const xla::MaybeOwningDeviceMemory& buffer) {
-        return buffer.AsDeviceMemoryBase();
-      }));
+  shaped_buffer.set_buffers(
+      input_buffers.Map<stream_executor::DeviceAddressBase>(
+          [](const xla::MaybeOwningDeviceAddress& buffer) {
+            return buffer.AsDeviceAddress();
+          }));
 
   // Write input root tuple.
   TF_ASSIGN_OR_RETURN(auto transfer_stream_ptr,

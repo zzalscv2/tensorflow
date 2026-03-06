@@ -15,11 +15,13 @@ limitations under the License.
 
 #include "tensorflow/core/grappler/graph_analyzer/graph_analyzer.h"
 
-#include <algorithm>
+#include <deque>
+#include <memory>
+#include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include "absl/memory/memory.h"
+#include "absl/status/status.h"
 #include "tensorflow/core/grappler/graph_analyzer/test_tools.h"
 
 namespace tensorflow {
@@ -54,10 +56,12 @@ class GraphAnalyzerTest : public ::testing::Test, protected TestGraphs {
     gran_->ExtendSubgraphAllOrNone(parent, node);
   }
 
-  std::vector<string> DumpRawSubgraphs() { return gran_->DumpRawSubgraphs(); }
+  std::vector<std::string> DumpRawSubgraphs() {
+    return gran_->DumpRawSubgraphs();
+  }
 
-  std::vector<string> DumpPartials() {
-    std::vector<string> result;
+  std::vector<std::string> DumpPartials() {
+    std::vector<std::string> result;
     for (const auto& it : gran_->partial_) {
       result.emplace_back(it->Dump());
     }
@@ -66,7 +70,9 @@ class GraphAnalyzerTest : public ::testing::Test, protected TestGraphs {
 
   const GenNodeMap& GetNodes() { return gran_->nodes_; }
 
-  GenNode* GetNode(const string& name) { return gran_->nodes_.at(name).get(); }
+  GenNode* GetNode(const std::string& name) {
+    return gran_->nodes_.at(name).get();
+  }
 
   SubgraphPtrSet& GetResult() { return gran_->result_; }
   SubgraphPtrSet& GetPartial() { return gran_->partial_; }

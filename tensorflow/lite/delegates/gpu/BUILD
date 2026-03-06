@@ -1,16 +1,20 @@
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@build_bazel_rules_apple//apple:ios.bzl", "ios_static_framework")
 load("@build_bazel_rules_apple//apple:macos.bzl", "macos_dylib")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_cc//cc:objc_library.bzl", "objc_library")
 load(
     "//tensorflow/core/platform:build_config_root.bzl",
     "tf_gpu_tests_tags",
 )
-load("//tensorflow/lite:build_def.bzl", "CXX17_BAZEL_ONLY_COPTS")
+load("//tensorflow/lite:build_def.bzl", "CXX17_BAZEL_ONLY_COPTS", "tflite_pagesize_linkopts")
 load("//tensorflow/lite:special_rules.bzl", "tflite_extra_gles_deps", "tflite_portable_test_suite")
 load("//tensorflow/lite/delegates/gpu:build_defs.bzl", "gpu_delegate_linkopts")
 
 package(
-    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
 )
@@ -181,7 +185,7 @@ cc_binary(
         "//conditions:default": [
             "-fvisibility=hidden",
         ],
-    }),
+    }) + tflite_pagesize_linkopts(),
     linkshared = 1,
     linkstatic = 1,
     tags = [
@@ -372,8 +376,11 @@ cc_test(
     ],
     deps = [
         ":android_hardware_buffer",
+        ":api",
         ":async_buffers",
         ":delegate",
+        "//tensorflow/lite/delegates/gpu/common:data_type",
+        "//tensorflow/lite/delegates/gpu/gl:egl_environment",
         "@com_google_googletest//:gtest_main",
     ],
 )

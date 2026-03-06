@@ -101,7 +101,7 @@ cc_library(
         "@llvm-project//mlir:TosaDialect",
         "@llvm-project//mlir:TransformUtils",
         "@llvm-project//mlir:Transforms",
-        "@local_xla//xla/tsl/framework/fixedpoint",
+        "@xla//xla/tsl/framework/fixedpoint",
     ],
 )
 
@@ -129,7 +129,6 @@ cc_library(
     name = "tf_passes",
     srcs = [
         "tf_passes.cc",
-        "transforms/dequantize_tfl_softmax.cc",
         "transforms/fuse_bias_tf.cc",
         "transforms/legalize_tf.cc",
         "transforms/tf_legalize_patterns.inc",
@@ -186,7 +185,8 @@ cc_library(
     srcs = [
         "tfl_passes.cc",
         "transforms/convert_metadata.cc",
-        "transforms/convert_tfl_uint8.cc",
+        "transforms/convert_tfl_uint.cc",
+        "transforms/dequantize_tfl_softmax.cc",
         "transforms/legalize_tfl.cc",
         "transforms/legalize_tfl_stateful.cc",
         "transforms/lower_complex_types.cc",
@@ -287,9 +287,9 @@ tf_cc_binary(
         "@llvm-project//mlir:MlirOptLib",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:Transforms",
-        "@local_xla//xla/mlir/framework/ir:xla_framework",
-        "@local_xla//xla/mlir/framework/transforms:passes",
-        "@local_xla//xla/mlir_hlo:all_passes",
+        "@xla//xla/mlir/framework/ir:xla_framework",
+        "@xla//xla/mlir/framework/transforms:passes",
+        "@xla//xla/mlir_hlo:all_passes",
     ],
 )
 

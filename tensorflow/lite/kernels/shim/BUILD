@@ -1,10 +1,12 @@
 # This package is a shim layer over TF and TFLite op kernels.
 
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//tensorflow:tensorflow.bzl", "if_android", "if_mobile", "if_not_mobile", "tf_cc_test", "tf_copts")
 load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 
 package(
-    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_compatible_with = get_compatible_with_portable(),
     # The public targets are marked public individually
     default_visibility = ["//tensorflow:__subpackages__"],
@@ -165,7 +167,7 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
-        "@local_tsl//tsl/platform:macros",
+        "@tsl//tsl/platform:macros",
     ] + if_mobile([
         "//tensorflow/core:portable_tensorflow_lib_lite",
     ]) + if_not_mobile([
@@ -228,7 +230,10 @@ cc_library(
     name = "status_macros",
     hdrs = ["status_macros.h"],
     visibility = ["//visibility:public"],
-    deps = ["@com_google_absl//absl/status"],
+    deps = [
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+    ],
 )
 
 cc_library(

@@ -33,7 +33,6 @@ limitations under the License.
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
-#include "Eigen/Core"
 #include "rocm/include/hip/library_types.h"
 #include "rocm/include/hipblas/hipblas.h"
 #include "rocm/include/hipblaslt/hipblaslt.h"
@@ -42,7 +41,7 @@ limitations under the License.
 #include "xla/status_macros.h"
 #include "xla/stream_executor/activate_context.h"
 #include "xla/stream_executor/blas.h"
-#include "xla/stream_executor/device_memory.h"
+#include "xla/stream_executor/device_address.h"
 #include "xla/stream_executor/event_based_timer.h"
 #include "xla/stream_executor/gpu/gpu_blas_lt.h"
 #include "xla/stream_executor/gpu/gpu_helpers.h"
@@ -55,7 +54,6 @@ limitations under the License.
 #include "xla/tsl/platform/statusor.h"
 #include "xla/types.h"
 #include "xla/util.h"
-#include "tsl/platform/ml_dtypes.h"
 
 #define SET_ATTR(setter, handle, attr, value) \
   ToStatus(setter(handle, attr, &value, sizeof(decltype(value))), #setter)
@@ -132,6 +130,12 @@ static absl::StatusOr<hipblasLtEpilogue_t> AsHipblasLtEpilogue(
     case gpu::BlasLt::Epilogue::kBiasThenGELUWithAux:
       return HIPBLASLT_EPILOGUE_GELU_AUX_BIAS;
 #endif
+#if TF_ROCM_VERSION >= 70000
+    case gpu::BlasLt::Epilogue::kSILU:
+      return HIPBLASLT_EPILOGUE_SWISH_EXT;
+    case gpu::BlasLt::Epilogue::kBiasThenSILU:
+      return HIPBLASLT_EPILOGUE_SWISH_BIAS_EXT;
+#endif
     default:
       return absl::InternalError("Unsupported epilogue: " +
                                  std::to_string((int)epilogue));
@@ -143,7 +147,7 @@ static absl::StatusOr<hipblasLtEpilogue_t> AsHipblasLtEpilogue(
 absl::Status BlasLt::Init() {
   hipblasLtHandle_t blas_lt;
   SE_HIPBLAS_RETURN_IF_ERROR(wrap::hipblasLtCreate(&blas_lt));
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   blas_lt_.reset(blas_lt);
   return absl::OkStatus();
 }
@@ -217,7 +221,7 @@ auto BlasLt::MatmulPlan::GetAlgorithms(const Stream* stream,
   std::vector<hipblasLtMatmulHeuristicResult_t> results(max_algorithm_count);
   {
     auto blas_lt = static_cast<BlasLt*>(gpu::BlasLt::Get(stream));
-    absl::MutexLock lock(&blas_lt->mu_);
+    absl::MutexLock lock(blas_lt->mu_);
     TF_RET_CHECK(blas_lt->blas_lt_ != nullptr);
 
     hipblasLtMatmulPreference_t hip_preference;
@@ -320,10 +324,12 @@ auto BlasLt::GetMatmulPlan(const gpu::GemmConfig& cfg, Epilogue epilogue) const
 
   auto compute_type = cfg.compute_type;
   if (!compute_type) {  // obtain compute_type unless provided by the user
-    TF_ASSIGN_OR_RETURN(compute_type,
-                        gpu::GetBlasComputationType(
-                            cfg.precision_algorithm, lhs_layout.dtype,
-                            output_layout.dtype, cfg.compute_precision));
+    TF_ASSIGN_OR_RETURN(
+        compute_type,
+        gpu::GetBlasComputationType(
+            cfg.precision_algorithm, lhs_layout.dtype, output_layout.dtype,
+            cfg.compute_precision,
+            parent_->GetDeviceDescription().gpu_compute_capability()));
   }
 
   if (lhs_layout.order == gpu::MatrixLayout::Order::kRowMajor) {
@@ -384,7 +390,7 @@ absl::Status BlasLt::MatmulPlan::DoMatmul(
     return absl::InternalError(
         "Algorithm must be set before calling DoMatMul!");
   }
-  DeviceMemoryBase a = args.a, b = args.b;
+  DeviceAddressBase a = args.a, b = args.b;
   if (must_swap_operands_) {
     std::swap(a, b);
   }
@@ -407,7 +413,7 @@ absl::Status BlasLt::MatmulPlan::DoMatmul(
   if (workspace_size > 0) {
     if (args.scratch_allocator != nullptr) {
       TF_ASSIGN_OR_RETURN(
-          DeviceMemory<uint8_t> alloc,
+          DeviceAddress<uint8_t> alloc,
           args.scratch_allocator->AllocateBytes(workspace_size));
       workspace_addr = gpu::GpuMemoryMutable(&alloc);
     } else {
@@ -420,7 +426,7 @@ absl::Status BlasLt::MatmulPlan::DoMatmul(
 
   auto palgo = std::any_cast<hipblasLtMatmulAlgo_t>(&algorithm_->opaque_algo);
   {
-    absl::MutexLock lock(&blas_lt->mu_);
+    absl::MutexLock lock(blas_lt->mu_);
     TF_RET_CHECK(blas_lt->blas_lt_ != nullptr);
     // We must set the bias and aux pointers while holding the mutex, to avoid a
     // potential race condition from multiple threads sharing the same plan.

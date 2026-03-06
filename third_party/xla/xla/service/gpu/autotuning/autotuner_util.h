@@ -15,26 +15,24 @@ limitations under the License.
 #ifndef XLA_SERVICE_GPU_AUTOTUNING_AUTOTUNER_UTIL_H_
 #define XLA_SERVICE_GPU_AUTOTUNING_AUTOTUNER_UTIL_H_
 
-#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
-#include <utility>
 #include <variant>
+#include <vector>
 
-#include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "xla/autotune_results.pb.h"
 #include "xla/autotuning.pb.h"
 #include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/service/gpu/autotuning/autotune_cache_key.h"
+#include "xla/stream_executor/device_address_allocator.h"
 #include "xla/stream_executor/device_description.h"
-#include "xla/stream_executor/device_memory_allocator.h"
 #include "xla/stream_executor/stream_executor.h"
 #include "xla/stream_executor/stream_executor_memory_allocator.h"
 #include "xla/xla.pb.h"
@@ -48,7 +46,7 @@ struct DeviceConfig {
   // If the `allocator` parameter is not null, we will use it to allocate temp
   // memory while timing the various convolution algorithms.  If it's null,
   // we'll use the default allocator on the StreamExecutor.
-  se::DeviceMemoryAllocator* allocator = nullptr;  // may be null
+  se::DeviceAddressAllocator* allocator = nullptr;  // may be null
 };
 
 struct DevicelessConfig {
@@ -56,117 +54,20 @@ struct DevicelessConfig {
   se::DeviceDescription device_description;
 };
 
-class AutotuneCacheKey {
+class DeviceOrDevicelessConfig {
  public:
-  // Tie a version to the cache key in order to invalidate the cache when
-  // necessary. This should be incremented on triton upgrades or any other
-  // changes that may affect the autotuning results.
-  static constexpr int kCurrentVersion = 5;
-
-  AutotuneCacheKey(const se::DeviceDescription& device_description,
-                   const HloInstruction& instruction)
-      : AutotuneCacheKey(DeviceDescriptionToCacheKey(device_description),
-                         instruction.ToString()) {}
-
-  AutotuneCacheKey(absl::string_view model_str,
-                   const HloInstruction& instruction);
-
-  explicit AutotuneCacheKey(absl::string_view model_str,
-                            absl::string_view hlo_canonical)
-      : model_str_(model_str), hlo_canonical_(hlo_canonical) {}
-
-  explicit AutotuneCacheKey(absl::string_view model_str,
-                            absl::string_view hlo_canonical, int version)
-      : model_str_(model_str),
-        hlo_canonical_(hlo_canonical),
-        version_(version) {}
-
-  absl::string_view GetModelStr() const { return model_str_; }
-
-  absl::string_view GetHlo() const { return hlo_canonical_; }
-
-  int GetVersion() const { return version_; }
-
-  template <typename H>
-  friend H AbslHashValue(H h, const AutotuneCacheKey& w) {
-    return H::combine(std::move(h), w.model_str_, w.hlo_canonical_, w.version_);
-  }
-
-  bool operator==(const AutotuneCacheKey& w) const {
-    return model_str_ == w.model_str_ && hlo_canonical_ == w.hlo_canonical_ &&
-           version_ == w.version_;
-  }
-
-  std::string ToString() const {
-    return absl::StrFormat("<key model='%s', hlo='%s', version=%d>", model_str_,
-                           hlo_canonical_, version_);
-  }
-
-  static std::string DeviceDescriptionToCacheKey(
-      const se::DeviceDescription& device_description);
-
- private:
-  std::string model_str_;
-  std::string hlo_canonical_;
-  int version_ = kCurrentVersion;
-};
-
-using AutotuneCacheKeySet = absl::flat_hash_set<AutotuneCacheKey>;
-
-class AutotuneConfig {
- public:
-  bool should_init_buffers() const { return autotune_level_ >= 2; }
-  bool should_reinit_output_buffer() const { return autotune_level_ >= 3; }
-  bool should_check_correctness() const { return autotune_level_ >= 4; }
-  bool should_skip_wrong_results() const { return autotune_level_ >= 5; }
-  bool should_crash_on_check_failure() const {
-    return should_crash_on_check_failure_;
-  }
-  bool should_require_complete_aot_autotune_results() const {
-    return require_complete_aot_autotune_results_;
-  }
-  // Empty string means no cache is used.
-  const std::string& autotune_cache_dir() const { return autotune_cache_dir_; }
-  const DebugOptions::AutotuneCacheMode& autotune_cache_mode() const {
-    return autotune_cache_mode_;
-  }
-
-  AutotuneConfig(const AutotuneConfig& right)
-      : config_(right.config_),
-        autotune_level_(right.autotune_level_),
-        should_crash_on_check_failure_(right.should_crash_on_check_failure_),
-        exhaustive_tiling_search_(right.exhaustive_tiling_search_),
-        require_complete_aot_autotune_results_(
-            right.require_complete_aot_autotune_results_),
-        autotune_cache_dir_(right.autotune_cache_dir_),
-        autotune_cache_mode_(right.autotune_cache_mode_) {}
-
-  AutotuneConfig(const std::variant<DeviceConfig, DevicelessConfig>& config,
-                 const DebugOptions& debug_options)
-      : config_(config),
-        autotune_level_(debug_options.xla_gpu_autotune_level()),
-        should_crash_on_check_failure_(
-            debug_options.xla_gpu_crash_on_verification_failures()),
-        exhaustive_tiling_search_(
-            debug_options.xla_gpu_exhaustive_tiling_search()),
-        require_complete_aot_autotune_results_(
-            debug_options.xla_gpu_require_complete_aot_autotune_results()),
-        autotune_cache_dir_(
-            debug_options.xla_gpu_per_fusion_autotune_cache_dir()),
-        autotune_cache_mode_(
-            debug_options.xla_gpu_experimental_autotune_cache_mode()) {}
-
-  std::string GetModelStr() const {
-    return AutotuneCacheKey::DeviceDescriptionToCacheKey(
-        GetDeviceDescription());
-  }
+  DeviceOrDevicelessConfig(const DeviceOrDevicelessConfig& right)
+      : config_(right.config_) {}
+  explicit DeviceOrDevicelessConfig(
+      const std::variant<DeviceConfig, DevicelessConfig>& config)
+      : config_(config) {}
 
   se::StreamExecutor* GetExecutor() const {
     CHECK(std::holds_alternative<DeviceConfig>(config_));
     return std::get<DeviceConfig>(config_).stream_exec;
   }
 
-  se::DeviceMemoryAllocator* GetAllocator() const {
+  se::DeviceAddressAllocator* GetAllocator() const {
     CHECK(std::holds_alternative<DeviceConfig>(config_));
     auto& cf = std::get<DeviceConfig>(config_);
     if (cf.allocator != nullptr) {
@@ -174,7 +75,8 @@ class AutotuneConfig {
     }
     if (allocator_ == nullptr) {
       allocator_ =
-          std::make_unique<se::StreamExecutorMemoryAllocator>(GetExecutor());
+          std::make_unique<stream_executor::StreamExecutorAddressAllocator>(
+              GetExecutor());
     }
     return allocator_.get();
   }
@@ -199,31 +101,106 @@ class AutotuneConfig {
     return std::holds_alternative<DevicelessConfig>(config_);
   }
 
+ private:
+  std::variant<DeviceConfig, DevicelessConfig> config_;
+  mutable std::unique_ptr<se::DeviceAddressAllocator> allocator_;
+};
+
+class AutotuneConfig {
+ public:
+  bool should_init_buffers() const { return should_init_buffers_; }
+  bool should_reinit_output_buffer() const {
+    return should_reinit_output_buffer_;
+  }
+  bool should_check_correctness() const { return should_check_correctness_; }
+  bool should_skip_wrong_results() const { return should_skip_wrong_results_; }
+  bool should_crash_on_check_failure() const {
+    return should_crash_on_check_failure_;
+  }
+  bool should_require_complete_aot_autotune_results() const {
+    return should_require_complete_aot_autotune_results_;
+  }
+  // Empty string means no cache is used.
+  const std::string& autotune_cache_dir() const { return autotune_cache_dir_; }
+  const DebugOptions::AutotuneCacheMode& autotune_cache_mode() const {
+    return autotune_cache_mode_;
+  }
+  const std::optional<std::vector<AutotuneResult::TritonGemmKey>>&
+  gemm_config_overrides() const {
+    return gemm_config_overrides_;
+  }
+
+  AutotuneConfig(const DeviceOrDevicelessConfig& config,
+                 bool should_init_buffers, bool should_reinit_output_buffer,
+                 bool should_check_correctness, bool should_skip_wrong_results,
+                 bool should_crash_on_check_failure,
+                 bool exhaustive_tiling_search,
+                 bool should_require_complete_aot_autotune_results,
+                 absl::string_view autotune_cache_dir,
+                 DebugOptions::AutotuneCacheMode autotune_cache_mode,
+                 std::optional<std::vector<AutotuneResult::TritonGemmKey>>
+                     gemm_config_overrides)
+      : config_(config),
+        should_init_buffers_(should_init_buffers),
+        should_reinit_output_buffer_(should_reinit_output_buffer),
+        should_check_correctness_(should_check_correctness),
+        should_skip_wrong_results_(should_skip_wrong_results),
+        should_crash_on_check_failure_(should_crash_on_check_failure),
+        exhaustive_tiling_search_(exhaustive_tiling_search),
+        should_require_complete_aot_autotune_results_(
+            should_require_complete_aot_autotune_results),
+        autotune_cache_dir_(autotune_cache_dir),
+        autotune_cache_mode_(autotune_cache_mode),
+        gemm_config_overrides_(gemm_config_overrides) {}
+
+  // Derives the autotune config parameters from the DebugOptions `opts`.
+  static absl::StatusOr<AutotuneConfig> FromDebugOptions(
+      const DeviceOrDevicelessConfig& config, const DebugOptions& opts);
+
+  se::StreamExecutor* GetExecutor() const { return config_.GetExecutor(); }
+
+  se::DeviceAddressAllocator* GetAllocator() const {
+    return config_.GetAllocator();
+  }
+
+  absl::StatusOr<se::Stream*> GetStream() const { return config_.GetStream(); }
+
+  const se::GpuComputeCapability& GetGpuComputeCapability() const {
+    return config_.GetGpuComputeCapability();
+  }
+
+  const se::DeviceDescription& GetDeviceDescription() const {
+    return config_.GetDeviceDescription();
+  }
+
+  bool IsDeviceless() const { return config_.IsDeviceless(); }
+
+  const DeviceOrDevicelessConfig& DeviceConfig() const { return config_; }
+
   bool ExhaustiveTilingSearch() const { return exhaustive_tiling_search_; }
 
  private:
-  std::variant<DeviceConfig, DevicelessConfig> config_;
-  int32_t autotune_level_;
+  DeviceOrDevicelessConfig config_;
+  bool should_init_buffers_;
+  bool should_reinit_output_buffer_;
+  bool should_check_correctness_;
+  bool should_skip_wrong_results_;
   bool should_crash_on_check_failure_;
   bool exhaustive_tiling_search_;
-  bool require_complete_aot_autotune_results_;
-  mutable std::unique_ptr<se::DeviceMemoryAllocator> allocator_;
+  bool should_require_complete_aot_autotune_results_;
   std::string autotune_cache_dir_;
   DebugOptions::AutotuneCacheMode autotune_cache_mode_;
+  std::optional<std::vector<AutotuneResult::TritonGemmKey>>
+      gemm_config_overrides_;
 };
 
 using AutotuneNoCacheFn = std::function<absl::StatusOr<AutotuneResult>()>;
 
-struct AutotunerUtil {
+class AutotunerUtil {
+ public:
   static absl::StatusOr<AutotuneResult> Autotune(
       const HloInstruction* instr, const AutotuneConfig& config,
       const AutotuneNoCacheFn& autotune_fn);
-
-  // Returns the same cache key that would be used inside Autotune().
-  //
-  // Normally, we don't have to use this low level method.
-  static AutotuneCacheKey GetKey(const HloInstruction* instr,
-                                 const AutotuneConfig& config);
 
   // Checks if the key is in the autotune cache.
   //
@@ -239,6 +216,27 @@ struct AutotunerUtil {
   static absl::StatusOr<bool> AddResult(const AutotuneCacheKey& key,
                                         AutotuneResult result,
                                         const AutotuneConfig& config);
+
+  // Used in the new autotuner to provide current cache compatibility.
+  static absl::StatusOr<std::optional<AutotuneResult>> TryFindInCache(
+      const AutotuneCacheKey& key, absl::string_view cache_dir);
+
+  // Used in the new autotuner to provide current cache compatibility.
+  struct ResultAndInserted {
+    // The result that ended up in the cache. This is the existing result if
+    // inserted is false, and the new result if inserted is true.
+    //
+    // We return a value, not a pointer, for thread safety reasons.
+    AutotuneResult result;
+    // Did we insert the given result into the cache?
+    bool inserted;
+  };
+
+  // Used in the new autotuner to provide current cache compatibility.
+  static absl::StatusOr<ResultAndInserted> AddResultToCaches(
+      const AutotuneCacheKey& key, AutotuneResult result,
+      absl::string_view cache_dir,
+      DebugOptions::AutotuneCacheMode autotune_cache_mode);
 
   // Functions to save/load XLA's autotuning results.
   //

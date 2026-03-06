@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+import contextlib
 import itertools
 import logging
 
@@ -35,11 +36,15 @@ from tensorflow.python.ops import sparse_ops
 from tensorflow.python.ops import summary_ops_v2
 from tensorflow.python.ops import variables as tf_variables
 from tensorflow.python.platform import test
+from tensorflow.python.tpu import embedding_context_utils as ecu
 from tensorflow.python.tpu import tpu_embedding_for_serving
 from tensorflow.python.tpu import tpu_embedding_v2_utils
 from tensorflow.python.tpu import tpu_embedding_v3
+from tensorflow.python.tpu import tpu_embedding_v3_utils
 from tensorflow.python.tpu import tpu_replication
 from tensorflow.python.util import nest
+
+shard_initializer = tpu_embedding_v3_utils.shard_initializer
 
 
 def create_input_data_based_on_hw_requirement(
@@ -166,6 +171,7 @@ class TPUEmbeddingV3Test(parameterized.TestCase, test.TestCase):
         combiner='sum',
         name='user',
     )
+    self.rng = np.random.default_rng(0)
 
   def test_single_feature_single_table_lookup_with_static_buffer_size(self):
     feature_config = tpu_embedding_v2_utils.FeatureConfig(
@@ -363,10 +369,18 @@ class TPUEmbeddingV3Test(parameterized.TestCase, test.TestCase):
       self.assertAllEqual(per_feature_result, per_feature_result_cpu)
 
   def test_embedding_initialization(self):
+    resolver = tpu_cluster_resolver.TPUClusterResolver(tpu='')
+    remote.connect_to_cluster(resolver)
+    tpu_cluster_resolver.initialize_tpu_system(resolver)
+    strategy = tpu_strategy.TPUStrategy(resolver)
 
     def element_id_initializer(shape, dtype):
       values = math_ops.range(0, shape[0] * shape[1], dtype=dtype)
       return array_ops.reshape(values, shape)
+
+    def sharding_aware_const_initializer(shape, dtype, shard_info=None):
+      initializer = init_ops_v2.Constant(23.0)
+      return initializer(shard_info.shape if shard_info else shape, dtype=dtype)
 
     table_video = tpu_embedding_v2_utils.TableConfig(
         vocabulary_size=self.vocabulary_size,
@@ -379,11 +393,18 @@ class TPUEmbeddingV3Test(parameterized.TestCase, test.TestCase):
     table_user = tpu_embedding_v2_utils.TableConfig(
         vocabulary_size=self.vocabulary_size,
         dim=128,
-        initializer=element_id_initializer,
+        initializer=shard_initializer(strategy, element_id_initializer),
         combiner='sum',
         name='user',
     )
 
+    table_country = tpu_embedding_v2_utils.TableConfig(
+        vocabulary_size=self.vocabulary_size,
+        dim=128,
+        initializer=sharding_aware_const_initializer,
+        combiner='sum',
+        name='country',
+    )
     feature_config = {
         'watched': tpu_embedding_v2_utils.FeatureConfig(
             table=table_video, output_shape=[16]
@@ -391,12 +412,11 @@ class TPUEmbeddingV3Test(parameterized.TestCase, test.TestCase):
         'user': tpu_embedding_v2_utils.FeatureConfig(
             table=table_user, output_shape=[16]
         ),
+        'country': tpu_embedding_v2_utils.FeatureConfig(
+            table=table_country, output_shape=[16]
+        ),
     }
 
-    resolver = tpu_cluster_resolver.TPUClusterResolver(tpu='')
-    remote.connect_to_cluster(resolver)
-    tpu_cluster_resolver.initialize_tpu_system(resolver)
-    strategy = tpu_strategy.TPUStrategy(resolver)
     sparse_features = {
         'watched': sparse_ops.sparse_reorder(
             sparse_tensor.SparseTensor(
@@ -409,6 +429,13 @@ class TPUEmbeddingV3Test(parameterized.TestCase, test.TestCase):
             sparse_tensor.SparseTensor(
                 indices=[[i, 0] for i in range(16)],
                 values=np.arange(16) + 16,
+                dense_shape=[16, 1],
+            )
+        ),
+        'country': sparse_ops.sparse_reorder(
+            sparse_tensor.SparseTensor(
+                indices=[[i, 0] for i in range(16)],
+                values=np.arange(16) + 32,
                 dense_shape=[16, 1],
             )
         ),
@@ -448,14 +475,22 @@ class TPUEmbeddingV3Test(parameterized.TestCase, test.TestCase):
     result = test_fn(data)
     watched = result['watched']
     user = result['user']
+    country = result['country']
     self.assertEqual(watched.shape, (16, 128))
     self.assertEqual(user.shape, (16, 128))
+    self.assertEqual(country.shape, (16, 128))
     self.assertAllClose(
         watched, np.ones(16 * 128).reshape((16, 128)), atol=1e-5, rtol=1e-5
     )
     self.assertAllClose(
         user,
         2048 + np.arange(16 * 128).reshape((16, 128)),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    self.assertAllClose(
+        country,
+        np.ones(16 * 128).reshape((16, 128)) * 23.0,
         atol=1e-5,
         rtol=1e-5,
     )
@@ -830,6 +865,46 @@ class TPUEmbeddingV3Test(parameterized.TestCase, test.TestCase):
     ):
       self.assertAllEqual(per_feature_result, per_feature_result_cpu)
 
+  def test_compute_sparse_core_stats_shared_table(self):
+    resolver = tpu_cluster_resolver.TPUClusterResolver(tpu='')
+    remote.connect_to_cluster(resolver)
+    tpu_cluster_resolver.initialize_tpu_system(resolver)
+    strategy = tpu_strategy.TPUStrategy(resolver)
+
+    batch_size = 16
+    num_tpu_chips = strategy.num_replicas_in_sync
+
+    shared_table = tpu_embedding_v2_utils.TableConfig(
+        vocabulary_size=self.vocabulary_size,
+        dim=self.embedding_dim,
+        initializer=init_ops_v2.Constant(1.0),
+        combiner='sum',
+        name='shared_table',
+    )
+
+    features = ['feature_a', 'feature_b']
+    feature_config = {
+        feature: tpu_embedding_v2_utils.FeatureConfig(
+            table=shared_table, name=feature, output_shape=[batch_size]
+        )
+        for feature in features
+    }
+
+    data = {
+        feature: math_ops.cast(
+            math_ops.range(batch_size * num_tpu_chips) % self.vocabulary_size,
+            dtypes.float32,
+        )
+        for feature in features
+    }
+
+    tpu_embedding_v3.TPUEmbeddingV2.compute_sparse_core_stats(
+        features=data,
+        feature_config=feature_config,
+        num_tpu_chips=num_tpu_chips,
+        optimizer=tpu_embedding_v2_utils.SGD(learning_rate=1.0),
+    )
+
   def test_raise_error_when_weight_decay_is_set(self):
     feature_config = tpu_embedding_v2_utils.FeatureConfig(
         table=self.table_video, name='watched', output_shape=[16]
@@ -852,13 +927,18 @@ class TPUEmbeddingV3Test(parameterized.TestCase, test.TestCase):
         )
 
   @parameterized.parameters(
-      *list(itertools.product([True, False], [True, False], [True, False]))
+      *list(
+          itertools.product(
+              [True, False], [True, False], [True, False], [True, False]
+          )
+      )
   )
   def test_pipelining_and_summary_recording(
       self,
       record_summaries,
       is_enqueue_separated,
       use_predicate_function,
+      use_sequential_embedding_context,
   ):
     """Test that pipelining is disabled when summaries are recorded and vice versa."""
     num_steps = 10
@@ -958,12 +1038,19 @@ class TPUEmbeddingV3Test(parameterized.TestCase, test.TestCase):
     else:
       should_record_summaries = record_summaries
       should_be_pipelined = not record_summaries
+
+    sequential_embedding_context = contextlib.nullcontext()
+    if use_sequential_embedding_context:
+      should_be_pipelined = False
+      sequential_embedding_context = ecu.SequentialEmbeddingContext()
+
     with MockSummaryWriter().as_default():
-      with summary_ops_v2.record_if(should_record_summaries):
-        is_pipelined = self.is_function_pipelined(tpu_test_fn, tpu_iter)
-        # If we are recording summaries the function should not be pipelined and
-        # vice versa.
-        self.assertEqual(is_pipelined, should_be_pipelined)
+      with sequential_embedding_context:
+        with summary_ops_v2.record_if(should_record_summaries):
+          is_pipelined = self.is_function_pipelined(tpu_test_fn, tpu_iter)
+          # If we are recording summaries the function should not be pipelined
+          # and vice versa.
+          self.assertEqual(is_pipelined, should_be_pipelined)
 
   def is_function_pipelined(self, tf_function, *args):
     """Returns whether the tf_function is flagged for embedding pipelining.

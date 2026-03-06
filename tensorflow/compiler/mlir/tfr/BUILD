@@ -39,12 +39,12 @@ td_library(
     ],
     compatible_with = get_compatible_with_portable(),
     deps = [
-        "//tensorflow/compiler/mlir/lite/quantization/ir:QuantizationOpsTdFiles",
         "//tensorflow/compiler/mlir/tensorflow:tensorflow_ops_td_files",
         "@llvm-project//mlir:CallInterfacesTdFiles",
         "@llvm-project//mlir:ControlFlowInterfacesTdFiles",
         "@llvm-project//mlir:FunctionInterfacesTdFiles",
         "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:QuantizationOpsTdFiles",
         "@llvm-project//mlir:ShapeOpsTdFiles",
         "@llvm-project//mlir:SideEffectInterfacesTdFiles",
     ],
@@ -170,7 +170,7 @@ tf_cc_binary(
         ":tfr",
         "//tensorflow/compiler/mlir:init_mlir",
         "//tensorflow/compiler/mlir:passes",
-        "//tensorflow/compiler/mlir/lite/quantization/ir:QuantOps",
+        "//tensorflow/compiler/mlir/quantization/common/ir:QuantOps",
         "//tensorflow/compiler/mlir/tensorflow",
         "//tensorflow/compiler/mlir/tensorflow/transforms:tensorflow_passes",
         "@llvm-project//mlir:AllPassesAndDialects",
@@ -179,6 +179,7 @@ tf_cc_binary(
         "@llvm-project//mlir:FuncExtensions",
         "@llvm-project//mlir:MlirOptLib",
         "@llvm-project//mlir:QuantOps",
+        "@llvm-project//mlir:RegisterAllPasses",
         "@llvm-project//mlir:SCFDialect",
         "@llvm-project//mlir:ShapeDialect",
     ],
@@ -224,6 +225,7 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:FuncDialect",
@@ -248,7 +250,7 @@ tf_cc_test(
         "//tensorflow/core:test_main",
         "@com_google_absl//absl/types:span",
         "@llvm-project//mlir:IR",
-        "@local_xla//xla/hlo/testlib:test",
+        "@xla//xla/hlo/testlib:test",
     ],
 )
 
@@ -307,7 +309,7 @@ py_strict_library(
         "//tensorflow/python/framework:op_def_registry",
         "//tensorflow/python/platform:tf_logging",
         "//tensorflow/python/util:tf_inspect",
-        "@pypi_gast//:pkg",
+        "@pypi//gast",
     ],
 )
 
@@ -338,7 +340,7 @@ py_strict_library(
         "//tensorflow/python/autograph/pyct:transpiler",
         "//tensorflow/python/framework:op_def_registry",
         "//tensorflow/python/util:tf_inspect",
-        "@pypi_gast//:pkg",
+        "@pypi//gast",
     ],
 )
 

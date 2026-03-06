@@ -1,7 +1,7 @@
 # Description:
 #   Doc generator
 
-load("//tensorflow:py.default.bzl", "py_library")
+load("@xla//third_party/rules_python/python:defs.bzl", "py_library")
 load("//tensorflow:strict.default.bzl", "py_strict_binary", "py_strict_library", "py_strict_test")
 load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 load(
@@ -132,7 +132,7 @@ py_strict_library(
     srcs = ["fenced_doctest_lib.py"],
     deps = [
         ":tf_doctest_lib",
-        "@pypi_astor//:pkg",
+        "@pypi//astor",
     ],
 )
 
@@ -169,7 +169,7 @@ py_strict_test(
         ":generate2_lib",
         "//tensorflow:tensorflow_py",
         "//tensorflow/python/platform:test",
-        "@pypi_packaging//:pkg",
+        "@pypi//packaging",
     ],
 )
 
@@ -200,7 +200,7 @@ py_strict_library(
         "//tensorflow/python/util:tf_inspect",
         "@absl_py//absl:app",
         "@absl_py//absl/flags",
-        "@pypi_packaging//:pkg",
+        "@pypi//packaging",
     ],
 )
 

@@ -85,7 +85,7 @@ TEST(RegionIsolationTest, CaseOp) {
 
   OpBuilder b(&ctx);
 
-  OwningOpRef<ModuleOp> root(b.create<ModuleOp>(b.getUnknownLoc()));
+  OwningOpRef<ModuleOp> root(ModuleOp::create(b, b.getUnknownLoc()));
 
   {
     auto& block = root->getBodyRegion().front();
@@ -95,26 +95,28 @@ TEST(RegionIsolationTest, CaseOp) {
   // Add values to be referenced within later regions.
 
   auto root_val_1 =
-      b.create<arith::ConstantOp>(b.getUnknownLoc(), TestValData(1, b));
+      arith::ConstantOp::create(b, b.getUnknownLoc(), TestValData(1, b));
 
   auto root_val_2 =
-      b.create<arith::ConstantOp>(b.getUnknownLoc(), TestValData(2, b));
+      arith::ConstantOp::create(b, b.getUnknownLoc(), TestValData(2, b));
 
   auto root_val_3 =
-      b.create<arith::ConstantOp>(b.getUnknownLoc(), TestValData(3, b));
+      arith::ConstantOp::create(b, b.getUnknownLoc(), TestValData(3, b));
 
   // Iteration convenience.
-  llvm::OwningArrayRef<arith::ConstantOp> root_vals(
+  llvm::SmallVector<arith::ConstantOp> root_vals(
       {root_val_1, root_val_2, root_val_3});
 
   // Make a regioned op with computations that reference defined above vals.
 
-  auto root_ind = b.create<arith::ConstantOp>(
-      b.getUnknownLoc(), DenseIntElementsAttr::get(
-                             RankedTensorType::get({}, b.getI32Type()), {0}));
+  auto root_ind = arith::ConstantOp::create(
+      b, b.getUnknownLoc(),
+      DenseIntElementsAttr::get(RankedTensorType::get({}, b.getI32Type()),
+                                {0}));
 
-  auto regioned_op = b.create<stablehlo::CaseOp>(
-      root_val_1.getLoc(), llvm::SmallVector<Type>({TestValType(b)}), root_ind,
+  auto regioned_op = stablehlo::CaseOp::create(
+      b, root_val_1.getLoc(), llvm::SmallVector<Type>({TestValType(b)}),
+      root_ind,
       /*branch_count=*/3);
 
   // Populate each branch with a computation that references the
@@ -123,9 +125,9 @@ TEST(RegionIsolationTest, CaseOp) {
   for (auto [reg, val] : llvm::zip(regioned_op.getBranches(), root_vals)) {
     auto& block = reg.emplaceBlock();
     b.setInsertionPointToStart(&block);
-    auto res = b.create<stablehlo::AddOp>(b.getUnknownLoc(), root_val_1, val);
-    llvm::OwningArrayRef<Value> rets({res});
-    b.create<stablehlo::ReturnOp>(b.getUnknownLoc(), rets);
+    auto res = stablehlo::AddOp::create(b, b.getUnknownLoc(), root_val_1, val);
+    llvm::SmallVector<Value> rets({res});
+    stablehlo::ReturnOp::create(b, b.getUnknownLoc(), rets);
   }
 
   //

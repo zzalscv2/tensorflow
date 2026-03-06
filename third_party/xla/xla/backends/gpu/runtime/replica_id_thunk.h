@@ -16,9 +16,16 @@ limitations under the License.
 #ifndef XLA_BACKENDS_GPU_RUNTIME_REPLICA_ID_THUNK_H_
 #define XLA_BACKENDS_GPU_RUNTIME_REPLICA_ID_THUNK_H_
 
+#include <memory>
+
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "xla/backends/gpu/runtime/thunk.h"
+#include "xla/backends/gpu/runtime/thunk.pb.h"
+#include "xla/runtime/buffer_use.h"
 #include "xla/service/buffer_assignment.h"
+#include "xla/shape_util.h"
 
 namespace xla {
 namespace gpu {
@@ -35,18 +42,36 @@ class ReplicaOrPartitionIdThunk : public Thunk {
                             const BufferAllocation::Slice& dest)
       : Thunk(kind, thunk_info), dest_(dest) {}
 
+  BufferUses buffer_uses() const override {
+    return {
+        BufferUse::Write(dest_, ShapeUtil::MakeShape(S32, {})),
+    };
+  }
+
  private:
   const BufferAllocation::Slice dest_;
 };
 
 class ReplicaIdThunk : public ReplicaOrPartitionIdThunk {
  public:
+  static absl::StatusOr<std::unique_ptr<ReplicaIdThunk>> FromProto(
+      ThunkInfo thunk_info, const ReplicaIdThunkProto& proto,
+      absl::Span<const BufferAllocation> allocations);
+
+  absl::StatusOr<ThunkProto> ToProto() const override;
+
   ReplicaIdThunk(ThunkInfo thunk_info, const BufferAllocation::Slice& dest)
       : ReplicaOrPartitionIdThunk(Kind::kReplicaId, thunk_info, dest) {}
 };
 
 class PartitionIdThunk : public ReplicaOrPartitionIdThunk {
  public:
+  static absl::StatusOr<std::unique_ptr<PartitionIdThunk>> FromProto(
+      ThunkInfo thunk_info, const PartitionIdThunkProto& thunk_proto,
+      absl::Span<const BufferAllocation> buffer_allocations);
+
+  absl::StatusOr<ThunkProto> ToProto() const override;
+
   PartitionIdThunk(ThunkInfo thunk_info, const BufferAllocation::Slice& dest)
       : ReplicaOrPartitionIdThunk(Kind::kPartitionId, thunk_info, dest) {}
 };

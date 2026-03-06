@@ -24,14 +24,18 @@ limitations under the License.
 
 #include "absl/base/nullability.h"
 #include "absl/container/inlined_vector.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "llvm/Support/ExtensibleRTTI.h"
 #include "xla/python/ifrt/dtype.h"
 #include "xla/python/ifrt/layout.pb.h"
 #include "xla/python/ifrt/serdes.h"
+#include "xla/python/ifrt/serdes_default_version_accessor.h"
+#include "xla/python/ifrt/serdes_version.h"
 #include "xla/python/ifrt/shape.h"
 #include "xla/python/ifrt/sharding.h"
+#include "xla/tsl/platform/errors.h"
 
 namespace xla {
 namespace ifrt {
@@ -77,8 +81,18 @@ class Layout : public llvm::RTTIExtends<Layout, Serializable> {
   // Constructs `Layout` from `LayoutProto`.
   static absl::StatusOr<CustomLayoutRef> FromProto(const LayoutProto& proto);
 
+  // Converts the layout to a protobuf.
+  absl::Status ToProto(
+      LayoutProto& layout_proto,
+      SerDesVersion version = SerDesDefaultVersionAccessor::Get()) const;
+
   // Returns a `LayoutProto` representation.
-  absl::StatusOr<LayoutProto> ToProto() const;
+  absl::StatusOr<LayoutProto> ToProto(
+      SerDesVersion version = SerDesDefaultVersionAccessor::Get()) const {
+    LayoutProto proto;
+    TF_RETURN_IF_ERROR(ToProto(proto, version));
+    return proto;
+  }
 
   template <typename Sink>
   friend void AbslStringify(Sink& sink, const Layout& layout) {

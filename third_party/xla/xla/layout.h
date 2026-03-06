@@ -47,7 +47,7 @@ class Tile {
   explicit Tile(absl::Span<const int64_t> dimensions)
       : dimensions_(dimensions.begin(), dimensions.end()) {}
 
-  // De/Serialize a Tile to and from a TileProto.
+  // Creates a Tile from a TileProto.
   static absl::StatusOr<Tile> FromProto(const TileProto& tile_proto) {
     Tile tile;
     tile.dimensions_.reserve(tile_proto.dimensions_size());
@@ -57,6 +57,11 @@ class Tile {
     }
     return tile;
   }
+
+  // Converts the Tile to a TileProto. Clears `tile_proto` first.
+  void ToProto(TileProto& tile_proto) const;
+
+  // Returns a TileProto representation of the Tile.
   TileProto ToProto() const;
 
   bool operator==(const Tile& other) const {
@@ -120,11 +125,18 @@ class SplitConfig {
       : dimension_(dimension),
         split_indices_(split_indices.begin(), split_indices.end()) {}
 
+  // Creates a SplitConfig from a SplitConfigProto.
   static SplitConfig CreateFromProto(
       const SplitConfigProto& split_config_proto) {
     return SplitConfig(split_config_proto.dimension(),
                        split_config_proto.split_indices());
   }
+
+  // Converts the SplitConfig to a SplitConfigProto. Clears `split_config_proto`
+  // first.
+  void ToProto(SplitConfigProto& split_config_proto) const;
+
+  // Returns a SplitConfigProto representation of the SplitConfig.
   SplitConfigProto ToProto() const;
 
   bool operator==(const SplitConfig& other) const {
@@ -202,6 +214,9 @@ class Layout {
     return FromProto(proto).value();
   }
 
+  // Converts the Layout to a LayoutProto. Clears `proto` first.
+  void ToProto(LayoutProto& proto) const;
+
   // Returns a LayoutProto representation of the Layout.
   LayoutProto ToProto() const;
 
@@ -213,18 +228,6 @@ class Layout {
   //                   dimension, and dimension 0 is the most major dimension.
   //   properties: concatenation of the following, separated by nothing (a
   //               property is ommitted if it is the default):
-  //     D(...): Comma-separated list of attributes for each dimension. Each
-  //             attribute is a single character abbreviation of the dimension
-  //             level type
-  //            The  abbreviations can be:
-  //               D: DIM_DENSE
-  //               C: DIM_COMPRESSED
-  //               S: DIM_SINGLETON
-  //               H: DIM_LOOSE_COMPRESSED
-  //             E.g.
-  //               D(D,C): dimension 0 is dense.
-  //                       dimension 1 is compressed.
-  //             If omitted, all dimensions are dense.
   //     T(...)...(...): The tiling (each (...) is acomma-separated list of
   //                     tile bound sizes). E.g.
   //             T(2,4)(3,5): The shape is tiled with 2x4 and 3x5 tiles.
@@ -304,12 +307,13 @@ class Layout {
 
     Equal& MinorToMajorOnly() {
       return IgnoreTiles()
+          .IgnoreTailPaddingAlignmentInElements()
+          .IgnoreElementSize()
           .IgnoreIndexPrimitiveType()
           .IgnorePointerPrimitiveType()
           .IgnoreMemorySpace()
-          .IgnorePhysicalShape()
-          .IgnoreElementSize()
-          .IgnoreTailPaddingAlignmentInElements();
+          .IgnoreSplitConfigs()
+          .IgnorePhysicalShape();
     }
 
    private:
@@ -325,13 +329,6 @@ class Layout {
 
   bool operator==(const Layout& other) const;
   bool operator!=(const Layout& other) const { return !(*this == other); }
-
-  // The following methods mirror the protobuf generated code interface for the
-  // message LayoutProto. This enabled easy migration of this data structure
-  // from a proto to a proper C++ class.
-  //
-  // TODO(b/29771030): Replace or augment these methods with a more ergonomic
-  // interface.
 
   // Methods for accessing the minor-to-major array.
   ABSL_DEPRECATE_AND_INLINE()

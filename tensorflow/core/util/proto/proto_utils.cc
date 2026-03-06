@@ -17,6 +17,7 @@ limitations under the License.
 
 #include "absl/strings/string_view.h"
 #include "absl/strings/substitute.h"
+#include "google/protobuf/io/tokenizer.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/protobuf.h"
@@ -78,20 +79,20 @@ absl::Status ParseTextFormatFromString(absl::string_view input,
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "output must be non NULL");
   }
-  string err;
+  std::string err;
   StringErrorCollector err_collector(&err, /*one-indexing=*/true);
   protobuf::TextFormat::Parser parser;
   parser.RecordErrorsTo(&err_collector);
-  if (!parser.ParseFromString(string(input), output)) {
+  if (!parser.ParseFromString(input, output)) {
     return absl::Status(absl::StatusCode::kInvalidArgument, err);
   }
   return absl::OkStatus();
 }
 
-StringErrorCollector::StringErrorCollector(string* error_text)
+StringErrorCollector::StringErrorCollector(std::string* error_text)
     : StringErrorCollector(error_text, false) {}
 
-StringErrorCollector::StringErrorCollector(string* error_text,
+StringErrorCollector::StringErrorCollector(std::string* error_text,
                                            bool one_indexing)
     : error_text_(error_text), index_offset_(one_indexing ? 1 : 0) {
   DCHECK(error_text_ != nullptr) << "error_text must be non NULL";
@@ -101,17 +102,19 @@ StringErrorCollector::StringErrorCollector(string* error_text,
   }
 }
 
-void StringErrorCollector::AddError(int line, int column,
-                                    const string& message) {
+void StringErrorCollector::RecordError(int line,
+                                       protobuf::io::ColumnNumber column,
+                                       absl::string_view message) {
   if (error_text_ != nullptr) {
     absl::SubstituteAndAppend(error_text_, "$0($1): $2\n", line + index_offset_,
                               column + index_offset_, message);
   }
 }
 
-void StringErrorCollector::AddWarning(int line, int column,
-                                      const string& message) {
-  AddError(line, column, message);
+void StringErrorCollector::RecordWarning(int line,
+                                         protobuf::io::ColumnNumber column,
+                                         absl::string_view message) {
+  RecordError(line, column, message);
 }
 
 }  // namespace proto_utils

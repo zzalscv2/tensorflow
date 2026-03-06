@@ -1,3 +1,5 @@
+load("@rules_python//python:py_info.bzl", "PyInfo")
+
 """ Repository and build rules for Python wheels packaging utilities. """
 
 def _get_host_environ(repository_ctx, name, default_value = None):
@@ -55,7 +57,12 @@ def _python_wheel_version_suffix_repository_impl(repository_ctx):
             wheel_version_suffix += ".dev{}".format(formatted_date)
             semantic_wheel_version_suffix = "-dev{}".format(formatted_date)
         if git_hash:
-            formatted_hash = git_hash[:9]
+            # This processing is necessary to align with Python packaging standards
+            # (PEP 440), particularly how setuptools normalizes version strings.
+            # See PEP 440 for local version identifiers:
+            # https://peps.python.org/pep-0440/#local-version-identifiers
+            formatted_hash = git_hash.lstrip("0")[:9]
+
             wheel_version_suffix += "+{}".format(formatted_hash)
             semantic_wheel_version_suffix += "+{}".format(formatted_hash)
         if custom_version_suffix:
@@ -252,3 +259,23 @@ It recursively traverses `deps` attribute of the target and collects paths to
 files that are in `data` attribute. Then it filters all files that do not match
 the provided extensions.
 """  # buildifier: disable=no-effect
+
+def _nvidia_wheel_versions_repository_impl(repository_ctx):
+    """Repository rule for storing NVIDIA wheel versions."""
+    versions_source = repository_ctx.attr.versions_source
+
+    versions_file_content = repository_ctx.read(
+        repository_ctx.path(versions_source),
+    )
+    repository_ctx.file(
+        "versions.bzl",
+        "NVIDIA_WHEEL_VERSIONS = '''%s'''" % versions_file_content,
+    )
+    repository_ctx.file("BUILD", "")
+
+nvidia_wheel_versions_repository = repository_rule(
+    implementation = _nvidia_wheel_versions_repository_impl,
+    attrs = {
+        "versions_source": attr.label(mandatory = True, allow_single_file = True),
+    },
+)

@@ -15,10 +15,12 @@ limitations under the License.
 
 #include "xla/service/gpu/model/gpu_performance_model_base.h"
 
+#include <cstdint>
 #include <memory>
 
 #include <gtest/gtest.h>
 #include "absl/strings/string_view.h"
+#include "mlir/IR/MLIRContext.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
@@ -28,11 +30,14 @@ limitations under the License.
 #include "xla/service/gpu/hlo_fusion_analysis.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
 #include "xla/stream_executor/device_description.h"
-#include "tsl/platform/statusor.h"
+#include "xla/tsl/platform/statusor.h"
+#include "xla/xla_data.pb.h"
 
 namespace xla {
 namespace gpu {
 namespace {
+
+using ::mlir::MLIRContext;
 
 class GpuPerformanceModelBaseTest : public HloHardwareIndependentTestBase {
  public:
@@ -41,6 +46,7 @@ class GpuPerformanceModelBaseTest : public HloHardwareIndependentTestBase {
   // on A6000 by profiling the execution of the HLOs.
   se::DeviceDescription device_info_{TestGpuDeviceInfo::RTXA6000DeviceInfo()};
   std::unique_ptr<GpuHloCostAnalysis> analysis_;
+  MLIRContext mlir_context_;
 
   GpuPerformanceModelBaseTest() {
     options_.count_multiple_input_accesses = true;
@@ -128,7 +134,6 @@ f1 {
 
 ENTRY entry_computation {
   param_0 = f32[128] parameter(0)
-  param_1 = f32[4,4] parameter(1)
   ROOT fusion = f32[128] fusion(param_0), kind=kLoop, calls=f1
 }
 )";
@@ -146,6 +151,38 @@ ENTRY entry_computation {
   EXPECT_EQ(GpuPerformanceModelBase::GetOperandBytesAccessed(
                 analysis_.get(), root, root->operand(0)),
             /*4*128*256=*/131072);
+}
+
+TEST_F(GpuPerformanceModelBaseTest,
+       GetOperandBytesAccessedReturnsZeroForUnusedOperand) {
+  absl::string_view hlo_string = R"(
+HloModule m
+
+f1 {
+  p0 = f32[128] parameter(0)
+  ROOT reduce = f32[128] exponential(p0)
+}
+
+ENTRY entry_computation {
+  p0 = f32[128] parameter(0)
+  p1 = f32[128] parameter(1)
+  fusion = f32[128] fusion(p0), kind=kLoop, calls=f1
+  ROOT add = f32[128] add(p1, fusion)
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+  HloComputation* computation = module->entry_computation();
+  ASSERT_IS_OK(computation->Accept(analysis_.get()));
+
+  HloInstruction* root = computation->root_instruction();
+  HloInstruction* p1 = root->mutable_operand(0);
+  HloInstruction* fusion = root->mutable_operand(1);
+
+  EXPECT_EQ(GpuPerformanceModelBase::GetOperandBytesAccessed(analysis_.get(),
+                                                             fusion, p1),
+            0);
 }
 
 // This test documents current behaviour. See comments below how the correct
@@ -206,7 +243,8 @@ ENTRY entry_computation {
   auto fusion_analysis = HloFusionAnalysis::Create(
       *module->entry_computation()->root_instruction(), device_info_);
   auto launch_dimensions =
-      GpuPerformanceModelBase::EstimateFusionLaunchDimensions(fusion_analysis);
+      GpuPerformanceModelBase::EstimateFusionLaunchDimensions(fusion_analysis,
+                                                              &mlir_context_);
 
   EXPECT_EQ(launch_dimensions.num_blocks(), 128);
   EXPECT_EQ(launch_dimensions.num_threads_per_block(), 128);
@@ -242,7 +280,8 @@ ENTRY e {
   auto fusion_analysis = HloFusionAnalysis::Create(
       *module->entry_computation()->root_instruction(), device_info_);
   auto launch_dimensions =
-      GpuPerformanceModelBase::EstimateFusionLaunchDimensions(fusion_analysis);
+      GpuPerformanceModelBase::EstimateFusionLaunchDimensions(fusion_analysis,
+                                                              &mlir_context_);
 
   EXPECT_EQ(launch_dimensions.num_blocks(), 16);
   EXPECT_EQ(launch_dimensions.num_threads_per_block(), 64);
@@ -271,12 +310,45 @@ ENTRY e {
   auto fusion_analysis = HloFusionAnalysis::Create(
       *module->entry_computation()->root_instruction(), device_info_);
   auto launch_dimensions =
-      GpuPerformanceModelBase::EstimateFusionLaunchDimensions(fusion_analysis);
+      GpuPerformanceModelBase::EstimateFusionLaunchDimensions(fusion_analysis,
+                                                              &mlir_context_);
 
   // CuNnnFusion doesn't implement KernelLaunchInsterface, so
   // EstimateFusionLaunchDimensions returns a default estimate.
   EXPECT_EQ(launch_dimensions.num_blocks(), 64);
   EXPECT_EQ(launch_dimensions.num_threads_per_block(), 128);
+}
+
+TEST_F(GpuPerformanceModelBaseTest,
+       CalculateEffectiveFlopsPerNsForFullOccupancyH100) {
+  se::DeviceDescription h100_device_info =
+      TestGpuDeviceInfo::H100SXMDeviceInfo();
+  int64_t flops_per_ns = GpuPerformanceModelBase::CalculateEffectiveFlopsPerNs(
+      h100_device_info, /*num_blocks=*/h100_device_info.core_count(),
+      /*num_threads_per_block=*/h100_device_info.fpus_per_core());
+  // H100 has a peak of 66.9 TFLOPS/s for TF32.
+  EXPECT_GT(flops_per_ns, 66000);
+  EXPECT_LT(flops_per_ns, 68000);
+}
+
+TEST_F(GpuPerformanceModelBaseTest, CalculatePeakBF16OpsPerNsH100) {
+  se::DeviceDescription h100_device_info =
+      TestGpuDeviceInfo::H100SXMDeviceInfo();
+  int64_t flops_per_ns = GpuPerformanceModelBase::CalculatePeakMatrixOpsPerNs(
+      h100_device_info, xla::PrimitiveType::BF16);
+  // H100 has a peak of 989.4 TFLOPS/s for BF16.
+  EXPECT_GT(flops_per_ns, 988000);
+  EXPECT_LT(flops_per_ns, 991000);
+}
+
+TEST_F(GpuPerformanceModelBaseTest, CalculatePeakF64OpsPerNsH100) {
+  se::DeviceDescription h100_device_info =
+      TestGpuDeviceInfo::H100SXMDeviceInfo();
+  int64_t flops_per_ns = GpuPerformanceModelBase::CalculatePeakMatrixOpsPerNs(
+      h100_device_info, xla::PrimitiveType::F64);
+  // H100 has a peak of 66.8 TFLOPS/s for FP64.
+  EXPECT_GT(flops_per_ns, 66000);
+  EXPECT_LT(flops_per_ns, 68000);
 }
 
 }  // namespace

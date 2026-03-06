@@ -21,7 +21,9 @@ limitations under the License.
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/MLIRContext.h"
+#include "xla/hlo/analysis/indexing_map.h"
 #include "xla/hlo/analysis/indexing_test_utils.h"
+#include "xla/hlo/analysis/symbolic_expr.h"
 #include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
 #include "tsl/platform/test.h"
 
@@ -32,6 +34,9 @@ using ::testing::HasSubstr;
 
 class IndexingMapSerializationTest : public HloHardwareIndependentTestBase {
  public:
+  IndexingMapSerializationTest() {
+    RegisterSymbolicExprStorage(&mlir_context_);
+  }
   mlir::MLIRContext mlir_context_;
   void ParseAndCheck(absl::string_view indexing_map_str) {
     auto indexing_map = ParseIndexingMap(indexing_map_str, &mlir_context_);
@@ -41,6 +46,18 @@ class IndexingMapSerializationTest : public HloHardwareIndependentTestBase {
 };
 
 TEST_F(IndexingMapSerializationTest, EmptyMap) { ParseAndCheck("() -> ()"); }
+
+TEST_F(IndexingMapSerializationTest, UndefinedMap) {
+  EXPECT_THAT(ToString(IndexingMap::GetUndefined()),
+              MatchIndexingString("UNDEFINED"));
+}
+
+TEST_F(IndexingMapSerializationTest, KnownEmptyMap) {
+  auto map =
+      ParseIndexingMap("(d0) -> (), domain: d0 in [1, 0]", &mlir_context_);
+  EXPECT_TRUE(map->IsKnownEmpty());
+  EXPECT_THAT(ToString(*map), MatchIndexingString("KNOWN EMPTY"));
+}
 
 TEST_F(IndexingMapSerializationTest, DimsOnly) {
   ParseAndCheck(R"(

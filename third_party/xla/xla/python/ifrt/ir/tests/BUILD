@@ -1,5 +1,7 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//xla:lit.bzl", "lit_test_suite")
-load("//xla:xla.default.bzl", "xla_cc_binary", "xla_cc_test")
+load("//xla:xla.default.bzl", "xla_cc_binary")
 load("//xla/tsl:tsl.bzl", "internal_visibility")
 
 package_group(
@@ -40,19 +42,27 @@ xla_cc_binary(
         "//xla/python/ifrt/hlo:hlo_program",
         "//xla/python/ifrt/ir",
         "//xla/python/ifrt/ir:atom_program_compiler",
+        "//xla/python/ifrt/ir:ifrt_ir_program",
+        "//xla/python/ifrt/ir/conversions/mpmd:lower_to_ifrt",
         "//xla/python/ifrt/ir/transforms:passes",
         "//xla/python/ifrt/support:module_parsing",
+        "//xla/tsl/concurrency:future",
+        "//xla/tsl/platform:test",
         "@com_google_absl//absl/base:core_headers",
-        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log:check",
-        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
         "@com_google_googletest//:gtest",
         "@llvm-project//mlir:AllPassesAndDialects",
         "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:MathDialect",
         "@llvm-project//mlir:MlirOptLib",
-        "@local_tsl//tsl/platform:platform_port",
+        "@llvm-project//mlir:RegisterAllDialects",  # buildcleaner: keep
+        "@llvm-project//mlir:RegisterAllPasses",  # buildcleaner: keep
+        "@shardy//shardy/dialect/mpmd/ir:dialect",
+        "@shardy//shardy/dialect/sdy/ir:dialect",
+        "@tsl//tsl/platform:path",
+        "@tsl//tsl/platform:platform_port",
     ],
 )
 
@@ -71,6 +81,7 @@ xla_cc_binary(
         "@com_google_absl//absl/strings",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:AllPassesAndDialects",
+        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Pass",
         "@llvm-project//mlir:Support",
@@ -133,10 +144,10 @@ cc_library(
         "//xla/service:computation_placer_hdr",
         "//xla/tsl/concurrency:ref_count",
         "//xla/tsl/lib/core:status_test_util",
-        "//xla/tsl/platform:status_matchers",
         "//xla/tsl/platform:statusor",
         "//xla/tsl/platform:test",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/types:span",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:IR",
@@ -144,11 +155,7 @@ cc_library(
     alwayslink = True,
 )
 
-xla_cc_test(
+build_test(
     name = "executable_test_no_impl",
-    srcs = [],
-    deps = [
-        ":executable_impl_test_lib",
-        "//xla/python/ifrt:no_impl_test_main",
-    ],
+    targets = [":executable_impl_test_lib"],
 )

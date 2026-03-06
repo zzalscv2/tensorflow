@@ -20,13 +20,16 @@ limitations under the License.
 #include "absl/container/inlined_vector.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "xla/core/collectives/communicator.h"
 #include "xla/core/collectives/rank_id.h"
+#include "xla/future.h"
 #include "xla/service/collective_ops_utils.h"
-#include "xla/stream_executor/device_memory.h"
+#include "xla/stream_executor/device_address.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/tsl/concurrency/async_value_ref.h"
+#include "xla/xla_data.pb.h"
 
 namespace xla::gpu {
 
@@ -53,65 +56,77 @@ class NvshmemCommunicator : public Communicator {
 
   absl::Status Barrier(const Executor& executor) final;
 
-  tsl::AsyncValueRef<Event> AllReduce(se::DeviceMemoryBase send_buffer,
-                                      se::DeviceMemoryBase recv_buffer,
-                                      PrimitiveType dtype, size_t count,
-                                      ReductionKind reduction_kind,
-                                      const Executor& executor) final;
+  Future<> AllReduce(se::DeviceAddressBase send_buffer,
+                     se::DeviceAddressBase recv_buffer, PrimitiveType dtype,
+                     size_t count, ReductionKind reduction_kind,
+                     const Executor& executor) final;
 
-  tsl::AsyncValueRef<Event> Broadcast(se::DeviceMemoryBase send_buffer,
-                                      se::DeviceMemoryBase recv_buffer,
-                                      PrimitiveType dtype, size_t count,
-                                      RankId root,
-                                      const Executor& executor) final {
+  Future<> Broadcast(se::DeviceAddressBase send_buffer,
+                     se::DeviceAddressBase recv_buffer, PrimitiveType dtype,
+                     size_t count, RankId root,
+                     const Executor& executor) final {
     return absl::UnimplementedError("Not implemented.");
   };
 
-  tsl::AsyncValueRef<Event> ReduceScatter(se::DeviceMemoryBase send_buffer,
-                                          se::DeviceMemoryBase recv_buffer,
-                                          PrimitiveType dtype, size_t count,
-                                          ReductionKind reduction_kind,
-                                          const Executor& executor) final {
+  Future<> ReduceScatter(se::DeviceAddressBase send_buffer,
+                         se::DeviceAddressBase recv_buffer, PrimitiveType dtype,
+                         size_t count, ReductionKind reduction_kind,
+                         const Executor& executor) final {
     return absl::UnimplementedError("Not implemented.");
   };
 
-  tsl::AsyncValueRef<Event> AllGather(se::DeviceMemoryBase send_buffer,
-                                      se::DeviceMemoryBase recv_buffer,
-                                      PrimitiveType dtype, size_t count,
-                                      const Executor& executor) final {
+  Future<> AllGather(se::DeviceAddressBase send_buffer,
+                     se::DeviceAddressBase recv_buffer, PrimitiveType dtype,
+                     size_t count, const Executor& executor) final {
     return absl::UnimplementedError("Not implemented.");
   };
 
-  tsl::AsyncValueRef<Event> AllToAll(
-      absl::InlinedVector<se::DeviceMemoryBase, 4> send_buffers,
-      absl::InlinedVector<se::DeviceMemoryBase, 4> recv_buffers,
-      PrimitiveType dtype, size_t count, const Executor& executor) final {
+  Future<> AllToAll(absl::InlinedVector<se::DeviceAddressBase, 4> send_buffers,
+                    absl::InlinedVector<se::DeviceAddressBase, 4> recv_buffers,
+                    PrimitiveType dtype, size_t count,
+                    const Executor& executor) final {
     return absl::UnimplementedError("Not implemented.");
   };
 
-  tsl::AsyncValueRef<Event> CollectivePermute(
-      se::DeviceMemoryBase send_buffer, se::DeviceMemoryBase recv_buffer,
-      PrimitiveType dtype, size_t count, std::optional<RankId> source_rank,
-      absl::Span<const RankId> target_ranks, const Executor& executor) final {
-    return absl::UnimplementedError("Not implemented.");
-  };
-  ;
-
-  tsl::AsyncValueRef<Event> Send(se::DeviceMemoryBase send_buffer,
-                                 PrimitiveType dtype, size_t count, RankId peer,
-                                 const Executor& executor) final {
+  Future<> CollectivePermute(se::DeviceAddressBase send_buffer,
+                             se::DeviceAddressBase recv_buffer,
+                             PrimitiveType dtype, size_t count,
+                             std::optional<RankId> source_rank,
+                             absl::Span<const RankId> target_ranks,
+                             const Executor& executor) final {
     return absl::UnimplementedError("Not implemented.");
   };
 
-  tsl::AsyncValueRef<Event> Recv(se::DeviceMemoryBase recv_buffer,
-                                 PrimitiveType dtype, size_t count, RankId peer,
-                                 const Executor& executor) final {
+  Future<> Send(se::DeviceAddressBase send_buffer, PrimitiveType dtype,
+                size_t count, RankId peer, const Executor& executor) final {
     return absl::UnimplementedError("Not implemented.");
   };
+
+  Future<> Recv(se::DeviceAddressBase recv_buffer, PrimitiveType dtype,
+                size_t count, RankId peer, const Executor& executor) final {
+    return absl::UnimplementedError("Not implemented.");
+  };
+
+  Future<> Send(se::DeviceAddressBase recv_buffer,
+                se::DeviceAddressBase send_buffer, PrimitiveType dtype,
+                size_t count, RankId peer, const Executor& executor) final;
+
+  Future<> Recv(se::DeviceAddressBase recv_buffer,
+                se::DeviceAddressBase send_buffer, PrimitiveType dtype,
+                size_t count, RankId peer, const Executor& executor) final;
+
+  absl::Status Quiet(const Executor& executor) final;
+
+  absl::Status Fence() final;
 
   std::string ToString() const final;
 
  private:
+  absl::Status P2P(absl::string_view op_name, PrimitiveType type,
+                   se::DeviceAddressBase recv_buffer,
+                   se::DeviceAddressBase send_buffer, size_t count, RankId peer,
+                   const Executor& executor);
+
   static absl::StatusOr<se::Stream*> ToStream(const Executor& executor);
 
   NvshmemCollectives* collectives_;  // Parent NvshmemCollectives instance

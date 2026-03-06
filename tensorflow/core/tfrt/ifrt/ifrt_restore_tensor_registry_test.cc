@@ -18,9 +18,12 @@ limitations under the License.
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "testing/base/public/mock-log.h"
+#include "absl/base/log_severity.h"
 #include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "tensorflow/compiler/mlir/tfrt/transforms/ifrt/ifrt_types.h"
-#include "xla/python/ifrt/future.h"
+#include "xla/tsl/concurrency/future.h"
 #include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/tsl/platform/status_matchers.h"
 #include "xla/tsl/platform/statusor.h"
@@ -29,88 +32,96 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/framework/types.pb.h"
 
-using tsl::testing::IsOk;
-using tsl::testing::StatusIs;
-
 namespace tensorflow {
 namespace ifrt_serving {
 namespace {
 
+using ::testing::_;
+using ::testing::AnyNumber;
+using ::testing::HasSubstr;
+using ::testing::kDoNotCaptureLogsYet;
+using ::testing::ScopedMockLog;
+
 TEST(IfrtRestoreTensorRegistryTest, RetrieveNonRegisteredTensorFails) {
   IfrtRestoreTensorRegistry registry;
   EXPECT_THAT(registry.GetRestoredTensor("input_tensor_1").Await(),
-              StatusIs(absl::StatusCode::kNotFound));
+              absl_testing::StatusIs(absl::StatusCode::kNotFound));
 }
 
 TEST(IfrtRestoreTensorRegistryTest,
      RetrieveNonRegisteredTensorDTypeAndShapeFails) {
   IfrtRestoreTensorRegistry registry;
   EXPECT_THAT(registry.GetDtypeAndShape("input_tensor_1"),
-              StatusIs(absl::StatusCode::kNotFound));
+              absl_testing::StatusIs(absl::StatusCode::kNotFound));
 }
 
 TEST(IfrtRestoreTensorRegistryTest, SetNonExistedTensorAsUsedByHostFails) {
   IfrtRestoreTensorRegistry registry;
   EXPECT_THAT(registry.SetUsedByHost("input_tensor_1"),
-              StatusIs(absl::StatusCode::kNotFound));
+              absl_testing::StatusIs(absl::StatusCode::kNotFound));
 }
 
-TEST(IfrtRestoreTensorRegistryTest, RegisteredExistedTensorFails) {
+TEST(IfrtRestoreTensorRegistryTest,
+     RegisteredExistedTensorSucceedsAndWarningIsLogged) {
   auto input_tensor =
       test::AsTensor<int32_t>({1, 2, 3, 4}, tensorflow::TensorShape({2, 2}));
-  auto promise = xla::ifrt::Future<tensorflow::Tensor>::CreatePromise();
-  auto future = xla::ifrt::Future<tensorflow::Tensor>(promise);
+  auto [promise, future] = tsl::MakePromise<tensorflow::Tensor>();
 
   IfrtRestoreTensorRegistry::RestoredTensorInfo restored_tensor_info = {
       .used_by_host = false,
-      .dtype_and_shape =
-          {
-              .dtype = DT_INT32,
-              .shape = tensorflow::TensorShape({2, 2}),
-          },
+      .dtype_and_shape = tsl::Future<DtypeAndShape>(DtypeAndShape{
+          .dtype = DT_INT32,
+          .shape = tensorflow::TensorShape({2, 2}),
+      }),
       .tensor_future = future};
   IfrtRestoreTensorRegistry registry;
   EXPECT_THAT(registry.TryRegister("input_tensor_2", restored_tensor_info),
-              IsOk());
+              absl_testing::IsOk());
   promise.Set(input_tensor);
+
+  ScopedMockLog mock_log(kDoNotCaptureLogsYet);
+  EXPECT_CALL(mock_log, Log).Times(AnyNumber());
+  EXPECT_CALL(mock_log,
+              Log(base_logging::WARNING, _,
+                  HasSubstr("Variable named 'input_tensor_2' has been already "
+                            "registered. Ignore request of a new tensor")))
+      .Times(1);
+  mock_log.StartCapturingLogs();
+
   EXPECT_THAT(registry.TryRegister("input_tensor_2", restored_tensor_info),
-              StatusIs(absl::StatusCode::kAlreadyExists));
+              absl_testing::IsOk());
 }
 
 TEST(IfrtRestoreTensorRegistryTest, SetTensorAsUsedByHost) {
-  auto promise = xla::ifrt::Future<tensorflow::Tensor>::CreatePromise();
-  auto future = xla::ifrt::Future<tensorflow::Tensor>(promise);
+  auto [promise, future] = tsl::MakePromise<tensorflow::Tensor>();
   IfrtRestoreTensorRegistry::RestoredTensorInfo restored_tensor_info = {
       .used_by_host = false,
-      .dtype_and_shape =
-          {
-              .dtype = DT_INT32,
-              .shape = tensorflow::TensorShape({2, 2}),
-          },
+      .dtype_and_shape = tsl::Future<DtypeAndShape>(DtypeAndShape{
+          .dtype = DT_INT32,
+          .shape = tensorflow::TensorShape({2, 2}),
+      }),
       .tensor_future = future};
   IfrtRestoreTensorRegistry registry;
   EXPECT_THAT(registry.TryRegister("input_tensor_1", restored_tensor_info),
-              IsOk());
-  EXPECT_THAT(registry.SetUsedByHost("input_tensor_1"), IsOk());
+              absl_testing::IsOk());
+  EXPECT_THAT(registry.SetUsedByHost("input_tensor_1"), absl_testing::IsOk());
 }
 
 TEST(IfrtRestoreTensorRegistryTest, RegisteredTensorCanBeRetrieved) {
   auto input_tensor =
       test::AsTensor<int32_t>({1, 2, 3, 4}, tensorflow::TensorShape({2, 2}));
-  auto promise = xla::ifrt::Future<tensorflow::Tensor>::CreatePromise();
-  auto future = xla::ifrt::Future<tensorflow::Tensor>(promise);
+  auto [promise, future] = tsl::MakePromise<tensorflow::Tensor>();
 
   IfrtRestoreTensorRegistry::RestoredTensorInfo restored_tensor_info = {
       .used_by_host = false,
-      .dtype_and_shape =
-          {
-              .dtype = DT_INT32,
-              .shape = tensorflow::TensorShape({2, 2}),
-          },
+      .dtype_and_shape = tsl::Future<DtypeAndShape>(DtypeAndShape{
+          .dtype = DT_INT32,
+          .shape = tensorflow::TensorShape({2, 2}),
+      }),
       .tensor_future = future};
   IfrtRestoreTensorRegistry registry;
   EXPECT_THAT(registry.TryRegister("input_tensor_1", restored_tensor_info),
-              IsOk());
+              absl_testing::IsOk());
   promise.Set(input_tensor);
   TF_ASSERT_OK_AND_ASSIGN(tensorflow::Tensor retrieved,
                           registry.GetRestoredTensor("input_tensor_1").Await());
@@ -126,20 +137,18 @@ TEST(IfrtRestoreTensorRegistryTest,
      RegisteredTensorDTypeAndShapeCanBeRetrieved) {
   auto input_tensor =
       test::AsTensor<int32_t>({1, 2, 3, 4}, tensorflow::TensorShape({2, 2}));
-  auto promise = xla::ifrt::Future<tensorflow::Tensor>::CreatePromise();
-  auto future = xla::ifrt::Future<tensorflow::Tensor>(promise);
+  auto [promise, future] = tsl::MakePromise<tensorflow::Tensor>();
 
   IfrtRestoreTensorRegistry::RestoredTensorInfo restored_tensor_info = {
       .used_by_host = false,
-      .dtype_and_shape =
-          {
-              .dtype = DT_INT32,
-              .shape = tensorflow::TensorShape({2, 2}),
-          },
+      .dtype_and_shape = tsl::Future<DtypeAndShape>(DtypeAndShape{
+          .dtype = DT_INT32,
+          .shape = tensorflow::TensorShape({2, 2}),
+      }),
       .tensor_future = future};
   IfrtRestoreTensorRegistry registry;
   EXPECT_THAT(registry.TryRegister("input_tensor_1", restored_tensor_info),
-              IsOk());
+              absl_testing::IsOk());
   TF_ASSERT_OK_AND_ASSIGN(DtypeAndShape dtype_and_shape,
                           registry.GetDtypeAndShape("input_tensor_1"));
   EXPECT_TRUE(
@@ -150,26 +159,22 @@ TEST(IfrtRestoreTensorRegistryTest,
 TEST(IfrtRestoreTensorRegistryTest, FeezeTensorRegistry) {
   auto input_tensor =
       test::AsTensor<int32_t>({1, 2, 3, 4}, tensorflow::TensorShape({2, 2}));
-  auto promise1 = xla::ifrt::Future<tensorflow::Tensor>::CreatePromise();
-  auto future1 = xla::ifrt::Future<tensorflow::Tensor>(promise1);
-  auto promise2 = xla::ifrt::Future<tensorflow::Tensor>::CreatePromise();
-  auto future2 = xla::ifrt::Future<tensorflow::Tensor>(promise2);
+  auto [promise1, future1] = tsl::MakePromise<tensorflow::Tensor>();
+  auto [promise2, future2] = tsl::MakePromise<tensorflow::Tensor>();
 
   IfrtRestoreTensorRegistry::RestoredTensorInfo restored_tensor_info1 = {
       .used_by_host = false,
-      .dtype_and_shape =
-          {
-              .dtype = DT_INT32,
-              .shape = tensorflow::TensorShape({2, 2}),
-          },
+      .dtype_and_shape = tsl::Future<DtypeAndShape>(DtypeAndShape{
+          .dtype = DT_INT32,
+          .shape = tensorflow::TensorShape({2, 2}),
+      }),
       .tensor_future = future1};
   IfrtRestoreTensorRegistry::RestoredTensorInfo restored_tensor_info2 = {
       .used_by_host = true,
-      .dtype_and_shape =
-          {
-              .dtype = DT_INT32,
-              .shape = tensorflow::TensorShape({2, 2}),
-          },
+      .dtype_and_shape = tsl::Future<DtypeAndShape>(DtypeAndShape{
+          .dtype = DT_INT32,
+          .shape = tensorflow::TensorShape({2, 2}),
+      }),
       .tensor_future = future2};
   IfrtRestoreTensorRegistry registry;
   TF_ASSERT_OK(registry.TryRegister("input_tensor_1", restored_tensor_info1));
@@ -179,7 +184,7 @@ TEST(IfrtRestoreTensorRegistryTest, FeezeTensorRegistry) {
   registry.Freeze();
   // Tensor with `used_by_host` set to false will be freed after freeze.
   EXPECT_THAT(registry.GetRestoredTensor("input_tensor_1").Await(),
-              StatusIs(absl::StatusCode::kUnavailable));
+              absl_testing::StatusIs(absl::StatusCode::kUnavailable));
   // Tensor with `used_by_host` set to true will be kept after freeze.
   TF_ASSERT_OK_AND_ASSIGN(tensorflow::Tensor retrieved,
                           registry.GetRestoredTensor("input_tensor_2").Await());

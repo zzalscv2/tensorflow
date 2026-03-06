@@ -17,12 +17,15 @@ limitations under the License.
 #define XLA_BACKENDS_GPU_RUNTIME_THUNK_H_
 
 #include <cstdint>
-#include <map>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
+#include "absl/base/nullability.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/functional/any_invocable.h"
@@ -31,25 +34,31 @@ limitations under the License.
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "xla/backends/gpu/collectives/gpu_clique_key.h"
-#include "xla/backends/gpu/collectives/gpu_cliques.h"
-#include "xla/backends/gpu/collectives/gpu_collectives.h"
+#include "xla/backends/gpu/runtime/collective_clique_requests.h"
+#include "xla/backends/gpu/runtime/collective_cliques.h"
+#include "xla/backends/gpu/runtime/collective_memory.h"
+#include "xla/backends/gpu/runtime/collective_memory_requests.h"
+#include "xla/backends/gpu/runtime/collective_multimem_registry.h"
+#include "xla/backends/gpu/runtime/collective_params.h"
 #include "xla/backends/gpu/runtime/thunk.pb.h"
+#include "xla/backends/gpu/runtime/thunk_id.h"
+#include "xla/backends/gpu/runtime/thunk_kind.pb.h"
 #include "xla/core/collectives/communicator.h"
-#include "xla/core/collectives/rank_id.h"
 #include "xla/executable_run_options.h"
 #include "xla/ffi/execution_context.h"
 #include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/runtime/buffer_use.h"
+#include "xla/runtime/resource_use.h"
 #include "xla/service/buffer_assignment.h"
-#include "xla/service/global_device_id.h"
 #include "xla/service/gpu/buffer_allocations.h"
-#include "xla/service/gpu/gpu_executable_run_options.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/service_executable_run_options.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
 #include "xla/tsl/lib/gtl/int_type.h"
+#include "xla/tsl/util/unique_any.h"
 #include "xla/util.h"
+#include "xla/tsl/platform/status_macros.h"
 
 namespace xla {
 namespace gpu {
@@ -80,6 +89,11 @@ namespace gpu {
 //     usually by adding a stream wait.
 //
 TSL_LIB_GTL_DEFINE_INT_TYPE(ExecutionStreamId, uint64_t);
+
+// Unique identifier for async events. The same identifier is expected to be
+// shared between a pair of StartThunk and corresponding DoneThunk. It is used
+// to collect async regions for a CommandBufferThunk.
+TSL_LIB_GTL_DEFINE_INT_TYPE(AsyncEventsUniqueId, uint64_t);
 
 // Thunk acts as the bridge between IrEmitter and GpuExecutable. It stores the
 // metadata IrEmitter generates for GpuExecutable to invoke an HloInstruction.
@@ -112,6 +126,9 @@ class Thunk {
   using ExecutionStreamIdMap =
       absl::flat_hash_map<ExecutionStreamId, se::Stream*>;
 
+  using BufferUses = absl::InlinedVector<BufferUse, 4>;
+  using ResourceUses = absl::InlinedVector<ResourceUse, 4>;
+
   // When default execution stream id is used, operations launched by a thunk
   // must be synchronized with a stream passed in ExecuteOptions.
   static constexpr auto kDefaultExecutionStreamId = ExecutionStreamId(0);
@@ -127,10 +144,13 @@ class Thunk {
     kAllToAll,
     kAllToAllDone,
     kAllToAllStart,
-    kCholesky,
+    kBuffersDebugChecksum,
+    kBuffersDebugFloatCheck,
     kCollectiveBroadcast,
     kCollectiveBroadcastDone,
     kCollectiveBroadcastStart,
+    kCollectiveKernel,
+    kCollectiveMetadata,
     kCollectivePermute,
     kCollectivePermuteDone,
     kCollectivePermuteStart,
@@ -150,6 +170,8 @@ class Thunk {
     kGemm,
     kGroupDone,
     kGroupStart,
+    kHostExecuteDone,
+    kHostExecuteStart,
     kHostRecv,
     kHostRecvDone,
     kHostSend,
@@ -159,6 +181,15 @@ class Thunk {
     kMemset32BitValue,
     kMemzero,
     kNorm,
+    kNvshmemAllReduceDone,
+    kNvshmemAllReduceStart,
+    kNvshmemCollectivePermute,
+    kNvshmemCollectivePermuteDone,
+    kNvshmemCollectivePermuteStart,
+    kNvshmemRecv,
+    kNvshmemRecvDone,
+    kNvshmemSend,
+    kNvshmemSendDone,
     kOutfeed,
     kPartitionId,
     kRaggedAllToAll,
@@ -170,6 +201,7 @@ class Thunk {
     kReduceScatterDone,
     kReduceScatterStart,
     kReplicaId,
+    kSelectK,
     kSend,
     kSendDone,
     kSequential,
@@ -178,6 +210,9 @@ class Thunk {
     kWhile
     // go/keep-sorted end
   };
+
+  static ThunkKindProto KindToProto(Kind kind);
+  static absl::StatusOr<Thunk::Kind> KindFromProto(ThunkKindProto kind);
 
   // TODO(ezhulenev): This should become a part of StreamExecutor library, but
   // for now we keep it here as a Thunk implementation detail. It's not yet
@@ -189,113 +224,46 @@ class Thunk {
     BinaryMap dnn_compiled_graphs;
   };
 
+  // Metadata associated with a Thunk,
+  // including profiling and stream execution info.
   struct ThunkInfo {
     ThunkInfo() = default;  // Disable implicit constructors.
-    static ThunkInfo WithProfileAnnotation(const HloInstruction* instr);
+
+    // Deserializes a ThunkInfo from a ThunkInfoProto.
+    // Returns an error if the proto is invalid.
+    static absl::StatusOr<Thunk::ThunkInfo> FromProto(
+        const ThunkInfoProto& proto);
+
+    static ThunkInfo WithProfileAnnotation(const HloInstruction* instr,
+                                           ThunkId thunk_id);
 
     std::string profile_annotation;
 
     ExecutionStreamId execution_stream_id = kDefaultExecutionStreamId;
+
+    ThunkId thunk_id = ThunkId{0};
+
+    // Serializes a ThunkInfo to a ThunkInfoProto.
+    ThunkInfoProto ToProto() const;
   };
 
   //===--------------------------------------------------------------------===//
-  // ResourceRequests
+  // ExecutionScopedState
   //===--------------------------------------------------------------------===//
 
-  // Each individual thunk can request various resources required for execution
-  // at prepare stage. XLA executable is responsible for allocating them before
-  // initializing and executing thunks.
-  class ResourceRequestsInterface {
-   public:
-    virtual ~ResourceRequestsInterface() = default;
-    virtual absl::Status AddClique(const GpuCliqueKey& clique_key) = 0;
-  };
-
-  //===--------------------------------------------------------------------===//
-  // CollectiveCliques
-  //===--------------------------------------------------------------------===//
-
-  // A collection of collective cliques acquired based on resource requests
-  // collected from all thunks at prepare stage.
-  class CollectiveCliques {
-   public:
-    CollectiveCliques() = default;
-    CollectiveCliques(AcquiredCliquesMap cliques_map,
-                      int32_t num_transient_cliques);
-
-    absl::StatusOr<Communicator*> GetComm(const GpuCliqueKey& clique_key,
-                                          RankId rank) const;
-
-    // Returns whether peer device memory access is possible between all devices
-    // in the clique.
-    absl::StatusOr<bool> peer_access_enabled(
-        const GpuCliqueKey& clique_key) const;
-
-    bool empty() const { return cliques_map_.empty(); }
-
-    bool num_transient_cliques() const { return num_transient_cliques_; }
-
-   private:
-    AcquiredCliquesMap cliques_map_;
-
-    // The number of acquired non-persistent clique. We need to keep track of
-    // newly created communicators to insert rendezvous after first
-    // initialization, because otherwise we observe deadlocks with NCCL
-    // collectives backends.
-    int32_t num_transient_cliques_ = 0;
-  };
-
-  //===--------------------------------------------------------------------===//
-  // CollectiveExecuteParams
-  //===--------------------------------------------------------------------===//
-
-  // Parameters capturing all the details required for collective execution of
-  // XLA executables (multiple partitions and replicas).
-  struct CollectiveExecuteParams {
-    // Creates NCCL execution parameters from the run options for the given
-    // local device. Returns an error if run options are misconfigured (i.e.
-    // missing a global device mapping for a local device ordinal).
-    static absl::StatusOr<CollectiveExecuteParams> Create(
-        const ServiceExecutableRunOptions& run_options,
-        absl::Span<se::Stream* const> async_streams,
-        int64_t local_device_ordinal, int64_t collective_max_nchannels = 0,
-        int64_t p2p_max_nchannels = 0);
-
-    // A mapping from local device ordinals to global device IDs.
-    using GlobalDeviceIdMap = std::map<int32_t, GlobalDeviceId>;
-
-    GpuCollectives* collectives;
-    se::StreamExecutor* executor;
-
-    // XLA execution run id allows us to distinguish collective operations
-    // from different concurrent executions and avoid deadlocks.
-    RunId run_id;
-
-    // Streams for asynchronous collective communications.
-    absl::InlinedVector<se::Stream*, 4> async_streams;
-
-    int64_t local_device_ordinal;
-    GlobalDeviceId global_device_id;
-
-    const DeviceAssignment* device_assn;
-    const GlobalDeviceIdMap* global_device_id_map;
-    const CliqueIdCallback* nccl_clique_id_callback;
-
-    int64_t collective_max_nchannels;
-    int64_t p2p_max_nchannels;
-
-   private:
-    CollectiveExecuteParams(GpuCollectives* collectives,
-                            se::StreamExecutor* executor, RunId run_id,
-                            absl::Span<se::Stream* const> async_streams,
-                            int64_t local_device_ordinal,
-                            GlobalDeviceId global_device_id,
-                            const DeviceAssignment* device_assn,
-                            const GlobalDeviceIdMap* global_device_id_map,
-                            const CliqueIdCallback* nccl_clique_id_callback,
-                            int64_t collective_max_nchannels,
-                            int64_t p2p_max_nchannels);
-  };
+  // Thunks themself instantiated once per XLA program (GpuExecutable), and the
+  // same Thunk is reused for all concurrent executions. Thunks state is shared
+  // between all concurrently executing XLA programs (and must be carefully
+  // synchronized). `ExecutionScopedState` is a container that allows thunks to
+  // put an arbitrary state that will have an execution scope, i.e. it will be
+  // automatically destroyed when GpuExecutable finishes execution. This allows
+  // thunks to pass arbitrary state between stages (from prepare to initialize
+  // and then to execute), without having to create a globally synchronized map
+  // and it also guarantees correct state life time, as leaving state in a map
+  // might lead to "leaks", as the map will be destroyed only when the
+  // executable is destroyed. It also thread-safe by construction as all thunks
+  // for a GPU program run sequentially from a single thread.
+  using ExecutionScopedState = absl::flat_hash_map<ThunkId, tsl::UniqueAny>;
 
   //===--------------------------------------------------------------------===//
   // PrepareParams
@@ -306,7 +274,19 @@ class Thunk {
   // back to executable, i.e. request collective cliques required at run time.
   struct PrepareParams {
     // Parameters for executing collective operations.
-    const CollectiveExecuteParams* collective_params = nullptr;
+    const CollectiveParams* collective_params = nullptr;
+    // Clique requests for preparing collective communicators.
+    CollectiveCliqueRequests* collective_clique_requests = nullptr;
+    // Collective memory requests for preparing symmetric allocations.
+    CollectiveMemoryRequests* collective_memory_requests = nullptr;
+    // Multimem registry for preparing multimem objects.
+    CollectiveMultimemRegistry* absl_nonnull multimem_registry = nullptr;
+    // Stream executor for the thunk.
+    se::StreamExecutor* absl_nonnull executor = nullptr;
+    // Buffer allocations for the thunk.
+    const BufferAllocations* absl_nonnull buffer_allocations = nullptr;
+    // Execution scoped state shared between prepare, initialize and execute.
+    ExecutionScopedState* execution_scoped_state = nullptr;
   };
 
   //===--------------------------------------------------------------------===//
@@ -334,10 +314,16 @@ class Thunk {
     se::Stream* command_buffer_trace_stream = nullptr;
 
     // Parameters for executing collective operations.
-    CollectiveExecuteParams* collective_params = nullptr;
+    CollectiveParams* collective_params = nullptr;
 
-    // Collective cliques acquired based on resource requests.
+    // Collective cliques acquired based on clique requests.
     CollectiveCliques* collective_cliques = nullptr;
+
+    // Collective memory acquired based on memory requests.
+    CollectiveMemory* collective_memory = nullptr;
+
+    // Multimem registry for preparing collective communicators.
+    CollectiveMultimemRegistry* multicast_memory_registry = nullptr;
 
     // XLA FFI execution context.
     const ffi::ExecutionContext* ffi_execution_context = nullptr;
@@ -345,7 +331,8 @@ class Thunk {
     // Total local device count.
     int local_device_count = 0;
 
-    bool requires_exclusive_lock_on_gpu = false;
+    // Execution scoped state shared between prepare, initialize and execute.
+    ExecutionScopedState* execution_scoped_state = nullptr;
   };
 
   //===--------------------------------------------------------------------===//
@@ -362,9 +349,11 @@ class Thunk {
         const ServiceExecutableRunOptions& run_options,
         const BufferAllocations& buffer_allocations, se::Stream* stream,
         se::Stream* command_buffer_trace_stream,
-        CollectiveExecuteParams* collective_params,
+        CollectiveParams* collective_params,
         CollectiveCliques* collective_cliques,
-        ExecutionStreamIdMap additional_compute_streams = {});
+        CollectiveMemory* collective_memory,
+        ExecutionStreamIdMap additional_compute_streams = {},
+        ExecutionScopedState* execution_scoped_state = nullptr);
 
     // Constructs execute parameters from an existing parameters but with
     // different buffer allocations.
@@ -382,10 +371,13 @@ class Thunk {
     se::Stream* command_buffer_trace_stream;
 
     // Parameters for executing collective operations.
-    CollectiveExecuteParams* collective_params;
+    CollectiveParams* collective_params;
 
     // Collective cliques acquired based on resource requests.
     CollectiveCliques* collective_cliques;
+
+    // Collective memory acquired based on memory requests.
+    CollectiveMemory* collective_memory;
 
     // Streams for moving data between host and device.
     se::Stream* device_to_host_stream;
@@ -401,48 +393,52 @@ class Thunk {
     // Additional compute streams on which thunks launch operations.
     ExecutionStreamIdMap additional_compute_streams;
 
+    // Execution scoped state shared between prepare, initialize and execute.
+    ExecutionScopedState* execution_scoped_state = nullptr;
+
     bool mock_collectives = false;
 
-    bool requires_exclusive_lock_on_gpu = false;
+    int64_t execution_id = 0;
 
    private:
     friend class CommandBufferThunk;
 
     ExecuteParams(const BufferAllocations* buffer_allocations,
                   se::Stream* stream, se::Stream* command_buffer_trace_stream,
-                  CollectiveExecuteParams* collective_params,
+                  CollectiveParams* collective_params,
                   CollectiveCliques* collective_cliques,
+                  CollectiveMemory* collective_memory,
                   se::Stream* device_to_host_stream,
                   se::Stream* host_to_device_stream,
                   SendDeviceMemoryFunction* send_device_memory_function,
                   RecvDeviceMemoryFunction* recv_device_memory_function,
                   const ffi::ExecutionContext* ffi_execution_context,
                   ExecutionStreamIdMap additional_compute_streams = {},
-                  bool mock_collectives = false,
-                  bool requires_exclusive_lock_on_gpu = false);
+                  ExecutionScopedState* execution_scoped_state = nullptr,
+                  bool mock_collectives = false, int64_t execution_id = 0);
   };
 
   //===--------------------------------------------------------------------===//
 
   Thunk(Kind kind, ThunkInfo thunk_info)
-      : kind_(kind),
-        profile_annotation_(thunk_info.profile_annotation),
-        execution_stream_id_(thunk_info.execution_stream_id) {}
+      : kind_(kind), thunk_info_(std::move(thunk_info)) {}
   virtual ~Thunk() = default;
   Thunk(const Thunk&) = delete;
   Thunk& operator=(const Thunk&) = delete;
 
   virtual std::string ToString(int indent) const { return ""; }
   Kind kind() const { return kind_; }
-  absl::string_view profile_annotation() const { return profile_annotation_; }
+  absl::string_view profile_annotation() const {
+    return thunk_info_.profile_annotation;
+  }
+  const ThunkInfo& thunk_info() const { return thunk_info_; }
 
   // Prepares thunk for execution.
   //
   // This may be called multiple times. Its main purpose is to pass resource
   // requests up to the parent executable so it can acquire them before
   // initialization and execution.
-  virtual absl::Status Prepare(const PrepareParams& params,
-                               ResourceRequestsInterface& resource_requests) {
+  virtual absl::Status Prepare(const PrepareParams& params) {
     return absl::OkStatus();
   }
 
@@ -463,11 +459,20 @@ class Thunk {
   // Precondition: Initialize(initialize_params) has been called.
   virtual absl::Status ExecuteOnStream(const ExecuteParams& params) = 0;
 
+  // Returns all device buffers used by the thunk.
+  //
+  // Does not propagate buffers from nested thunks.
+  //
+  // The order of the buffers in returned vector is consistent across calls.
+  virtual BufferUses buffer_uses() const { return {}; }
+
   static absl::string_view KindToString(Thunk::Kind kind);
 
-  ExecutionStreamId execution_stream_id() const { return execution_stream_id_; }
+  ExecutionStreamId execution_stream_id() const {
+    return thunk_info_.execution_stream_id;
+  }
   void set_execution_stream_id(ExecutionStreamId execution_stream_id) {
-    execution_stream_id_ = execution_stream_id;
+    thunk_info_.execution_stream_id = execution_stream_id;
   }
 
   static absl::StatusOr<se::Stream*> GetStreamForExecution(
@@ -482,25 +487,36 @@ class Thunk {
     return std::vector<Communicator*>();
   }
 
-  // Invokes `fn` with this thunk and all nested thunks.
-  virtual void ForAllThunks(absl::FunctionRef<void(const Thunk*)> fn) const;
+  // Type predicate for `Walk` callback.
+  template <typename F, typename Arg>
+  using WalkCallback =
+      std::enable_if_t<std::is_invocable_v<F, Arg> ||
+                       std::is_invocable_r_v<absl::Status, F, Arg>>;
 
-  // A helper function to get the `GpuCollectives*` pointer from the
-  // thunk parameters. Returns an error if collectives API is not provided.
-  template <typename Params>
-  static absl::StatusOr<GpuCollectives*> GetGpuCollectives(
-      const Params& params) {
-    if (params.collective_params == nullptr) {
-      return Internal("Collective params are not provided");
-    }
-    if (params.collective_params->collectives == nullptr) {
-      return Internal("Collectives API is not provided");
-    }
-    return params.collective_params->collectives;
+  // Recursively walks all the thunks nested inside *this one and calls the
+  // user-provided callback on every thunk. Always starts traversal with *this,
+  // and traverses thunks in DFS order.
+  template <typename F, WalkCallback<F, Thunk*>* = nullptr>
+  std::invoke_result_t<F, Thunk*> Walk(F&& callback);
+  template <typename F, WalkCallback<F, const Thunk*>* = nullptr>
+  std::invoke_result_t<F, const Thunk*> Walk(F&& callback) const;
+
+  // Recursively applies transformation to all nested thunks inside *this one.
+  // Transformation can be applied optionally by returning the argument back to
+  // the caller. Any error during transformation leaves the thunk in an invalid
+  // state. Traverses thunks in reverse-DFS order (transforms innermost thunk
+  // first).
+  using Transformer = absl::FunctionRef<absl::StatusOr<std::unique_ptr<Thunk>>(
+      std::unique_ptr<Thunk>)>;
+  virtual absl::Status TransformNested(Transformer callback) {
+    return absl::OkStatus();
   }
 
   // Serializes the thunk into a `ThunkProto`.
   virtual absl::StatusOr<ThunkProto> ToProto() const;
+
+  // Serializes the metadata of the thunk into a `ThunkMetadataProto`.
+  ThunkMetadataProto ToMetadataProto() const;
 
   // This declares a deserializer callback that `FromProto` Thunk factory
   // functions can use to deserialize sub messages.
@@ -508,27 +524,90 @@ class Thunk {
       absl::AnyInvocable<absl::StatusOr<std::unique_ptr<Thunk>>(
           const ThunkProto&) const>;
 
+  using DeserializerWithCustomAllocations =
+      absl::AnyInvocable<absl::StatusOr<std::unique_ptr<Thunk>>(
+          const ThunkProto&, absl::Span<const BufferAllocation>) const>;
+
+  void add_control_predecessor(const Thunk* control_predecessor) {
+    control_predecessors_.push_back(control_predecessor);
+  }
+
+  std::vector<const Thunk*> control_predecessors() const {
+    return control_predecessors_;
+  }
+
+  virtual std::optional<AsyncEventsUniqueId> GetAsyncEventsUniqueId() const {
+    return std::nullopt;
+  }
+
+  virtual bool IsAsyncStart() const { return false; }
+
+  virtual bool IsAsyncDone() const { return false; }
+
+ protected:
+  // Walks all nested thunks and calls `callback` for them.
+  using Walker = absl::FunctionRef<absl::Status(Thunk*)>;
+  virtual absl::Status WalkNested(Walker callback) { return absl::OkStatus(); }
+
  private:
   Kind kind_;
-  std::string profile_annotation_;
-  ExecutionStreamId execution_stream_id_;
+  ThunkInfo thunk_info_;
+
+  // The list of control predecessors of the thunk.
+  // Thunk needs to maintain the control dependency information because
+  // when it is executed by command buffer, and command buffer may execute the
+  // sequence in concurrent mode, and we should make sure that it does not
+  // violate the control dependency in the original computation.
+  std::vector<const Thunk*> control_predecessors_;
 };
 
 // A sequence of thunks.
-using ThunkSequence = std::vector<std::unique_ptr<Thunk>>;
+class ThunkSequence : public std::vector<std::unique_ptr<Thunk>> {
+ public:
+  using std::vector<std::unique_ptr<Thunk>>::vector;
+
+  // Apply transformer callback to all thunks in *this sequence.
+  absl::Status TransformNested(Thunk::Transformer callback) {
+    for (std::unique_ptr<Thunk>& thunk : *this) {
+      RETURN_IF_ERROR(thunk->TransformNested(callback));
+      ASSIGN_OR_RETURN(thunk, callback(std::move(thunk)));
+    }
+    return absl::OkStatus();
+  }
+};
 
 std::ostream& operator<<(std::ostream& os, Thunk::Kind kind);
-
-// A struct that defines a shaped slice, i.e., a BufferAllocation::Slice and its
-// shape.
-struct ShapedSlice {
-  BufferAllocation::Slice slice;
-  Shape shape;
-};
 
 // Returns if the thunk implements a reduction collective (all-reduce or
 // reduce-scatter).
 bool IsReductionCollective(Thunk::Kind kind);
+
+// Returns the metadata from all thunks in the given thunk sequence.
+ThunkMetadataListProto GetMetadataListProtoFromThunkGraph(
+    const ThunkSequence& thunk_sequence);
+
+//===----------------------------------------------------------------------===//
+// Thunk templates implementation.
+//===----------------------------------------------------------------------===//
+
+template <typename F, Thunk::WalkCallback<F, Thunk*>*>
+std::invoke_result_t<F, Thunk*> Thunk::Walk(F&& callback) {
+  if constexpr (std::is_void_v<std::invoke_result_t<F, Thunk*>>) {
+    Walk([f = std::forward<F>(callback)](Thunk* thunk) {
+      return (f(thunk), absl::OkStatus());
+    }).IgnoreError();  // Error can never happen here.
+  } else {
+    RETURN_IF_ERROR(callback(this));
+    return WalkNested(callback);
+  }
+}
+
+template <typename F, Thunk::WalkCallback<F, const Thunk*>*>
+std::invoke_result_t<F, const Thunk*> Thunk::Walk(F&& callback) const {
+  return const_cast<Thunk*>(this)->Walk(  // NOLINT
+      std::forward<F>(callback));
+}
+
 }  // namespace gpu
 }  // namespace xla
 

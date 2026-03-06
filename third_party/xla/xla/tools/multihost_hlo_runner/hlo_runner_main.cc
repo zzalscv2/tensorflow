@@ -20,12 +20,14 @@ limitations under the License.
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <random>
 #include <string>
 #include <vector>
 
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
@@ -77,6 +79,7 @@ consider using --hlo_argument_mode=uninitialized.
 struct HloRunnerConfig {
   std::string input_format_str = "text";
   xla::InputFormat input_format;
+  std::string output_mode_str = "return_outputs";
   bool should_run = true;
   bool enable_mock_nccl = false;
   std::string dump_output_literal_to = "";
@@ -90,11 +93,13 @@ struct HloRunnerConfig {
   bool run_xla_backend_only = false;
   bool disable_all_hlo_passes = false;
   bool use_spmd_partitioning = false;
+  bool use_shardy_partitioner = false;
   bool is_spmd_partitioned_module = false;
   std::string xla_dump_to = "";
   bool xla_dump_as_text = false;
   bool xla_dump_as_proto = false;
   std::string hlo_argument_mode = "use_random_inputs";
+  int random_seed = -1;
   int32_t while_execution_count = -1;
   bool remove_infeed_outfeed = true;
   bool compile_as_stablehlo = false;
@@ -133,12 +138,15 @@ ArgumentModeFromString(absl::string_view text) {
     return FunctionalHloRunner::ModuleArgumentMode::kUseZerosAsInput;
   } else if (text == "uninitialized") {
     return FunctionalHloRunner::ModuleArgumentMode::kUninitialized;
+  } else if (text == "use_random_normal_inputs") {
+    return FunctionalHloRunner::ModuleArgumentMode::kUseRandomNormalInputs;
   }
   return absl::InvalidArgumentError(
       absl::StrCat(R"(Invalid --hlo_argument_mode specified. Expected one of: )"
                    R"("use_device_id_as_input", "use_random_inputs", )"
-                   R"("use_shared_random_inputs", "use_zeros_as_input", or )",
-                   R"("uninitialized". Got: )", text));
+                   R"("use_shared_random_inputs", "use_zeros_as_input", )"
+                   R"("uninitialized", or "use_random_normal_inputs". Got: )",
+                   text));
 }
 
 static absl::StatusOr<FunctionalHloRunner::PreprocessingOptions>
@@ -162,9 +170,14 @@ RunningOptionsFromFlags(const HloRunnerConfig& opts) {
   FunctionalHloRunner::RunningOptions out;
   TF_ASSIGN_OR_RETURN(out.module_argument_mode,
                       ArgumentModeFromString(opts.hlo_argument_mode));
+  std::string error;
+  if (!FunctionalHloRunner::AbslParseFlag(opts.output_mode_str,
+                                          &out.module_output_mode, &error)) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Invalid --output_mode specified. ", error,
+                     " Got: ", opts.output_mode_str));
+  }
 
-  out.module_output_mode =
-      FunctionalHloRunner::ModuleOutputMode::kReturnOutputs;
   out.num_repeats = static_cast<size_t>(opts.num_repeats);
   out.log_input_output_mode =
       opts.log_output ? FunctionalHloRunner::LogOutputMode::kLogOutput
@@ -181,9 +194,12 @@ RawCompileOptionsFromFlags(const HloRunnerConfig& opts) {
           : (opts.disable_all_hlo_passes
                  ? FunctionalHloRunner::HloPassesMode::kDisableAllHloPasses
                  : FunctionalHloRunner::HloPassesMode::kStandardCompile);
-  out.spmd_mode = opts.use_spmd_partitioning
-                      ? FunctionalHloRunner::SpmdMode::kUseSpmdPartitioning
-                      : FunctionalHloRunner::SpmdMode::kNotUseSpmdPartitioning;
+  out.spmd_mode =
+      opts.use_spmd_partitioning
+          ? (opts.use_shardy_partitioner
+                 ? FunctionalHloRunner::SpmdMode::kUseShardyPartitioning
+                 : FunctionalHloRunner::SpmdMode::kUseSpmdPartitioning)
+          : FunctionalHloRunner::SpmdMode::kNotUseSpmdPartitioning;
   if (!opts.execution_options_path.empty()) {
     TF_ASSIGN_OR_RETURN(
         out.execution_options,
@@ -232,6 +248,11 @@ static absl::Status RunMultihostHloRunner(int argc, char** argv,
   QCHECK_GT(argc, 1) << "No HLO file specified";
   QCHECK(opts.dump_output_literal_to.empty() || argc == 2)
       << "Can only dump output literal when single input file is specified";
+
+  std::unique_ptr<std::minstd_rand0> engine = nullptr;
+  if (opts.random_seed != -1) {
+    engine = std::make_unique<std::minstd_rand0>(opts.random_seed);
+  }
 
   QCHECK_GT(opts.gpu_client_mem_fraction, 0.0);
   QCHECK_LT(opts.gpu_client_mem_fraction, 1.0);
@@ -284,7 +305,8 @@ static absl::Status RunMultihostHloRunner(int argc, char** argv,
       TF_RETURN_IF_ERROR(xla::FunctionalHloRunner::LoadAndRunAndDump(
           *env.client, GetDebugOptionsFromFlags(), preproc_options,
           raw_compile_options, running_options, hlo_file, opts.input_format,
-          opts.dump_output_literal_to, opts.task_id));
+          opts.dump_output_literal_to, opts.task_id, opts.num_nodes,
+          env.kv_store, engine.get()));
     } else {
       std::cout << "\n** Compiling " << hlo_file << " **\n";
       TF_RETURN_IF_ERROR(FunctionalHloRunner::LoadAndCompile(
@@ -364,6 +386,8 @@ int main(int argc, char** argv) {
                 "Disable HLO passes or not."),
       tsl::Flag("use_spmd_partitioning", &opts.use_spmd_partitioning,
                 "Partition the module using SPMD."),
+      tsl::Flag("use_shardy_partitioner", &opts.use_shardy_partitioner,
+                "Partition the module using Shardy."),
       tsl::Flag("is_spmd_partitioned_module", &opts.is_spmd_partitioned_module,
                 "The module is the partitioned result of SPMD. Setting this "
                 "flag also "
@@ -378,8 +402,12 @@ int main(int argc, char** argv) {
                 "Specify how arguments to the HLO module are generated. "
                 "Accepted values: "
                 "use_device_id_as_input, use_random_inputs, "
-                "use_shared_random_inputs, "
-                "use_zeros_as_input or uninitialized."),
+                "use_shared_random_inputs, use_zeros_as_input, "
+                "uninitialized, or use_random_normal_inputs."),
+      tsl::Flag("random_seed", &opts.random_seed,
+                "Seed to be used for generating random inputs when "
+                "`hlo_argument_mode` is set to use_random_inputs or "
+                "use_shared_random_inputs."),
       tsl::Flag("while_execution_count", &opts.while_execution_count,
                 "If set to a positive number, flatten all while loops to "
                 "a certain number of iterations."),
@@ -418,7 +446,16 @@ int main(int argc, char** argv) {
                 "A file containing debug options to be passed to the HLO "
                 "module. The file should contain a serialized DebugOptions "
                 "proto message. The order of precedence: command line flags > "
-                "XLA_FLAGS > debug_options_file > default flags.")};
+                "XLA_FLAGS > debug_options_file > default flags."),
+      tsl::Flag(
+          "output_mode", &opts.output_mode_str,
+          "Specify whether outputs are returned after execution. "
+          "Possible values: return_outputs (default), not_return_outputs, "
+          "return_device_0_outputs (return outputs only from logical device "
+          "0). "
+          "If outputs are not returned, outputs are still computed but the "
+          "potentially slow device-to-host copy is skipped."),
+  };
 
   xla::AppendDebugOptionsFlags(&flag_list);
 
@@ -435,7 +472,9 @@ int main(int argc, char** argv) {
   bool parse_ok = tsl::Flags::Parse(&argc, argv, flag_list);
   tsl::port::InitMain(kUsageString.c_str(), &argc, &argv);
   if (!parse_ok) {
-    LOG(QFATAL) << kUsageString;
+    // Print the usage using cerr to avoid truncation by LOG.
+    std::cerr << kUsageString;
+    return 1;
   }
   absl::Status s = xla::RunMultihostHloRunner(argc, argv, opts);
   if (!s.ok()) {

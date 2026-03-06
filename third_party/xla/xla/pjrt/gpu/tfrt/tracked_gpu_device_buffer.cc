@@ -16,10 +16,9 @@ limitations under the License.
 
 #include <cstddef>
 #include <cstdint>
-#include <functional>
+#include <memory>
 #include <utility>
 
-#include "absl/container/inlined_vector.h"
 #include "absl/functional/any_invocable.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
@@ -29,8 +28,9 @@ limitations under the License.
 #include "xla/service/shaped_buffer.h"
 #include "xla/shape.h"
 #include "xla/shape_tree.h"
-#include "xla/stream_executor/device_memory.h"
-#include "xla/stream_executor/device_memory_allocator.h"
+#include "xla/stream_executor/device_address.h"
+#include "xla/stream_executor/device_address_allocator.h"
+#include "xla/stream_executor/event.h"
 #include "xla/stream_executor/stream_executor.h"
 #include "xla/tsl/concurrency/async_value_ref.h"
 #include "xla/tsl/framework/allocator.h"
@@ -44,7 +44,7 @@ ShapedBuffer GpuDeviceMemory::AsShapedBuffer(const Shape& on_device_shape,
                                              const PjRtDevice* device) const {
   ShapedBuffer shaped_buffer(on_device_shape, device->local_device_id().value(),
                              device->local_hardware_id().value());
-  ShapeTree<se::DeviceMemoryBase>::iterator iterator =
+  ShapeTree<se::DeviceAddressBase>::iterator iterator =
       shaped_buffer.buffers().begin();
   CHECK(iterator != shaped_buffer.buffers().end());
   iterator->second = buffer_;
@@ -60,19 +60,19 @@ void GpuDeviceMemory::SetUnOwned() {
 }
 
 absl::StatusOr<GpuDeviceMemory> GpuDeviceMemory::Allocate(
-    se::DeviceMemoryAllocator* allocator, int device_ordinal, size_t size) {
+    se::DeviceAddressAllocator* allocator, int device_ordinal, size_t size) {
   return Allocate(allocator, device_ordinal, size,
-                  static_cast<int>(se::MemoryType::kDevice));
+                  static_cast<int>(stream_executor::MemorySpace::kDevice));
 }
 
 absl::StatusOr<GpuDeviceMemory> GpuDeviceMemory::Allocate(
-    se::DeviceMemoryAllocator* allocator, int device_ordinal, size_t size,
+    se::DeviceAddressAllocator* allocator, int device_ordinal, size_t size,
     int64_t memory_space) {
   if (size == 0) {
-    return GpuDeviceMemory(se::DeviceMemoryBase());
+    return GpuDeviceMemory(se::DeviceAddressBase());
   }
   TF_ASSIGN_OR_RETURN(
-      stream_executor::OwningDeviceMemory memory,
+      stream_executor::ScopedDeviceAddress<uint8_t> memory,
       allocator->Allocate(device_ordinal, size, /*retry_on_failure=*/true,
                           memory_space));
   return GpuDeviceMemory(std::move(memory));
@@ -80,22 +80,15 @@ absl::StatusOr<GpuDeviceMemory> GpuDeviceMemory::Allocate(
 
 TrackedGpuDeviceBuffer::TrackedGpuDeviceBuffer(
     tsl::AsyncValueRef<GpuDeviceMemory> buffer,
-    absl::InlinedVector<tsl::AsyncValueRef<GpuEvent>, 4> definition_events,
-    absl::AnyInvocable<void() &&> on_delete_callback)
-    : TrackedGpuDeviceBuffer(std::move(buffer), AfterAll(definition_events),
-                             std::move(on_delete_callback)) {
-  VLOG(4) << "TrackedGpuDeviceBuffer::TrackedGpuDeviceBuffer: " << this << "\n "
-          << tsl::CurrentStackTrace();
-}
-
-TrackedGpuDeviceBuffer::TrackedGpuDeviceBuffer(
-    tsl::AsyncValueRef<GpuDeviceMemory> buffer,
     tsl::AsyncValueRef<GpuEvent> definition_event,
-    absl::AnyInvocable<void() &&> on_delete_callback)
+    tsl::AsyncValueRef<GpuEvent> ready_event,
+    absl::AnyInvocable<void() &&> on_delete_callback,
+    std::shared_ptr<stream_executor::Event> cuda_event)
     : buffer_(std::move(buffer)),
       definition_event_(std::move(definition_event)),
-      deallocation_event_(tsl::MakeConstructedAsyncValueRef<GpuEvent>()),
-      on_delete_callback_(std::move(on_delete_callback)) {
+      ready_event_(std::move(ready_event)),
+      on_delete_callback_(std::move(on_delete_callback)),
+      cuda_event_(std::move(cuda_event)) {
   VLOG(4) << "TrackedGpuDeviceBuffer::TrackedGpuDeviceBuffer: " << this << "\n "
           << tsl::CurrentStackTrace();
   DCHECK(definition_event_);
@@ -139,7 +132,7 @@ void TrackedGpuDeviceBuffer::ReleaseDeviceMemory() {
   buffer_.reset();
   definition_event_.reset();
   usage_events_.Clear();
-  deallocation_event_.SetStateConcrete();
+  cuda_event_.reset();
 }
 
 void TrackedGpuDeviceBuffer::SetUnOwned() {

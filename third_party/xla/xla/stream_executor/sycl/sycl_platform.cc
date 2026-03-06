@@ -15,14 +15,9 @@ limitations under the License.
 
 #include "xla/stream_executor/sycl/sycl_platform.h"
 
-#include <algorithm>
-#include <cstdlib>
-#include <cstring>
 #include <memory>
 #include <string>
-#include <utility>
 
-#include "absl/base/call_once.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -32,30 +27,32 @@ limitations under the License.
 #include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/platform/initialize.h"
 #include "xla/stream_executor/platform_manager.h"
+#include "xla/stream_executor/sycl/sycl_executor.h"
 #include "xla/stream_executor/sycl/sycl_platform_id.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/status.h"
 
 namespace stream_executor {
-namespace gpu {
+namespace sycl {
 
-SyclPlatform::SyclPlatform() : name_("SYCL") {}
+SyclPlatform::SyclPlatform() : name_(kSyclPlatformId->ToName()) {}
 
 SyclPlatform::~SyclPlatform() {}
 
-Platform::Id SyclPlatform::id() const { return sycl::kSyclPlatformId; }
+Platform::Id SyclPlatform::id() const { return kSyclPlatformId; }
 
 int SyclPlatform::VisibleDeviceCount() const {
-  // Initialized in a thread-safe manner the first time this is run.
-  static const int num_devices = [] { return 0; }();
-  return num_devices;
+  auto status = SyclDevicePool::GetDeviceCount();
+  if (status.ok()) {
+    return status.value();
+  }
+  LOG(ERROR) << "Failed to get device count: " << status;
+  return -1;  // Return -1 as a sentinel on internal failure.
 }
 
 const std::string& SyclPlatform::Name() const { return name_; }
 
 absl::StatusOr<std::unique_ptr<DeviceDescription>>
 SyclPlatform::DescriptionForDevice(int ordinal) const {
-  return GpuExecutor::CreateDeviceDescription(ordinal);
+  return SyclExecutor::CreateDeviceDescription(ordinal);
 }
 
 absl::StatusOr<StreamExecutor*> SyclPlatform::ExecutorForDevice(int ordinal) {
@@ -63,18 +60,26 @@ absl::StatusOr<StreamExecutor*> SyclPlatform::ExecutorForDevice(int ordinal) {
       ordinal, [this, ordinal]() { return GetUncachedExecutor(ordinal); });
 }
 
+absl::StatusOr<StreamExecutor*> SyclPlatform::FindExisting(int ordinal) {
+  return executor_cache_.Get(ordinal);
+}
+
 absl::StatusOr<std::unique_ptr<StreamExecutor>>
-SyclPlatform::GetUncachedExecutor(int ordinal {
-  auto executor = std::make_unique<GpuExecutor>(this, ordinal);
+SyclPlatform::GetUncachedExecutor(int ordinal) {
+  auto executor = std::make_unique<SyclExecutor>(this, ordinal);
   TF_RETURN_IF_ERROR(executor->Init());
   return std::move(executor);
 }
 
-}  // namespace gpu
+}  // namespace sycl
 
+// Initializes and registers the SYCL platform if it is not already registered.
 static void InitializeSyclPlatform() {
-  TF_CHECK_OK(
-      PlatformManager::RegisterPlatform(std::make_unique<gpu::SyclPlatform>()));
+  auto status = PlatformManager::PlatformWithName("SYCL");
+  if (!status.ok()) {
+    TF_CHECK_OK(PlatformManager::RegisterPlatform(
+        std::make_unique<sycl::SyclPlatform>()));
+  }
 }
 
 }  // namespace stream_executor

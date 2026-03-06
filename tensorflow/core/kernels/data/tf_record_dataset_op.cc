@@ -22,6 +22,7 @@ limitations under the License.
 #include "tensorflow/core/framework/metrics.h"
 #include "tensorflow/core/framework/partial_tensor_shape.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tf_data_file_logger_options.h"
 #include "tensorflow/core/lib/io/buffered_inputstream.h"
 #include "tensorflow/core/lib/io/inputbuffer.h"
 #include "tensorflow/core/lib/io/random_inputstream.h"
@@ -63,8 +64,8 @@ bool is_cloud_tpu_gcs_fs() {
 
 class TFRecordDatasetOp::Dataset : public DatasetBase {
  public:
-  explicit Dataset(OpKernelContext* ctx, std::vector<string> filenames,
-                   const string& compression_type, int64_t buffer_size,
+  explicit Dataset(OpKernelContext* ctx, std::vector<std::string> filenames,
+                   const std::string& compression_type, int64_t buffer_size,
                    std::vector<int64_t> byte_offsets, int op_version)
       : DatasetBase(DatasetContext(ctx)),
         filenames_(std::move(filenames)),
@@ -79,7 +80,7 @@ class TFRecordDatasetOp::Dataset : public DatasetBase {
   }
 
   std::unique_ptr<IteratorBase> MakeIteratorInternal(
-      const string& prefix) const override {
+      const std::string& prefix) const override {
     name_utils::IteratorPrefixParams params;
     params.op_version = op_version_;
     return std::make_unique<Iterator>(Iterator::Params{
@@ -97,7 +98,7 @@ class TFRecordDatasetOp::Dataset : public DatasetBase {
     return *shapes;
   }
 
-  string DebugString() const override {
+  std::string DebugString() const override {
     name_utils::DatasetDebugStringParams params;
     params.op_version = op_version_;
     return name_utils::DatasetDebugString(kDatasetType, params);
@@ -134,7 +135,10 @@ class TFRecordDatasetOp::Dataset : public DatasetBase {
         : DatasetIterator<Dataset>(params) {}
 
     absl::Status Initialize(IteratorContext* ctx) override {
-      LogFilenames(dataset()->filenames_);
+      LogFilenamesOptions log_filenames_options = {
+          .files = dataset()->filenames_,
+          .data_service_address = ctx->data_service_address()};
+      LogFilenames(log_filenames_options);
       return absl::OkStatus();
     }
 
@@ -309,7 +313,7 @@ class TFRecordDatasetOp::Dataset : public DatasetBase {
     std::unique_ptr<io::SequentialRecordReader> reader_ TF_GUARDED_BY(mu_);
   };
 
-  const std::vector<string> filenames_;
+  const std::vector<std::string> filenames_;
   const tstring compression_type_;
   io::RecordReaderOptions options_;
   const std::vector<int64_t> byte_offsets_;
@@ -330,7 +334,7 @@ void TFRecordDatasetOp::MakeDataset(OpKernelContext* ctx,
 
   bool is_gcs_fs = true;
   bool is_s3_fs = true;
-  std::vector<string> filenames;
+  std::vector<std::string> filenames;
   filenames.reserve(filenames_tensor->NumElements());
   for (int i = 0; i < filenames_tensor->NumElements(); ++i) {
     VLOG(2) << "Reading file: " << filenames_tensor->flat<tstring>()(i);

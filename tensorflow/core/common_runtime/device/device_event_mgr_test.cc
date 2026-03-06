@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <atomic>
 
+#include "absl/synchronization/notification.h"
 #include "xla/stream_executor/gpu/gpu_init.h"
 #include "xla/tsl/framework/device_id.h"
 #include "tensorflow/core/common_runtime/dma_helper.h"
@@ -64,7 +65,7 @@ class TEST_EventMgrHelper {
   }
 
   size_t free_size() {
-    mutex_lock l(em_->mu_);
+    mutex_lock l(em_->free_events_mu_);
     return em_->free_events_.size();
   }
 
@@ -128,7 +129,7 @@ TEST(EventMgr, WarnIfInCallback) {
   th.StartPollingLoop();
   device_event_mgr::WarnIfInCallback([&hit] { hit = true; });
   EXPECT_FALSE(hit);
-  Notification note;
+  absl::Notification note;
   em.ThenExecute(stream.get(), [&hit, &note]() {
     device_event_mgr::WarnIfInCallback([&hit, &note] {
       hit = true;
@@ -183,12 +184,12 @@ class EMBenchmarkHelper {
   // The rest of these are one per chain.
   NodeDef add_node_def_;
   NodeDef id_node_def_;
-  gtl::InlinedVector<TensorValue, 4> add_inputs_;
+  absl::InlinedVector<TensorValue, 4UL> add_inputs_;
   std::vector<AllocatorAttributes> allocator_attrs_;
-  gtl::InlinedVector<Tensor, 4> gpu_inputs_;
-  gtl::InlinedVector<Tensor, 4> gpu_outputs_;
-  gtl::InlinedVector<Tensor, 4> host_inputs_;
-  gtl::InlinedVector<Tensor, 4> host_outputs_;
+  absl::InlinedVector<Tensor, 4UL> gpu_inputs_;
+  absl::InlinedVector<Tensor, 4UL> gpu_outputs_;
+  absl::InlinedVector<Tensor, 4UL> host_inputs_;
+  absl::InlinedVector<Tensor, 4UL> host_outputs_;
 
  public:
   // Length of tensors.  TODO(tucker): make this a variable parameter.
@@ -241,7 +242,7 @@ class EMBenchmarkHelper {
   }
 
   std::unique_ptr<OpKernel> GetOpKernel(const NodeDef& node_def,
-                                        Status* status) {
+                                        absl::Status* status) {
     return CreateOpKernel("GPU", gpu_helper_->gpu(),
                           gpu_helper_->gpu_allocator(), node_def,
                           TF_GRAPH_DEF_VERSION, status);
@@ -255,7 +256,7 @@ class EMBenchmarkHelper {
                        .Device("/job:a/replica:0/task:0/GPU:0")
                        .Finalize(&add_node_def_));
     }
-    Status status;
+    absl::Status status;
     add_kernels_.emplace_back(GetOpKernel(add_node_def_, &status));
     TF_ASSERT_OK(status);
     add_params_.push_back(new OpKernelContext::Params);
@@ -384,12 +385,12 @@ class EMBenchmarkHelper {
           gpu_helper_->h2d_stream()->WaitFor(gpu_helper_->compute_stream()));
       // Begin by copying the input values from CPU to GPU.
       const int64_t src_bytes = host_inputs_[0].TotalBytes();
-      se::DeviceMemoryBase gpu_dst_ptr0(DMAHelper::base(&gpu_inputs_[0]),
-                                        src_bytes);
+      stream_executor::DeviceAddressBase gpu_dst_ptr0(
+          DMAHelper::base(&gpu_inputs_[0]), src_bytes);
       TF_ASSERT_OK(gpu_helper_->h2d_stream()->Memcpy(
           &gpu_dst_ptr0, DMAHelper::base(&host_inputs_[0]), src_bytes));
-      se::DeviceMemoryBase gpu_dst_ptr1(DMAHelper::base(&gpu_inputs_[1]),
-                                        src_bytes);
+      stream_executor::DeviceAddressBase gpu_dst_ptr1(
+          DMAHelper::base(&gpu_inputs_[1]), src_bytes);
       TF_ASSERT_OK(gpu_helper_->h2d_stream()->Memcpy(
           &gpu_dst_ptr1, DMAHelper::base(&host_inputs_[1]), src_bytes));
       TF_ASSERT_OK(
@@ -420,8 +421,8 @@ class EMBenchmarkHelper {
       TF_ASSERT_OK(
           gpu_helper_->d2h_stream()->WaitFor(gpu_helper_->compute_stream()));
       const int64_t return_bytes = ctx->mutable_output(0)->TotalBytes();
-      se::DeviceMemoryBase gpu_src_ptr(DMAHelper::base(ctx->mutable_output(0)),
-                                       return_bytes);
+      stream_executor::DeviceAddressBase gpu_src_ptr(
+          DMAHelper::base(ctx->mutable_output(0)), return_bytes);
       TF_ASSERT_OK(gpu_helper_->d2h_stream()->Memcpy(
           DMAHelper::base(&host_outputs_[0]), gpu_src_ptr, return_bytes));
       gpu_helper_->event_mgr()->ThenExecute(gpu_helper_->d2h_stream(),

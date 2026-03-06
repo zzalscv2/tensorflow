@@ -18,10 +18,12 @@ limitations under the License.
 
 #include <stddef.h>
 
+#include <cstdint>
 #include <iosfwd>
 #include <memory>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -142,6 +144,8 @@ class PointsToSet {
         });
   }
 
+  std::string ToString() const;
+
  private:
   struct Elem {
     BufferList buffers;
@@ -212,17 +216,6 @@ class TuplePointsToAnalysis : public DfsHloVisitorWithDefault {
   // Returns the number of logical buffers in the module
   LogicalBuffer::Id num_logical_buffers() const {
     return logical_buffer_analysis_->num_logical_buffers();
-  }
-
-  // Return a the logical buffer with id "id" in the module. Iteration
-  // over all logical buffers is usually done with something like:
-  //
-  // for (LogicalBuffer:Id id = 0; id < points_to.num_logical_buffers(); id++){
-  //   const auto& buffer = points_to.logical_buffer(id);
-  //   ... do something with buffer ...
-  // }
-  LogicalBuffer& logical_buffer(LogicalBuffer::Id id) const {
-    return logical_buffer_analysis_->GetBuffer(id);
   }
 
   // Returns a vector of buffers that the instruction produces. Most
@@ -318,34 +311,24 @@ class TuplePointsToAnalysis : public DfsHloVisitorWithDefault {
   };
 
   const PerInstruction* PerInst(const HloInstruction* inst) const {
-    int id = inst->unique_id();
+    int64_t id = inst->unique_id();
     DCHECK_GE(id, 0);
     auto iter = per_instruction_.find(id);
     if (iter == per_instruction_.end()) {
       LOG(FATAL) << "Expected per-instruction information to already exist";
-    } else {
-      return iter->second.get();
     }
+    return iter->second.get();
   }
   PerInstruction* PerInst(const HloInstruction* inst) {
-    int id = inst->unique_id();
+    int64_t id = inst->unique_id();
     DCHECK_GE(id, 0);
     auto iter = per_instruction_.find(id);
     if (iter == per_instruction_.end()) {
       return per_instruction_.emplace(id, std::make_unique<PerInstruction>())
           .first->second.get();
-    } else {
-      return iter->second.get();
     }
+    return iter->second.get();
   }
-
-  std::vector<std::pair<HloInstruction*, int64_t>>
-  GetAllUsesOfInstructionAtIndex(HloInstruction* instruction,
-                                 const ShapeIndex& index) const;
-  bool HasUniqueFusedUseOfOperandAt(HloInstruction* operand,
-                                    const ShapeIndex& operand_index,
-                                    HloInstruction* fusion,
-                                    const int64_t use_operand_index) const;
 
   // The module this analysis is performed on.
   const HloModule* module_;
@@ -354,7 +337,8 @@ class TuplePointsToAnalysis : public DfsHloVisitorWithDefault {
   const std::unique_ptr<LogicalBufferAnalysis> logical_buffer_analysis_;
 
   // A map from instruction->unique_id() to
-  absl::flat_hash_map<int, std::unique_ptr<PerInstruction>> per_instruction_;
+  absl::flat_hash_map<int64_t, std::unique_ptr<PerInstruction>>
+      per_instruction_;
 
   // A map from LogicalBuffer->id() to alias information about that logical
   // buffer

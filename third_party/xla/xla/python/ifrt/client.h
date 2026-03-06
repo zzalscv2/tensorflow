@@ -20,18 +20,20 @@ limitations under the License.
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "absl/base/macros.h"
-#include "absl/base/nullability.h"
 #include "absl/container/inlined_vector.h"
+#include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "llvm/Support/ExtensibleRTTI.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/pjrt_common.h"
 #include "xla/pjrt/pjrt_compiler.h"
 #include "xla/pjrt/pjrt_layout.h"
 #include "xla/python/ifrt/array.h"
@@ -41,16 +43,17 @@ limitations under the License.
 #include "xla/python/ifrt/device.h"
 #include "xla/python/ifrt/device_list.h"
 #include "xla/python/ifrt/dtype.h"
-#include "xla/python/ifrt/future.h"
+#include "xla/python/ifrt/executable.h"
+#include "xla/python/ifrt/layout.h"
 #include "xla/python/ifrt/memory.h"
 #include "xla/python/ifrt/remap_plan.h"
 #include "xla/python/ifrt/shape.h"
 #include "xla/python/ifrt/sharding.h"
 #include "xla/python/ifrt/topology.h"
 #include "xla/python/ifrt/tuple.h"
-#include "xla/python/ifrt/user_context.h"
 #include "xla/python/ifrt/value.h"
 #include "xla/service/computation_placer.h"
+#include "xla/tsl/concurrency/future.h"
 #include "xla/tsl/concurrency/ref_count.h"
 
 namespace xla {
@@ -108,31 +111,28 @@ class Client : public llvm::RTTIExtends<Client, llvm::RTTIRoot> {
   // in major-to-minor order. The runtime may return `UNIMPLEMENTED` if
   // `byte_strides` does not equate to a reordering of the dimensions.
   //
+  // `layout` specifies the layout of the array. If `layout` is nullptr, the a
+  // device-default layout used.
+  //
   // `on_done_with_host_buffer` is optional and may be null.
   // `on_done_with_host_buffer` will be called iff OK is returned.
   //
-  // `user_context` is attached to all the runtime actions triggered by this
-  // call and thus simplifies performance analysis and debugging.
-  //
   // TODO(hyeontaek): Consider changing `on_done_with_host_buffer` into a
-  // returned `Future<absl::Status>` for consistency with other IFRT APIs.
+  // returned `tsl::Future<absl::Status>` for consistency with other IFRT APIs.
   virtual absl::StatusOr<ArrayRef> MakeArrayFromHostBuffer(
       const void* data, DType dtype, Shape shape,
       std::optional<absl::Span<const int64_t>> byte_strides,
-      ShardingRef sharding, HostBufferSemantics semantics,
-      std::function<void()> on_done_with_host_buffer,
-      tsl::RCReference<UserContext> user_context) = 0;
-
-  // Soon to be deprecated. Please use the version above that accepts a
-  // `UserContext`.
+      ShardingRef sharding, LayoutRef layout, HostBufferSemantics semantics,
+      std::function<void()> on_done_with_host_buffer) = 0;
+  ABSL_DEPRECATE_AND_INLINE()
   absl::StatusOr<ArrayRef> MakeArrayFromHostBuffer(
       const void* data, DType dtype, Shape shape,
       std::optional<absl::Span<const int64_t>> byte_strides,
       ShardingRef sharding, HostBufferSemantics semantics,
       std::function<void()> on_done_with_host_buffer) {
-    return MakeArrayFromHostBuffer(data, dtype, shape, byte_strides, sharding,
-                                   semantics, on_done_with_host_buffer,
-                                   CreateUserContext());
+    return MakeArrayFromHostBuffer(
+        data, dtype, std::move(shape), byte_strides, std::move(sharding),
+        /*layout=*/nullptr, semantics, std::move(on_done_with_host_buffer));
   }
   // Represents a host buffer.
   //
@@ -195,22 +195,17 @@ class Client : public llvm::RTTIExtends<Client, llvm::RTTIRoot> {
   //
   // `specs` may be consumed by the implementation.
   //
-  // `user_context` is attached to all the runtime actions triggered by this
-  // call and thus simplifies performance analysis and debugging.
-  //
   // All resulting arrays should use the same device list and memory kind. i.e.,
   // `specs[i].sharding->devices()` and `specs[i].sharding->memory_kind()` must
   // be equal across all `i`.
   virtual absl::StatusOr<std::vector<ArrayRef>> MakeArraysFromHostBufferShards(
       absl::Span<MakeArraysFromHostBufferShardsSpec> specs,
-      HostBufferSemantics semantics,
-      tsl::RCReference<UserContext> user_context) = 0;
+      HostBufferSemantics semantics) = 0;
 
   // Creates new arrays that will be fulfilled with the given error status. The
   // status must not be OK.
   virtual absl::StatusOr<std::vector<ArrayRef>> MakeErrorArrays(
-      const absl::Status& error, absl::Span<const ArraySpec> array_specs,
-      tsl::RCReference<UserContext> user_context) = 0;
+      const absl::Status& error, absl::Span<const ArraySpec> array_specs) = 0;
 
   // Builds a larger array out of individual per-device shards.
   // TODO(hyeontaek): Replace this API with the version that takes
@@ -219,25 +214,6 @@ class Client : public llvm::RTTIExtends<Client, llvm::RTTIRoot> {
       DType dtype, Shape shape, ShardingRef sharding,
       absl::Span<ArrayRef> arrays, ArrayCopySemantics array_copy_semantics,
       SingleDeviceShardSemantics single_device_shard_semantics) = 0;
-
-  ABSL_DEPRECATE_AND_INLINE()
-  absl::StatusOr<ArrayRef> AssembleArrayFromSingleDeviceArrays(
-      Shape shape, ShardingRef sharding, absl::Span<ArrayRef> arrays,
-      ArrayCopySemantics semantics) {
-    return AssembleArrayFromSingleDeviceArrays(
-        arrays.at(0)->dtype(), std::move(shape), std::move(sharding), arrays,
-        semantics, SingleDeviceShardSemantics::kAddressableShards);
-  }
-
-  ABSL_DEPRECATE_AND_INLINE()
-  absl::StatusOr<ArrayRef> AssembleArrayFromSingleDeviceArrays(
-      Shape shape, ShardingRef sharding, absl::Span<ArrayRef> arrays,
-      ArrayCopySemantics array_copy_semantics,
-      SingleDeviceShardSemantics single_device_shard_semantics) {
-    return AssembleArrayFromSingleDeviceArrays(
-        arrays.at(0)->dtype(), std::move(shape), std::move(sharding), arrays,
-        array_copy_semantics, single_device_shard_semantics);
-  }
 
   // Copies the arrays to a new set of devices.
   //
@@ -274,6 +250,37 @@ class Client : public llvm::RTTIExtends<Client, llvm::RTTIRoot> {
       const RemapPlan& plan, absl::Span<xla::ifrt::ArrayRef> arrays,
       ArrayCopySemantics semantics) = 0;
 
+  // Bitcasts arrays to new arrays according to the given specs. This bitcasting
+  // is a metadata-only operation that can change the per-shard interpretation
+  // without changing per-shard location.
+  //
+  // As the minimum requirement,
+  //
+  // * On-device size of the shard shape must remain the same.
+  // * `arrays[i].sharding().devices()` must be equal to
+  //   `specs[i].sharding().devices()`.
+  // * `arrays[i].sharding().memory_kind()` must be equal to
+  //   `specs[i].sharding().memory_kind()`.
+  //
+  // `dtype`, `shape`, `sharding`, and `layout` might change, but the runtime
+  // may impose additional constraints. For example, bitcasting to a smaller
+  // dtype or changing `layout` may not be allowed on some platforms.
+  //
+  // NOTE: `ArrayCopySemantics::kAlwaysCopy` is not allowed.
+  virtual absl::StatusOr<std::vector<ArrayRef>> BitcastArrays(
+      absl::Span<ArrayRef> arrays, absl::Span<const ArraySpec> specs,
+      ArrayCopySemantics semantics) = 0;
+
+  // Reshards arrays to new arrays according to the given specs.
+  //
+  // If destination specs have the layout specifications, applies it to the
+  // output arrays, if not, uses the device-default layout.
+  //
+  // NOTE: `ArrayCopySemantics::kReuseInput` is not allowed.
+  virtual absl::StatusOr<std::vector<ArrayRef>> ReshardArrays(
+      absl::Span<ArrayRef> arrays, absl::Span<const ArraySpec> specs,
+      ArrayCopySemantics semantics) = 0;
+
   // Returns a future that becomes ready once all of the values become ready.
   //
   // Timing and error semantics:
@@ -288,11 +295,27 @@ class Client : public llvm::RTTIExtends<Client, llvm::RTTIRoot> {
   // Note: this API currently accepts a span of `ArrayRef` for
   // consistency with other APIs. We may change this to take a span of `Array*`
   // instead to reflect its read-only semantics.
-  virtual Future<> GetReadyFuture(absl::Span<const ValueRef> values) = 0;
+  virtual tsl::Future<> GetReadyFuture(absl::Span<const ValueRef> values) = 0;
 
   // Builds a tuple from a sequence of values.
   virtual absl::StatusOr<tsl::RCReference<Tuple>> MakeTuple(
       absl::Span<ValueRef> values) = 0;
+
+  // Attempts to cancel the execution that returned `cancellation_handle` in its
+  // `ExecuteResult` when enqueued.
+  //
+  // Cancellation is best effort and may not be supported by all
+  // implementations.
+  //
+  // If cancellation succeeds, the execution's `Future` and the array outputs of
+  // the execution will transition to `error`, otherwise the execution will run
+  // to completion (with success or error) as if `CancelExecution` had not been
+  // called.
+  //
+  // REQUIRES: `error` is not OK.
+  virtual void CancelExecution(
+      LoadedExecutable::CancellationHandle cancellation_handle,
+      absl::Status error) = 0;
 
   // Identifies the IFRT implementation. Most C++ users should use LLVM RTTI to
   // determine the runtime type. This is a string exposed to users mostly for
@@ -337,7 +360,7 @@ class Client : public llvm::RTTIExtends<Client, llvm::RTTIRoot> {
       int local_hardware_id) const = 0;
 
   // Creates a device list from the given list of devices.
-  virtual DeviceListRef MakeDeviceList(
+  virtual absl::StatusOr<DeviceListRef> MakeDeviceList(
       absl::Span<Device* const> devices) const = 0;
 
   // TODO(hyeontaek): Potentially remove this method to encourage supporting
@@ -350,16 +373,42 @@ class Client : public llvm::RTTIExtends<Client, llvm::RTTIRoot> {
 
   // Returns the default layout on `device` with `memory_kind` for a buffer with
   // `dtype` and single-shard dimensions `dims`.
-  // TODO(hyeontaek): Change the API to take `Shape` and `Sharding` instead of
-  // single-shard dimensions and device.
   virtual absl::StatusOr<std::shared_ptr<const xla::PjRtLayout>>
-  GetDefaultLayout(DType dtype, absl::Span<const int64_t> dims, Device* device,
-                   xla::ifrt::MemoryKind memory_kind) const = 0;
+  GetDefaultPjRtLayout(DType dtype, absl::Span<const int64_t> dims,
+                       Device* device,
+                       xla::ifrt::MemoryKind memory_kind) const = 0;
 
-  // Returns a UserContext that captures the current context information such as
-  // the stack trace. IFRT implementations that do not support UserContext will
-  // return a nullptr.
-  virtual tsl::RCReference<UserContext> CreateUserContext() = 0;
+  // Returns the default layout for an array with `dtype`, `shape`, and
+  // `sharding`.
+  virtual absl::StatusOr<CustomLayoutRef> GetDefaultLayout(
+      DType dtype, const Shape& shape, const ShardingRef& sharding) const = 0;
+  // Helper method for `GetDefaultLayout` for when shard shape dims are known.
+  // TODO(hyeontaek): Remove this sugar API once the transition is complete.
+  absl::StatusOr<CustomLayoutRef> GetDefaultLayout(
+      DType dtype, absl::Span<const int64_t> shard_dims, Device* device,
+      xla::ifrt::MemoryKind memory_kind) const;
+
+  // Subscribe to attribute changes to selected devices.
+  //
+  // The callback is called when attributes are updated.
+  // The updates are provided to the callback a map of device->AttributeMap.
+  // Related attributes that are updated together might be returned together as
+  // a set.
+  //
+  // This AttributeMap will contain only the requested attributes if
+  // 'attribute_names' is std::nullopt. Otherwise, it contains all updated
+  // attributes.
+  //
+  // If the callback returns an error, the subscription will be aborted and no
+  // more callbacks will be issued.
+  //
+  // The returned RAII object controls the lifetime of the subscription. Once
+  // destroyed, no more callbacks will be issued for attribute changes.
+  virtual absl::StatusOr<std::unique_ptr<ifrt::DeviceAttributeSubscription>>
+  SubscribeToAttributeChanges(
+      absl::Span<Device* const> devices,
+      std::optional<absl::Span<const std::string>> attribute_names,
+      OnDeviceAttributeChangeCallback callback) = 0;
 
   static char ID;  // NOLINT
 };

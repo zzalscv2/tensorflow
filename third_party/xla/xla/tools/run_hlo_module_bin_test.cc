@@ -18,6 +18,8 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 #include "xla/hlo/ir/hlo_module.h"
@@ -25,11 +27,11 @@ limitations under the License.
 #include "xla/literal.h"
 #include "xla/literal_util.h"
 #include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/platform/env.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/subprocess.h"
-#include "tsl/platform/env.h"
+#include "xla/tsl/platform/test.h"
 #include "tsl/platform/path.h"
-#include "tsl/platform/statusor.h"
-#include "tsl/platform/test.h"
 
 namespace xla {
 namespace {
@@ -202,6 +204,57 @@ f32[2,2] {
   { 2, 2 },
   { 2, 2 }
 })"));
+}
+
+TEST_F(RunHloModuleTest, DumpAndParseDebugOptions) {
+  tsl::Env* env = tsl::Env::Default();
+  std::string tmp_dir;
+  EXPECT_TRUE(env->LocalTempFilename(&tmp_dir));
+  RunHlo("large_constant.hlo",
+         {"--xla_dump_to=" + tmp_dir, "--xla_dump_large_constants=true",
+          "--xla_gpu_dot_merger_threshold_mb=1234"});
+  std::string data;
+  std::vector<std::string> debug_options_files;
+  TF_ASSERT_OK(tsl::Env::Default()->GetMatchingPaths(
+      absl::StrCat(tmp_dir, "/module*debug_options"), &debug_options_files));
+  ASSERT_EQ(debug_options_files.size(), 1);
+  TF_ASSERT_OK(tsl::ReadFileToString(env, debug_options_files[0], &data));
+  EXPECT_THAT(data, testing::HasSubstr("xla_dump_large_constants: true"));
+  EXPECT_THAT(data,
+              testing::HasSubstr("xla_gpu_dot_merger_threshold_mb: 1234"));
+
+  std::string tmp_dir2;
+  EXPECT_TRUE(env->LocalTempFilename(&tmp_dir2));
+  EXPECT_NE(tmp_dir2, tmp_dir);
+  RunHlo("large_constant.hlo",
+         {"--xla_dump_to=" + tmp_dir2,
+          "--debug_options_file=" + debug_options_files[0],
+          "--xla_gpu_dot_merger_threshold_mb=3253"});
+
+  // Check the new debug options. They should have the dump_large_constants set
+  // to true. This comes from the debug options file.
+  std::vector<std::string> debug_options_files2;
+  TF_ASSERT_OK(tsl::Env::Default()->GetMatchingPaths(
+      absl::StrCat(tmp_dir2, "/module*debug_options"), &debug_options_files2));
+  ASSERT_EQ(debug_options_files2.size(), 1);
+  TF_ASSERT_OK(tsl::ReadFileToString(env, debug_options_files2[0], &data));
+  EXPECT_THAT(data, testing::HasSubstr("xla_dump_large_constants: true"));
+  // Check that the new debug options has xla_gpu_dot_merger_threshold_mb set to
+  // 3253. This comes from the command line (overriding the debug options file).
+  EXPECT_THAT(data,
+              testing::HasSubstr("xla_gpu_dot_merger_threshold_mb: 3253"));
+  EXPECT_THAT(data, testing::Not(testing::HasSubstr(
+                        "xla_gpu_dot_merger_threshold_mb: 1234")));
+  // Read the dumped module and we should see large constant.
+  std::vector<std::string> cpu_after_optimizations_files;
+  TF_ASSERT_OK(tsl::Env::Default()->GetMatchingPaths(
+      absl::StrCat(tmp_dir2, "/module_0000.f.*cpu_after_optimizations.txt"),
+      &cpu_after_optimizations_files));
+  ASSERT_THAT(cpu_after_optimizations_files, testing::SizeIs(1));
+  TF_ASSERT_OK(
+      tsl::ReadFileToString(env, cpu_after_optimizations_files[0], &data));
+  EXPECT_THAT(data, testing::HasSubstr(
+                        "constant({10, 6, 3, 2, 5, 3, 7, 4, 2, 3, 1, 0})"));
 }
 
 }  // namespace

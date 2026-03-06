@@ -29,7 +29,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
 #include "xla/service/cpu/cpu_compiler.h"
-#include "xla/service/cpu/tests/cpu_codegen_test.h"
+#include "xla/service/cpu/tests/cpu_pjrt_codegen_test.h"
 #include "xla/shape_util.h"
 #include "xla/tsl/platform/test.h"
 #include "xla/xla.pb.h"
@@ -53,7 +53,7 @@ struct IntrinsicTestSpec {
 
 // Tests that unary functions get lowered using intrinsic calls.
 class CpuUnaryIntrinsicTest
-    : public CpuCodegenTest,
+    : public CpuPjRtCodegenTest,
       public ::testing::WithParamInterface<IntrinsicTestSpec> {
  public:
   static std::string Name(
@@ -61,10 +61,10 @@ class CpuUnaryIntrinsicTest
     auto spec = info.param;
 
     std::string opcode(HloOpcodeString(spec.opcode));
-    opcode[0] = toupper(opcode[0]);
+    opcode[0] = absl::ascii_toupper(opcode[0]);
 
     std::string type(PrimitiveType_Name(spec.type));
-    type[0] = toupper(type[0]);
+    type[0] = absl::ascii_toupper(type[0]);
 
     std::string triple{spec.triple.data(), spec.triple.size()};
     if (triple == kTriple_x86_64) {
@@ -92,9 +92,8 @@ class CpuUnaryIntrinsicTest
 
  private:
   DebugOptions GetDebugOptionsForTest() const override {
-    DebugOptions debug_options =
-        HloHardwareIndependentTestBase::GetDebugOptionsForTest();
-    HloTestBase::SetAotFastMathDebugOptions(&debug_options);
+    DebugOptions debug_options = CpuPjRtCodegenTest::GetDebugOptionsForTest();
+    CpuPjRtCodegenTest::SetAotFastMathDebugOptions(&debug_options);
     return debug_options;
   }
 };
@@ -130,11 +129,11 @@ TEST_P(CpuUnaryIntrinsicTest, DoIt) {
   auto hlo_module = CreateNewVerifiedModule();
   hlo_module->AddEntryComputation(std::move(computation));
 
-  std::string check_lines{spec.check_lines.data(), spec.check_lines.size()};
-
   hlo_module->mutable_config()
       .mutable_debug_options()
-      .set_xla_cpu_use_thunk_runtime(false);
+      .clear_xla_cpu_prefer_vector_width();
+
+  std::string check_lines{spec.check_lines.data(), spec.check_lines.size()};
 
   CompileAheadOfTimeAndVerifyIr(std::move(hlo_module), options, check_lines,
                                 spec.match_optimized_ir);
@@ -148,11 +147,27 @@ IntrinsicTestSpec CpuUnaryIntrinsicTestCases[] = {
         HloOpcode::kExp, F32, true, kTriple_x86_64, "",
         R"(CHECK: fmul fast <4 x float> splat (float 0xBF2BD01060000000)"},
 
+    // Check that we see inlined vectorized exp.f64 code
     IntrinsicTestSpec{HloOpcode::kExp, F64, true, kTriple_x86_64, "",
-                      R"(CHECK: tail call fast <2 x double> @llvm.exp.v2f64)"},
+                      R"(
+                      CHECK-NOT: define {{[a-z]* ?}}<4 x double> @xla.exp.v4f32
+                      CHECK-NOT: define {{[a-z]* ?}}<4 x double> @xla.exp.v4f64
+                      CHECK: fmul <2 x double> {{.*}}splat (double 0x3FF71547652B82FE)
+                      CHECK-NOT: define {{[a-z]* ?}}<2 x double> @xla.exp.v2f32
+                      CHECK-NOT: define {{[a-z]* ?}}<4 x double> @xla.exp.v4f64
+    )"},
+
+    IntrinsicTestSpec{HloOpcode::kExp, F64, true, kTriple_x86_64, "+avx",
+                      R"(
+                      CHECK-NOT: define {{[a-z]* ?}}<2 x double> @xla.exp.v2f64
+                      CHECK-NOT: define {{[a-z]* ?}}<4 x float> @xla.exp.v4f32
+                      CHECK: fmul <4 x double> {{.*}}splat (double 0x3FF71547652B82FE)
+                      CHECK-NOT: define {{[a-z]* ?}}<4 x float> @xla.exp.v4f32
+                      CHECK-NOT: define {{[a-z]* ?}}<2 x double> @xla.exp.v2f64
+    )"},
 
     IntrinsicTestSpec{HloOpcode::kExp, F64, false, kTriple_x86_64, "",
-                      R"(CHECK: call fast double @llvm.exp.f64(double %4)"},
+                      R"(CHECK: call fast double @xla.exp.f64(double)"},
 
     IntrinsicTestSpec{
         HloOpcode::kExp, F32, true, kTriple_x86_64, "+avx",
@@ -163,18 +178,33 @@ IntrinsicTestSpec CpuUnaryIntrinsicTestCases[] = {
         R"(CHECK: fmul fast <4 x float> splat (float 0xBF2BD01060000000)"},
 
     IntrinsicTestSpec{
+        HloOpcode::kRsqrt, F32, true, kTriple_x86_64, "+avx",
+        R"(CHECK: fmul <8 x float>{{.*}}splat (float -5.000000e-01)"},
+
+    IntrinsicTestSpec{
+        HloOpcode::kRsqrt, F32, true, kTriple_x86_64, "+avx512f",
+        R"(CHECK: fmul <16 x float>{{.*}} splat (float -5.000000e-01)"},
+
+    // F16 tanh is implemented via upcast to F32; should have the same
+    // vectorized IR.
+    IntrinsicTestSpec{
+        HloOpcode::kTanh, F16, true, kTriple_x86_64, "",
+        R"(CHECK: fcmp {{(fast )?(uge|olt)}} <8 x float> %{{[^,]+}}, splat (float
+        0xC01FFEC880000000)"},
+
+    IntrinsicTestSpec{
         HloOpcode::kTanh, F32, true, kTriple_x86_64, "",
-        R"(CHECK: fcmp fast uge <4 x float> %wide.load, splat (float
+        R"(CHECK: fcmp {{(fast )?(uge|olt)}} <4 x float> %{{[^,]+}}, splat (float
         0xC01FFEC880000000)"},
 
     IntrinsicTestSpec{
         HloOpcode::kTanh, F32, true, kTriple_x86_64, "+avx",
-        R"(CHECK: fcmp fast uge <8 x float> %wide.load, splat (float
+        R"(CHECK: fcmp {{(fast )?(uge|olt)}} <8 x float> %{{[^,]+}}, splat (float
         0xC01FFEC880000000)"},
 
     IntrinsicTestSpec{
         HloOpcode::kTanh, F32, true, kTriple_android_arm, "",
-        R"(CHECK: fcmp fast uge <4 x float> %wide.load, splat (float
+        R"(CHECK: fcmp {{(fast )?(uge|olt)}} <4 x float> %{{[^,]+}}, splat (float
         0xC01FFEC880000000)"},
 
     IntrinsicTestSpec{

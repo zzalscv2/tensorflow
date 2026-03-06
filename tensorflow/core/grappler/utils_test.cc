@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "absl/strings/match.h"
 #include "absl/strings/substitute.h"
+#include "absl/synchronization/notification.h"
 #include "tensorflow/cc/ops/standard_ops.h"
 #include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
@@ -32,7 +33,6 @@ limitations under the License.
 #include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/platform/bfloat16.h"
 #include "tensorflow/core/platform/env.h"
-#include "tensorflow/core/platform/notification.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/platform/test_benchmark.h"
 #include "tensorflow/core/platform/types.h"
@@ -45,7 +45,7 @@ namespace {
 class UtilsTest : public ::testing::Test {
  protected:
   NodeDef CreateConcatOffsetNode() const {
-    const string gdef_ascii =
+    const std::string gdef_ascii =
         " name: 'gradients/InceptionV3/Mixed_7c/Branch_1/concat_v2_grad/"
         "ConcatOffset'"
         " op: 'ConcatOffset'"
@@ -65,7 +65,7 @@ class UtilsTest : public ::testing::Test {
   }
 
   NodeDef CreateDequeueNode() const {
-    const string gdef_ascii =
+    const std::string gdef_ascii =
         " name: 'Train/TrainInput/input_producer_Dequeue'"
         " op: 'QueueDequeueV2'"
         " input: 'Train/TrainInput/input_producer'"
@@ -90,7 +90,7 @@ class UtilsTest : public ::testing::Test {
   }
 
   NodeDef CreateFusedBatchNormNode() const {
-    const string gdef_ascii =
+    const std::string gdef_ascii =
         " name: 'InceptionV3/Conv2d_1a_3x3/BatchNorm/FusedBatchNorm'"
         " op: 'FusedBatchNorm'"
         " input: 'InceptionV3/Conv2d_1a_3x3/BatchNorm/FusedBatchNorm'"
@@ -193,7 +193,7 @@ TEST_F(UtilsTest, ExecuteWithTimeout) {
       1000 /* timeout_in_ms */, thread_pool.get()));
 
   // This should time out.
-  Notification notification;
+  absl::Notification notification;
   ASSERT_FALSE(ExecuteWithTimeout(
       [&notification]() { notification.WaitForNotification(); },
       1 /* timeout_in_ms */, thread_pool.get()));
@@ -494,7 +494,7 @@ BM_NodePositionIfSameNode("foo/bar/baz/gnu", "foo/bar/baz", NoMatch_end);
 void BM_NodeNameAsStringPiece(::testing::benchmark::State& state) {
   const int size = state.range(0);
 
-  string input(size + 3, 'x');
+  std::string input(size + 3, 'x');
   input[size] = ':';
   for (auto s : state) {
     absl::string_view node_name = NodeNameAsStringPiece(input);

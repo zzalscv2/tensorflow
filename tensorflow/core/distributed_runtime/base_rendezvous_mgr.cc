@@ -24,6 +24,7 @@ limitations under the License.
 #include "absl/container/flat_hash_set.h"
 #include "absl/hash/hash.h"
 #include "absl/status/status.h"
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/common_runtime/copy_tensor.h"
 #include "tensorflow/core/common_runtime/dma_helper.h"
 #include "tensorflow/core/framework/cancellation.h"
@@ -71,7 +72,7 @@ absl::Status BaseRendezvousMgr::RecvLocal(int64_t step_id,
                                           const Rendezvous::ParsedKey& parsed,
                                           Tensor* val, bool* is_dead) {
   absl::Status ret;
-  Notification n;
+  absl::Notification n;
   RecvLocalAsync(step_id, parsed,
                  [val, is_dead, &ret, &n](const absl::Status& s,
                                           const Rendezvous::Args& send_args,
@@ -256,9 +257,10 @@ void BaseRemoteRendezvous::SameWorkerRecvDone(
                           recv_args.alloc_attrs.gpu_compatible());
   Allocator* out_allocator = dst_device->GetAllocator(attr);
   AllocationAttributes allocation_attr;
-  uint64 safe_alloc_frontier = dst_device->SafeAllocFrontier(0);
+  uint64_t safe_alloc_frontier = dst_device->SafeAllocFrontier(0);
   bool sync_dst_compute = (safe_alloc_frontier == 0);
-  std::function<uint64()> freed_by_func = [dst_device, &safe_alloc_frontier]() {
+  std::function<uint64_t()> freed_by_func = [dst_device,
+                                             &safe_alloc_frontier]() {
     safe_alloc_frontier = dst_device->SafeAllocFrontier(safe_alloc_frontier);
     return safe_alloc_frontier;
   };

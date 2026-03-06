@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -25,7 +26,7 @@ limitations under the License.
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
-#include "absl/strings/str_replace.h"
+#include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/LLVMContext.h"
@@ -35,8 +36,7 @@ limitations under the License.
 #include "llvm/Linker/Linker.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/CodeGen.h"
-#include "llvm/Support/FileSystem.h"
-#include "llvm/Support/Path.h"
+#include "llvm/Support/LogicalResult.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
@@ -61,31 +61,21 @@ limitations under the License.
 #include "mlir/Target/LLVMIR/Export.h"
 #include "xla/backends/gpu/codegen/triton/compilation_pipeline.h"
 #include "xla/pjrt/triton.h"
+#include "xla/stream_executor/cuda/cuda_compute_capability.h"
+#include "xla/stream_executor/device_description.h"
+#include "xla/tsl/platform/env.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/logging.h"
 #include "xla/tsl/platform/statusor.h"
+#include "tsl/platform/cuda_root_path.h"
+#include "tsl/platform/path.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
-#include "triton/Dialect/TritonNvidiaGPU/Transforms/Passes.h"
+#include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 
 namespace xla::triton {
 
 namespace {
-
-absl::Status TritonToLLVM(
-    mlir::ModuleOp module, absl::string_view arch_name, int num_warps,
-    int num_ctas, int num_stages,
-    mlir::triton::nvidia_gpu::ClusterInfo* out_cluster_info) {
-  mlir::PassManager pm(module.getContext());
-  pm.enableVerifier();
-  TF_RETURN_IF_ERROR(
-      xla::gpu::CreateTritonPipeline(&pm, std::string(arch_name), num_warps,
-                                     num_ctas, num_stages, *out_cluster_info,
-                                     /*is_xla_fusion=*/false));
-  return pm.run(module).succeeded()
-             ? absl::OkStatus()
-             : absl::InternalError("Failed to compile Triton IR to LLVM IR");
-}
 
 absl::StatusOr<std::unique_ptr<llvm::TargetMachine>> CreateTargetMachine(
     llvm::Module* module, absl::string_view arch_name, bool enable_fp_fusion,
@@ -103,35 +93,32 @@ absl::StatusOr<std::unique_ptr<llvm::TargetMachine>> CreateTargetMachine(
   if (enable_fp_fusion) {
     opt.AllowFPOpFusion = llvm::FPOpFusion::Fast;
   }
-  opt.UnsafeFPMath = false;
-  opt.NoInfsFPMath = false;
   opt.NoNaNsFPMath = true;
   opt.TrapUnreachable = true;
   opt.MCOptions.AsmVerbose = true;
   opt.MCOptions.PreserveAsmComments = true;
   return std::unique_ptr<llvm::TargetMachine>(target->createTargetMachine(
-      module->getTargetTriple().str(), arch_name, features, opt,
-      llvm::Reloc::PIC_, std::nullopt, llvm::CodeGenOptLevel::Aggressive));
+      module->getTargetTriple(), arch_name, features, opt, llvm::Reloc::PIC_,
+      std::nullopt, llvm::CodeGenOptLevel::Aggressive));
+}
+
+absl::StatusOr<std::string> GetLibdeviceDir() {
+  auto nvvm_cuda_root = mlir::NVVM::getCUDAToolkitPath().str();
+  for (const std::string& cuda_root : tsl::CandidateCudaRoots(nvvm_cuda_root)) {
+    auto libdevice_dir = tsl::io::JoinPath(cuda_root, "nvvm", "libdevice");
+    if (tsl::Env::Default()->IsDirectory(libdevice_dir).ok()) {
+      return libdevice_dir;
+    }
+  }
+  return absl::InternalError(absl::StrCat(
+      "Cannot find libdevice.10.bc in any of the CUDA roots. "
+      "Searched for CUDA in the following directories:\n  ",
+      absl::StrJoin(tsl::CandidateCudaRoots(nvvm_cuda_root), "\n  ")));
 }
 
 absl::Status LinkLibdevice(llvm::Module* module) {
-  // NOTE: We cannot use std::filesystem until XLA migrates to C++20.
-  namespace fs = llvm::sys::fs;
-
-  auto cuda_path = mlir::NVVM::getCUDAToolkitPath();
-  if (cuda_path.empty() || !fs::is_directory(cuda_path)) {
-    return absl::InternalError(absl::StrFormat(
-        "CUDA path %s does not exist or is not a directory", cuda_path));
-  }
-  auto sep = llvm::sys::path::get_separator().str();
-  std::string libdevice_path;
-  absl::StrAppend(&libdevice_path, cuda_path.str(), sep, "nvvm", sep,
-                  "libdevice", sep, "libdevice.10.bc");
-
-  if (!fs::is_regular_file(libdevice_path)) {
-    return absl::InternalError(
-        absl::StrFormat("%s is not a regular file", libdevice_path));
-  }
+  TF_ASSIGN_OR_RETURN(auto libdevice_dir, GetLibdeviceDir());
+  auto libdevice_path = tsl::io::JoinPath(libdevice_dir, "libdevice.10.bc");
 
   llvm::LLVMContext& ctx = module->getContext();
   llvm::SMDiagnostic err;
@@ -168,11 +155,20 @@ absl::StatusOr<std::string> LLVMToPTX(mlir::ModuleOp module,
     return absl::InternalError("Failed to emit LLVM IR");
   }
 
-  auto cc = absl::StrReplaceAll(arch_name, {{".", ""}});  // "8.0" -> "80"
-  auto proc = absl::StrCat("sm_", cc, cc == "90" ? "a" : "");
-  // We cap the ISA at 8.4 to align with Triton.
-  // See get_features() in triton/third_party/nvidia/backend/compiler.py.
-  auto features = cc >= "84" ? "+ptx84" : "+ptx" + cc;
+  TF_ASSIGN_OR_RETURN(
+      auto cuda_cc,
+      stream_executor::CudaComputeCapability::FromString(arch_name));
+  // Hopper and Blackwell require accelerated features ("a" suffix) for TMA and
+  // other advanced instructions.
+  if (cuda_cc.major >= 9) {
+    cuda_cc.feature_extension = stream_executor::CudaComputeCapability::
+        FeatureExtension::kAcceleratedFeatures;
+  }
+  auto proc = cuda_cc.GetPtxAsTargetName(
+      stream_executor::CudaComputeCapability::CompileMode::kSass);
+
+  int ptx_version = xla::gpu::GetDefaultPtxVersion(cuda_cc);
+  auto features = absl::StrCat("+ptx", ptx_version);
   llvmModule->setTargetTriple(llvm::Triple("nvptx64-nvidia-cuda"));
   static absl::once_flag init_target_once;
   absl::call_once(init_target_once, []() {
@@ -224,9 +220,10 @@ absl::StatusOr<CompilationResult> Compile(absl::string_view module,
                                           int num_warps, int num_ctas,
                                           int num_stages) {
   mlir::MLIRContext context;
-  context.loadDialect<mlir::triton::TritonDialect,
-                      mlir::triton::gpu::TritonGPUDialect,
-                      mlir::arith::ArithDialect, mlir::LLVM::LLVMDialect>();
+  context.loadDialect<::mlir::triton::TritonDialect,
+                      ::mlir::triton::gpu::TritonGPUDialect,
+                      ::mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect,
+                      ::mlir::arith::ArithDialect, ::mlir::LLVM::LLVMDialect>();
   mlir::DialectRegistry registry;
   mlir::func::registerInlinerExtension(registry);
   mlir::LLVM::registerInlinerInterface(registry);
@@ -237,21 +234,55 @@ absl::StatusOr<CompilationResult> Compile(absl::string_view module,
   if (!module_op) {
     return absl::InvalidArgumentError("Failed to parse Triton module");
   }
-  mlir::triton::nvidia_gpu::ClusterInfo cluster_info;
-  TF_RETURN_IF_ERROR(TritonToLLVM(*module_op, arch_name, num_warps, num_ctas,
-                                  num_stages, &cluster_info));
+
+  mlir::PassManager pm(&context);
+  pm.enableVerifier();
+  TF_ASSIGN_OR_RETURN(
+      auto cuda_cc,
+      stream_executor::CudaComputeCapability::FromString(arch_name));
+
+  xla::gpu::CreateTritonPipeline(&pm,
+                                 stream_executor::GpuComputeCapability(cuda_cc),
+                                 num_warps, num_ctas, num_stages);
+  if (failed(pm.run(*module_op))) {
+    return absl::InternalError("Failed to compile Triton IR to LLVM IR");
+  }
 
   auto shared_mem_bytes =
-      (*module_op)->getAttrOfType<mlir::IntegerAttr>("ttg.shared").getInt();
+      (*module_op)->getAttrOfType<::mlir::IntegerAttr>("ttg.shared").getInt();
+
+  int32_t global_scratch_size = 0;
+  if (auto attr = (*module_op)
+                      ->getAttrOfType<::mlir::IntegerAttr>(
+                          "ttg.global_scratch_memory_size")) {
+    global_scratch_size = attr.getInt();
+  }
+
+  int cluster_dim_x = 1;
+  int cluster_dim_y = 1;
+  int cluster_dim_z = 1;
+  if (auto attr =
+          (*module_op)
+              ->getAttrOfType<::mlir::DenseI32ArrayAttr>("ttg.num-ctas")) {
+    auto vals = attr.asArrayRef();
+    cluster_dim_x = vals[0];
+    if (vals.size() > 1) {
+      cluster_dim_y = vals[1];
+    }
+    if (vals.size() > 2) {
+      cluster_dim_z = vals[2];
+    }
+  } else if (auto attr =
+                 (*module_op)
+                     ->getAttrOfType<::mlir::IntegerAttr>("ttg.num-ctas")) {
+    cluster_dim_x = attr.getInt();
+  }
 
   TF_ASSIGN_OR_RETURN(auto ptx, LLVMToPTX(*module_op, arch_name));
 
   return CompilationResult{
-      ptx,
-      shared_mem_bytes,
-      cluster_info.clusterDimX,
-      cluster_info.clusterDimY,
-      cluster_info.clusterDimZ,
+      AsmText{ptx},  shared_mem_bytes, global_scratch_size,
+      cluster_dim_x, cluster_dim_y,    cluster_dim_z,
   };
 }
 

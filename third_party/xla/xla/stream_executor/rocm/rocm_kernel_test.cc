@@ -16,33 +16,36 @@ limitations under the License.
 #include <memory>
 
 #include <gtest/gtest.h>
+#include "absl/status/status_matchers.h"
 #include "xla/stream_executor/gpu/gpu_test_kernels.h"
 #include "xla/stream_executor/kernel.h"
+#include "xla/stream_executor/kernel_spec.h"
 #include "xla/stream_executor/launch_dim.h"
 #include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/platform_manager.h"
+#include "xla/stream_executor/rocm/rocm_platform_id.h"
 #include "xla/stream_executor/stream_executor.h"
-#include "xla/tsl/platform/status_matchers.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
 
 namespace stream_executor::gpu {
 namespace {
 using testing::Ge;
-using tsl::testing::IsOkAndHolds;
 
 TEST(RocmKernelTest, GetMaxOccupiedBlocksPerCore) {
   TF_ASSERT_OK_AND_ASSIGN(Platform * platform,
                           PlatformManager::PlatformWithName("ROCM"));
   TF_ASSERT_OK_AND_ASSIGN(StreamExecutor * executor,
                           platform->ExecutorForDevice(0));
+  TF_ASSERT_OK_AND_ASSIGN(KernelLoaderSpec add_kernel,
+                          GetAddI32TestKernelSpec(rocm::kROCmPlatformId));
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Kernel> rocm_kernel,
-                          executor->LoadKernel(GetAddI32KernelSpec()));
+                          executor->LoadKernel(add_kernel));
 
   EXPECT_EQ(rocm_kernel->Arity(), 3);
   EXPECT_THAT(rocm_kernel->GetMaxOccupiedBlocksPerCore(
                   ThreadDim(1, 1, 1), /*dynamic_shared_memory_bytes=*/0),
-              IsOkAndHolds(Ge(1)));
+              absl_testing::IsOkAndHolds(Ge(1)));
 }
 
 }  // namespace

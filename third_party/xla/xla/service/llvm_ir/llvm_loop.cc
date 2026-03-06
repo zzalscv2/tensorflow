@@ -19,7 +19,6 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 #include <numeric>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -105,8 +104,11 @@ void ForLoop::Emit(llvm::IRBuilderBase* b) {
   llvm::Function* func = preheader_bb_->getParent();
   b->SetInsertPoint(&func->getEntryBlock(),
                     func->getEntryBlock().getFirstInsertionPt());
-  llvm::Value* indvar_address = b->CreateAlloca(
-      start_index_->getType(), nullptr, GetQualifiedName("invar_address"));
+  // Use EmitAllocaAtFunctionEntryWithCount which handles AMD GPU address space
+  // correctly
+  llvm::Value* indvar_address = llvm_ir::EmitAllocaAtFunctionEntryWithCount(
+      start_index_->getType(), nullptr, GetQualifiedName("invar_address"), b,
+      0);
 
   // Preheader basic block.
   // Initialize induction variable starting index. Create branch to the header.
@@ -140,7 +142,7 @@ void ForLoop::Emit(llvm::IRBuilderBase* b) {
   std::vector<llvm::Metadata*> loop_metadata = GetLoopMetadata(b);
   if (!loop_metadata.empty()) {
     llvm::LLVMContext* ctx = &start_index_->getContext();
-    auto temp_node = llvm::MDNode::getTemporary(*ctx, std::nullopt);
+    auto temp_node = llvm::MDNode::getTemporary(*ctx, {});
     loop_metadata.insert(loop_metadata.begin(), temp_node.get());
     auto loop_id = llvm::MDNode::get(*ctx, loop_metadata);
     loop_id->replaceOperandWith(0, loop_id);

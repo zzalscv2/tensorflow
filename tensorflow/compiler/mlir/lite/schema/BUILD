@@ -1,9 +1,15 @@
 load("@flatbuffers//:build_defs.bzl", "flatbuffer_cc_library")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# copybara:uncomment_begin(google-only)
+# load("@flatbuffers//:flatbuffers.bzl", "flatbuffers_library", "ts_flatbuffers_library")
+# copybara:uncomment_end
+
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
 load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 
 package(
-    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = [
         "//visibility:public",
     ],
@@ -21,6 +27,7 @@ exports_files(
         "schema_v3.fbs",
         "schema_v3a.fbs",
         "schema_v3b.fbs",
+        "schema_v3c.fbs",
     ],
 )
 
@@ -116,7 +123,7 @@ tf_cc_test(
     srcs = ["flatbuffer_compatibility_test.cc"],
     data = [
         "schema.fbs",
-        "schema_v3b.fbs",
+        "schema_v3c.fbs",
     ],
     tags = [
         "no_oss",
@@ -129,3 +136,15 @@ tf_cc_test(
         "@flatbuffers//:flatc_library",
     ],
 )
+
+# copybara:uncomment_begin(google-only)
+# flatbuffers_library(
+#     name = "schema_fbslib",
+#     srcs = ["schema.fbs"],
+# )
+#
+# ts_flatbuffers_library(
+#     name = "schema_ts_fbs",
+#     deps = [":schema_fbslib"],
+# )
+# copybara:uncomment_end

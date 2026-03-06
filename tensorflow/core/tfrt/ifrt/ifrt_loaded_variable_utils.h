@@ -26,6 +26,9 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/tfrt/transforms/ifrt/ifrt_types.h"
 #include "xla/hlo/ir/hlo_sharding.h"
 #include "xla/python/ifrt/client.h"
+#include "xla/python/ifrt/device_list.h"
+#include "xla/python/ifrt/layout.h"
+#include "xla/shape.h"
 #include "xla/tsl/platform/threadpool.h"
 #include "tensorflow/core/framework/resource_handle.h"
 #include "tensorflow/core/tfrt/ifrt/ifrt_config.pb.h"
@@ -59,13 +62,16 @@ std::string GetRuntimeNameFromVarHandle(const ResourceHandle& handle);
 // can look for the actual loaded variable value in
 // `ifrt_loaded_variable_registry`.
 absl::Status AsyncLoadRestoredTensorAsIfrtLoadedVariable(
-    absl::string_view runtime_name,
+    absl::string_view tensor_name,
     std::shared_ptr<xla::ifrt::Client> ifrt_client,
     const tsl::thread::ThreadPool& thread_pool,
     const ifrt_serving::IfrtRestoreTensorRegistry& ifrt_restore_tensor_registry,
     ifrt_serving::IfrtLoadedVariableRegistry& ifrt_loaded_variable_registry,
     tfrt::ConcurrentWorkQueue* checkpoint_loader_queue,
-    const VariableDeviceShardingConfig& sharding_config);
+    const VariableDeviceShardingConfig& sharding_config,
+    const xla::ifrt::LayoutRef& xla_input_layout,
+    std::shared_ptr<xla::Shape> shape_on_device,
+    const xla::ifrt::DeviceListRef& device_list);
 
 }  // namespace ifrt_serving
 }  // namespace tensorflow

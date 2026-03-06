@@ -43,6 +43,7 @@ limitations under the License.
 #include "xla/service/hlo_module_config.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
+#include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/errors.h"
@@ -193,7 +194,11 @@ absl::Status GpuHloCostAnalysis::FusionCalculateUtilizations(
     for (int operand_idx = 0; operand_idx < instr->operand_count();
          ++operand_idx) {
       const HloInstruction* operand = instr->operand(operand_idx);
-      if ((instr->IsElementwise()) || instr->opcode() == HloOpcode::kTuple ||
+      if ((instr->IsElementwise() ||
+           (instr->opcode() == HloOpcode::kBitcast &&
+            ShapeUtil::EqualIgnoringElementType(instr->operand(0)->shape(),
+                                                instr->shape()))) ||
+          instr->opcode() == HloOpcode::kTuple ||
           instr->opcode() == HloOpcode::kGetTupleElement) {
         for (const HloInstruction* r : elementwise_use_roots_[instr]) {
           elementwise_use_roots_[operand].insert(r);
@@ -295,6 +300,14 @@ absl::Status GpuHloCostAnalysis::HandleCustomCall(
     current_properties_[kFlopsKey] =
         GetDotFlops(custom_call->operand(0)->shape(), output_shape,
                     gemm_config.dot_dimension_numbers());
+    // cublas custom-calls return a tuple (real_output, temp_bytes). Cost model
+    // should only care about the real output size.
+    // Update both output_bytes_accessed and bytes_accessed accordingly.
+    int64_t output_size = options_.shape_size(output_shape);
+    current_properties_[kBytesAccessedKey] -=
+        current_properties_.output_bytes_accessed();
+    current_properties_[kBytesAccessedKey] += output_size;
+    current_properties_.set_output_bytes_accessed(output_size);
     return absl::OkStatus();
   }
 
@@ -532,12 +545,14 @@ absl::Status GpuHloCostAnalysis::HandleAllGatherStart(
 
 absl::Status GpuHloCostAnalysis::HandleAsyncStart(const HloInstruction* hlo) {
   auto* async_start = DynCast<HloAsyncStartInstruction>(hlo);
-  if (async_start->async_wrapped_opcode() != HloOpcode::kReduceScatter) {
-    VLOG(2) << "Only Reduce Scatter is supported.";
-    return absl::OkStatus();
+  TF_RETURN_IF_ERROR(hlo->async_wrapped_instruction()->Accept(this));
+  if (async_start->async_wrapped_opcode() == HloOpcode::kReduceScatter) {
+    return HandleReduceScatter(async_start->async_wrapped_instruction());
   }
-
-  return HandleReduceScatter(async_start->async_wrapped_instruction());
+  if (async_start->async_wrapped_opcode() == HloOpcode::kAllToAll) {
+    return HandleAllToAll(async_start->async_wrapped_instruction());
+  }
+  return absl::OkStatus();
 }
 
 absl::Status GpuHloCostAnalysis::HandleReduceScatter(
@@ -558,6 +573,26 @@ absl::Status GpuHloCostAnalysis::HandleReduceScatter(
   current_properties_[kFlopsKey] = GetFlopsForElementwiseOp(
       hlo->to_apply()->root_instruction()->opcode(), hlo->shape());
 
+  return absl::OkStatus();
+}
+
+absl::Status GpuHloCostAnalysis::HandleAllToAll(const HloInstruction* hlo) {
+  int64_t bytes_transferred = ShapeSize(hlo->shape(), options_.shape_size);
+  current_properties_[kCollBytesTransferred] = bytes_transferred;
+  return absl::OkStatus();
+}
+
+absl::Status GpuHloCostAnalysis::HandleCollectivePermute(
+    const HloInstruction* hlo) {
+  current_properties_[kCollBytesTransferred] +=
+      ShapeUtil::ByteSizeOf(hlo->operand(0)->shape());
+  return absl::OkStatus();
+}
+
+absl::Status GpuHloCostAnalysis::HandleCollectivePermuteStart(
+    const HloInstruction* hlo) {
+  current_properties_[kCollBytesTransferred] +=
+      ShapeUtil::ByteSizeOf(hlo->operand(0)->shape());
   return absl::OkStatus();
 }
 

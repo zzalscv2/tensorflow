@@ -33,8 +33,8 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/statusor.h"
 
 namespace xla {
 namespace {
@@ -59,7 +59,7 @@ TEST_F(DotMergerTest, MergeRHS) {
     rhs1 = f32[100, 50] parameter(2)
     dot0 = f32[200, 10] dot(lhs, rhs0), lhs_contracting_dims={1}, rhs_contracting_dims={0}
     dot1 = f32[200, 50] dot(lhs, rhs1), lhs_contracting_dims={1}, rhs_contracting_dims={0}
-    ROOT tuple = (f32[200,10], f32[200,50]) tuple(dot0, dot1)
+    ROOT tuple = (f32[200,10], f32[200,50], f32[200,100]) tuple(dot0, dot1, lhs)
   })";
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(module_string));
@@ -68,14 +68,48 @@ TEST_F(DotMergerTest, MergeRHS) {
   EXPECT_TRUE(changed);
   const HloInstruction* dot0 = nullptr;
   const HloInstruction* dot1 = nullptr;
-  EXPECT_THAT(
-      module->entry_computation()->root_instruction(),
-      GmockMatch(m::Tuple(m::Slice(m::Op(&dot0)), m::Slice(m::Op(&dot1)))));
+  const HloInstruction* lhs = nullptr;
+  EXPECT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Tuple(m::Slice(m::Op(&dot0)),
+                                  m::Slice(m::Op(&dot1)), m::Op(&lhs))));
   EXPECT_EQ(dot0, dot1);
   EXPECT_THAT(dot0,
               GmockMatch(m::Dot(m::Parameter(0),
                                 m::Concatenate().WithBinaryOperandsAnyOrder(
                                     m::Parameter(1), m::Parameter(2)))));
+  EXPECT_TRUE(lhs != nullptr);
+  // We want a deterministic first user.
+  EXPECT_EQ(lhs->users()[0], dot0);
+}
+
+TEST_F(DotMergerTest, MergeRHSWithLHS) {
+  absl::string_view module_string = R"(
+ENTRY main {
+  common = bf16[32,4] parameter(0)
+  lhs0 = bf16[2,32] parameter(1)
+  dot0 = bf16[2,4] dot(lhs0, common), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  rhs1 = bf16[32,8] parameter(2)
+  common_t = bf16[4,32] transpose(common), dimensions={1,0}
+  dot1 = bf16[4,8] dot(common_t, rhs1), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  ROOT tuple = (bf16[2,4], bf16[4,8]) tuple(dot0, dot1)
+})";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(module_string));
+  DotMerger pass(/*max_size_to_merge=*/std::numeric_limits<int64_t>::max());
+  TF_ASSERT_OK_AND_ASSIGN(bool changed, this->RunHloPass(&pass, module.get()));
+  EXPECT_TRUE(changed);
+  const HloInstruction* dot0 = nullptr;
+  const HloInstruction* dot1 = nullptr;
+  EXPECT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Tuple(m::Transpose(m::Slice(m::Op(&dot0))),
+                                  m::Slice(m::Op(&dot1)))))
+      << module->ToString();
+  EXPECT_EQ(dot0, dot1);
+  EXPECT_THAT(dot0, GmockMatch(m::Dot(
+                        m::Transpose(m::Parameter(0)),
+                        m::Concatenate().WithBinaryOperandsAnyOrder(
+                            m::Transpose(m::Parameter(1)), m::Parameter(2)))))
+      << module->ToString();
 }
 
 TEST_F(DotMergerTest, MergeRHSWithLayouts) {
@@ -149,6 +183,36 @@ TEST_F(DotMergerTest, MergeLHS) {
   EXPECT_TRUE(changed);
   EXPECT_THAT(module->entry_computation()->root_instruction(),
               GmockMatch(m::Tuple(m::Slice(), m::Slice())));
+}
+
+TEST_F(DotMergerTest, MergeLHSWithRHS) {
+  absl::string_view module_string = R"(
+ENTRY main {
+  common = bf16[4,32] parameter(0)
+  rhs0 = bf16[32,8] parameter(2)
+  dot0 = bf16[4,8] dot(common, rhs0), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  lhs1 = bf16[2,32] parameter(1)
+  common_t = bf16[32,4] transpose(common), dimensions={1,0}
+  dot1 = bf16[2,4] dot(lhs1, common_t), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  ROOT tuple = (bf16[4,8], bf16[2,4]) tuple(dot0, dot1)
+})";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(module_string));
+  DotMerger pass(/*max_size_to_merge=*/std::numeric_limits<int64_t>::max());
+  TF_ASSERT_OK_AND_ASSIGN(bool changed, this->RunHloPass(&pass, module.get()));
+  EXPECT_TRUE(changed);
+  const HloInstruction* dot0 = nullptr;
+  const HloInstruction* dot1 = nullptr;
+  EXPECT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Tuple(m::Slice(m::Op(&dot0)),
+                                  m::Transpose(m::Slice(m::Op(&dot1))))))
+      << module->ToString();
+  EXPECT_EQ(dot0, dot1);
+  EXPECT_THAT(dot0, GmockMatch(m::Dot(
+                        m::Parameter(0),
+                        m::Concatenate().WithBinaryOperandsAnyOrder(
+                            m::Transpose(m::Parameter(1)), m::Parameter(2)))))
+      << module->ToString();
 }
 
 TEST_F(DotMergerTest, MergeLHSDotsWithNonDefaultLayout) {
@@ -363,6 +427,26 @@ TEST_F(DotMergerTest, MergeWithBatchDims) {
   EXPECT_TRUE(changed);
   EXPECT_THAT(module->entry_computation()->root_instruction(),
               GmockMatch(m::Tuple(m::Slice(), m::Slice())));
+}
+
+TEST_F(DotMergerTest, NoMergeLHSWithRHSWithBatchDims) {
+  absl::string_view module_string = R"(
+ENTRY main {
+  common = bf16[16,4,32] parameter(0)
+  rhs0 = bf16[16,32,8] parameter(2)
+  dot0 = bf16[16,4,8] dot(common, rhs0), lhs_contracting_dims={2},
+      rhs_contracting_dims={1}, lhs_batch_dims={0}, rhs_batch_dims={0}
+  lhs1 = bf16[16,2,32] parameter(1)
+  common_t = bf16[16,32,4] transpose(common), dimensions={0,2,1}
+  dot1 = bf16[16,2,4] dot(lhs1, common_t), lhs_contracting_dims={2},
+      rhs_contracting_dims={1}, lhs_batch_dims={0}, rhs_batch_dims={0}
+  ROOT tuple = (bf16[16,4,8], bf16[16,2,4]) tuple(dot0, dot1)
+})";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(module_string));
+  DotMerger pass(/*max_size_to_merge=*/std::numeric_limits<int64_t>::max());
+  TF_ASSERT_OK_AND_ASSIGN(bool changed, this->RunHloPass(&pass, module.get()));
+  EXPECT_FALSE(changed);
 }
 
 TEST_F(DotMergerTest, MergeWithBatchDimsAndMultipleContractingDims) {
@@ -670,6 +754,24 @@ TEST_F(DotMergerTest, NoMergeDifferentRhsTypes) {
   EXPECT_FALSE(changed);
 }
 
+TEST_F(DotMergerTest, NoMergeRHSWithLHSDifferentTypes) {
+  absl::string_view module_string = R"(
+ENTRY main {
+  common = f32[32,4] parameter(0)
+  lhs0 = bf16[2,32] parameter(1)
+  dot0 = f32[2,4] dot(lhs0, common), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  rhs1 = f32[32,8] parameter(2)
+  common_t = f32[4,32] transpose(common), dimensions={1,0}
+  dot1 = f32[4,8] dot(common_t, rhs1), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  ROOT tuple = (f32[2,4], f32[4,8]) tuple(dot0, dot1)
+})";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(module_string));
+  DotMerger pass(/*max_size_to_merge=*/std::numeric_limits<int64_t>::max());
+  TF_ASSERT_OK_AND_ASSIGN(bool changed, this->RunHloPass(&pass, module.get()));
+  EXPECT_FALSE(changed);
+}
+
 TEST_F(DotMergerTest, NoMergeDifferentReturnTypes) {
   absl::string_view module_string = R"(
   HloModule module
@@ -720,104 +822,6 @@ TEST_F(DotMergerTest, MergeWithTypeUpgrade) {
   EXPECT_EQ(d0, d1);
 }
 
-TEST_F(DotMergerTest, MergeSparseDotsSameMetadata) {
-  absl::string_view kHlo = R"(
-  HloModule test
-  ENTRY main {
-    lhs0 = f16[5,10,32] parameter(0)
-    lhs1 = f16[5,10,32] parameter(1)
-    rhs  = f16[5,10,16] parameter(2)
-    meta = u16[5,10,2] parameter(3)
-    dot0 = f32[5,10,10] dot(lhs0, rhs, meta), sparsity=R.2@2:4,
-        lhs_batch_dims={0}, rhs_batch_dims={0},
-        lhs_contracting_dims={2}, rhs_contracting_dims={2}
-    dot1 = f32[5,10,10] dot(lhs1, rhs, meta), sparsity=R.2@2:4,
-        lhs_batch_dims={0}, rhs_batch_dims={0},
-        lhs_contracting_dims={2}, rhs_contracting_dims={2}
-    ROOT tuple = (f32[5,10,10], f32[5,10,10]) tuple(dot0, dot1)
-  })";
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
-                          ParseAndReturnVerifiedModule(kHlo));
-  DotMerger pass(/*max_size_to_merge=*/std::numeric_limits<int64_t>::max());
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, this->RunHloPass(&pass, module.get()));
-  EXPECT_TRUE(changed);
-  const HloInstruction *d0, *d1;
-  EXPECT_THAT(module->entry_computation()->root_instruction(),
-              GmockMatch(m::Tuple(
-                  m::Slice(m::Op(&d0)
-                               .WithOpcode(HloOpcode::kDot)
-                               .WithOperand(0, m::Concatenate(m::Parameter(0),
-                                                              m::Parameter(1)))
-                               .WithOperand(1, m::Parameter(2))
-                               .WithOperand(2, m::Parameter(3))
-                               .WithShape(F32, {5, 20, 10})),
-                  m::Slice(m::Op(&d1)))));
-  EXPECT_EQ(d0, d1);
-  EXPECT_EQ(d0->operand(2)->shape(), ShapeUtil::MakeShape(U16, {5, 10, 2}));
-}
-
-TEST_F(DotMergerTest, MergeSparseDotsConcatMetadata) {
-  absl::string_view kHlo = R"(
-  HloModule test
-  ENTRY main {
-    lhs0 = f16[5,10,16] parameter(0)
-    lhs1 = f16[5,10,16] parameter(1)
-    rhs  = f16[5,10,32] parameter(2)
-    meta0 = u16[5,10,2] parameter(3)
-    meta1 = u16[5,10,2] parameter(4)
-    dot0 = f32[5,10,10] dot(lhs0, rhs, meta0), sparsity=L.2@2:4,
-        lhs_batch_dims={0}, rhs_batch_dims={0},
-        lhs_contracting_dims={2}, rhs_contracting_dims={2}
-    dot1 = f32[5,10,10] dot(lhs1, rhs, meta1), sparsity=L.2@2:4,
-        lhs_batch_dims={0}, rhs_batch_dims={0},
-        lhs_contracting_dims={2}, rhs_contracting_dims={2}
-    ROOT tuple = (f32[5,10,10], f32[5,10,10]) tuple(dot0, dot1)
-  })";
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
-                          ParseAndReturnVerifiedModule(kHlo));
-  DotMerger pass(/*max_size_to_merge=*/std::numeric_limits<int64_t>::max());
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, this->RunHloPass(&pass, module.get()));
-  EXPECT_TRUE(changed);
-  const HloInstruction *d0, *d1;
-  EXPECT_THAT(module->entry_computation()->root_instruction(),
-              GmockMatch(m::Tuple(
-                  m::Slice(m::Op(&d0)
-                               .WithOpcode(HloOpcode::kDot)
-                               .WithOperand(0, m::Concatenate(m::Parameter(0),
-                                                              m::Parameter(1)))
-                               .WithOperand(1, m::Parameter(2))
-                               .WithOperand(2, m::Concatenate(m::Parameter(3),
-                                                              m::Parameter(4)))
-                               .WithShape(F32, {5, 20, 10})),
-                  m::Slice(m::Op(&d1)))));
-  EXPECT_EQ(d0, d1);
-  EXPECT_EQ(d0->operand(2)->shape(), ShapeUtil::MakeShape(U16, {5, 20, 2}));
-}
-
-TEST_F(DotMergerTest, MergeSparseDotsDifferentMetadata) {
-  absl::string_view kHlo = R"(
-  HloModule test
-  ENTRY main {
-    lhs0 = f16[5,10,32] parameter(0)
-    lhs1 = f16[5,10,32] parameter(1)
-    rhs  = f16[5,10,16] parameter(2)
-    meta1 = u16[5,10,2] parameter(3)
-    meta2 = u16[5,10,2] parameter(4)
-    dot0 = f32[5,10,10] dot(lhs0, rhs, meta1), sparsity=R.2@2:4,
-        lhs_batch_dims={0}, rhs_batch_dims={0},
-        lhs_contracting_dims={2}, rhs_contracting_dims={2}
-    dot1 = f32[5,10,10] dot(lhs1, rhs, meta2), sparsity=R.2@2:4,
-        lhs_batch_dims={0}, rhs_batch_dims={0},
-        lhs_contracting_dims={2}, rhs_contracting_dims={2}
-    ROOT tuple = (f32[5,10,10], f32[5,10,10]) tuple(dot0, dot1)
-  })";
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
-                          ParseAndReturnVerifiedModule(kHlo));
-  DotMerger pass(/*max_size_to_merge=*/std::numeric_limits<int64_t>::max());
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, this->RunHloPass(&pass, module.get()));
-  EXPECT_FALSE(changed);
-}
-
 TEST_F(DotMergerTest, NoMergeWithFalseCompatibility) {
   absl::string_view module_string = R"(
   HloModule module
@@ -827,18 +831,56 @@ TEST_F(DotMergerTest, NoMergeWithFalseCompatibility) {
     lhs1 = f32[2,4,300,200] parameter(1)
     rhs  = f32[2,4,200, 50] parameter(2)
     dot0 = f32[2,4,100, 50] dot(lhs0, rhs), lhs_batch_dims={0,1}, rhs_batch_dims={0,1},
-                                            lhs_contracting_dims={3}, rhs_contracting_dims={2}
+        lhs_contracting_dims={3}, rhs_contracting_dims={2}, backend_config={"operation_queue_id":"0"}
     dot1 = f32[2,4,300, 50] dot(lhs1, rhs), lhs_batch_dims={0,1}, rhs_batch_dims={0,1},
-                                            lhs_contracting_dims={3}, rhs_contracting_dims={2}
+        lhs_contracting_dims={3}, rhs_contracting_dims={2}, backend_config={"operation_queue_id":"1"}
     ROOT tuple = (f32[2,4,100,50], f32[2,4,300,50]) tuple(dot0, dot1)
   })";
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(module_string));
-  std::function<bool(const HloInstruction* dot_a, const HloInstruction* dot_b)>
-      can_merge = [&](const HloInstruction* dot_a,
-                      const HloInstruction* dot_b) -> bool { return false; };
+  std::function<int64_t(const HloInstruction* dot)> queue_id =
+      [&](const HloInstruction* dot) -> int64_t {
+    // The queue_id will typically be taken from the backend_config, but deps on
+    // backend-specific protos is avoided for testing.
+    return dot->name() == "dot1" ? 1 : 0;
+  };
   DotMerger pass(/*max_size_to_merge=*/std::numeric_limits<int64_t>::max(),
-                 can_merge);
+                 queue_id);
+  TF_ASSERT_OK_AND_ASSIGN(bool changed, this->RunHloPass(&pass, module.get()));
+  EXPECT_FALSE(changed);
+}
+
+TEST_F(DotMergerTest, NoMergeLHSWithRHSDifferentDimM) {
+  absl::string_view module_string = R"(
+ENTRY main {
+  common = f32[128,10] parameter(0)
+  rhs0 = f32[10,20] parameter(1)
+  dot0 = f32[/*m dim*/128,20] dot(common, rhs0),
+      lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  lhs1 = f32[20,128] parameter(2)
+  dot1 = f32[/*m dim*/20,10] dot(lhs1, common),
+      lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  ROOT tuple = (f32[128,20], f32[20,10]) tuple(dot0, dot1)
+})";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(module_string));
+  DotMerger pass(/*max_size_to_merge=*/std::numeric_limits<int64_t>::max());
+  TF_ASSERT_OK_AND_ASSIGN(bool changed, this->RunHloPass(&pass, module.get()));
+  EXPECT_FALSE(changed);
+}
+
+TEST_F(DotMergerTest, NoMergeLHSWithRHSSubtlyDifferentDimM) {
+  absl::string_view module_string = R"(
+ENTRY main {
+  c0 = f16[/*Used as m AND k_b*/2,2] constant({ { 1, 2 }, { 3, 4 } })
+  c1 = f16[2,2] constant({ { 5, 6 }, { 7, 8 } })
+  dot0 = f16[/*m_a*/2,2]{1,0} dot(c0, c1), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  dot1 = f16[2,2] dot(c1, c0), lhs_contracting_dims={/*k_b*/1}, rhs_contracting_dims={0}
+  ROOT add = f16[2,2] add(dot0, dot1)
+})";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(module_string));
+  DotMerger pass(/*max_size_to_merge=*/std::numeric_limits<int64_t>::max());
   TF_ASSERT_OK_AND_ASSIGN(bool changed, this->RunHloPass(&pass, module.get()));
   EXPECT_FALSE(changed);
 }

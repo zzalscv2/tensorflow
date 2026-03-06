@@ -18,6 +18,7 @@ limitations under the License.
 #include <map>
 #include <memory>
 
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/common_runtime/function_testlib.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_channel.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_testlib.h"
@@ -41,7 +42,7 @@ class ClusterFunctionLibraryRuntimeTest : public ::testing::Test {
         &cluster_));
     GrpcChannelSpec spec;
 
-    std::map<int, string> host_ports;
+    std::map<int, std::string> host_ports;
     int i = 0;
     for (const auto& target : cluster_->targets("localhost")) {
       host_ports[i++] = target;
@@ -71,12 +72,13 @@ class ClusterFunctionLibraryRuntimeTest : public ::testing::Test {
       const OpDef& sig, test::function::Attrs attrs,
       const FunctionLibraryRuntime::InstantiateOptions& options,
       const FunctionLibraryDefinition& lib_def, GraphDef* g,
-      std::vector<string>* send_keys, std::vector<string>* recv_keys) {
+      std::vector<std::string>* send_keys,
+      std::vector<std::string>* recv_keys) {
     return ClusterFunctionLibraryRuntime::ConstructFunctionGraph(
         sig, attrs, options, lib_def, g, send_keys, recv_keys);
   }
 
-  void Instantiate(const string& function_name,
+  void Instantiate(const std::string& function_name,
                    const FunctionLibraryDefinition& lib_def,
                    test::function::Attrs attrs,
                    const FunctionLibraryRuntime::InstantiateOptions& options,
@@ -87,13 +89,13 @@ class ClusterFunctionLibraryRuntimeTest : public ::testing::Test {
   }
 
   absl::Status InstantiateAndRun(
-      const string& function_name, const FunctionLibraryDefinition& lib_def,
-      test::function::Attrs attrs,
+      const std::string& function_name,
+      const FunctionLibraryDefinition& lib_def, test::function::Attrs attrs,
       const FunctionLibraryRuntime::InstantiateOptions& options,
       const std::vector<Tensor>& args, std::vector<Tensor*> rets) {
     FunctionLibraryRuntime::LocalHandle handle;
     absl::Status status;
-    Notification instantiate_done;
+    absl::Notification instantiate_done;
     cluster_flr_->Instantiate(
         function_name, lib_def, attrs, options, &handle,
         [&status, &instantiate_done](const absl::Status& s) {
@@ -105,7 +107,7 @@ class ClusterFunctionLibraryRuntimeTest : public ::testing::Test {
       return status;
     }
 
-    Notification done;
+    absl::Notification done;
     FunctionLibraryRuntime::Options opts;
     std::vector<Tensor> out;
     cluster_flr_->Run(opts, handle, args, &out,
@@ -134,7 +136,7 @@ class ClusterFunctionLibraryRuntimeTest : public ::testing::Test {
 
 TEST_F(ClusterFunctionLibraryRuntimeTest, ConstructFunctionGraph) {
   GraphDef actual;
-  std::vector<string> send_keys, recv_keys;
+  std::vector<std::string> send_keys, recv_keys;
   FunctionDefLibrary proto;
   *(proto.add_function()) = test::function::Swap();
   FunctionLibraryDefinition lib_def(OpRegistry::Global(), proto);
@@ -401,10 +403,10 @@ TEST_F(ClusterFunctionLibraryRuntimeTest, DISABLED_InstantiateAndRun) {
   instantiate_opts.target = "/job:localhost/replica:0/task:1/cpu:0";
 
   Tensor y;
-  auto x = test::AsTensor<int32>({1, 2, 3, 4});
+  auto x = test::AsTensor<int32_t>({1, 2, 3, 4});
   TF_EXPECT_OK(InstantiateAndRun("XTimesTwoInt32", lib_def, {},
                                  instantiate_opts, {x}, {&y}));
-  test::ExpectTensorEqual<int32>(y, test::AsTensor<int32>({2, 4, 6, 8}));
+  test::ExpectTensorEqual<int32_t>(y, test::AsTensor<int32_t>({2, 4, 6, 8}));
 }
 
 TEST_F(ClusterFunctionLibraryRuntimeTest,

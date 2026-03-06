@@ -16,37 +16,34 @@ limitations under the License.
 #include "xla/backends/gpu/collectives/nccl_errors.h"
 
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
-
-#if TENSORFLOW_USE_ROCM
-#include "rocm/rocm_config.h"
-#if (TF_ROCM_VERSION >= 50200)
-#include "rocm/include/rccl/rccl.h"
-#else
-#include "rocm/include/rccl.h"
-#endif  // TF_ROCM_VERSION >= 50200
-#else
 #include "third_party/nccl/nccl.h"
-#endif  // TENSORFLOW_USE_ROCM
+#include "xla/backends/gpu/collectives/cancellation_token.h"
+#include "xla/util.h"
 
 namespace xla::gpu {
 
-absl::Status PollUntilDone(ncclComm_t comm) {
-  auto poll = [](ncclComm_t comm) -> absl::Status {
+absl::Status PollUntilDone(ncclComm_t comm, const CancellationToken& cancel) {
+  auto poll = [](ncclComm_t comm,
+                 const CancellationToken& cancel) -> absl::Status {
     ncclResult_t state = ncclInProgress;
-    while (state == ncclInProgress) {
+    while (state == ncclInProgress && !cancel.IsCancelled()) {
       XLA_NCCL_RETURN_IF_ERROR(ncclCommGetAsyncError(comm, &state));
+    }
+    if (cancel.IsCancelled()) {
+      return Cancelled("NcclCommunicator cancelled");
     }
     return XLA_NCCL_STATUS(state);
   };
 
   if (!VLOG_IS_ON(1)) {
-    return poll(comm);
+    return poll(comm, cancel);
   }
 
   absl::Time start = absl::Now();
-  absl::Status s = poll(comm);
+  absl::Status s = poll(comm, cancel);
   absl::Time stop = absl::Now();
   VLOG(1) << "Polled NCCL communicator " << comm << " for " << (stop - start)
           << ": " << s;

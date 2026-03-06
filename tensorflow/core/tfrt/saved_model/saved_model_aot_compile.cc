@@ -307,14 +307,16 @@ AotCompileToGpuPjRtExecutable(
       flib_def, function, graph_def_version, args, has_ref_vars,
       may_alias_resource_update, &options, compilation_result));
 
-  xla::Compiler::TargetConfig gpu_config(gpu_target_config);
-  xla::StreamExecutorGpuCompiler pjrt_gpu_compiler;
+  TF_ASSIGN_OR_RETURN(
+      xla::Compiler::GpuTargetConfig gpu_config,
+      xla::Compiler::GpuTargetConfig::FromProto(gpu_target_config));
+  xla::StreamExecutorGpuCompiler pjrt_gpu_compiler(xla::CudaId());
   // Create a trivial topology, which won't be used.
   xla::StreamExecutorGpuTopologyDescription topology(xla::CudaId(),
                                                      xla::CudaName(), nullptr);
   xla::CompileOptions pjrt_options =
       GetPjRtCompileOptions(options, **compilation_result);
-  pjrt_options.target_config = gpu_config;
+  pjrt_options.gpu_target_config = gpu_config;
   return pjrt_gpu_compiler.Compile(
       pjrt_options, *((*compilation_result)->computation), topology, nullptr);
 }
@@ -327,7 +329,7 @@ absl::StatusOr<std::string> AotCompileToGpuPjRtLoadedExecutableWithDevice(
   TF_ASSIGN_OR_RETURN(auto client,
                       xla::GetStreamExecutorGpuClient(xla::GpuClientOptions()));
   auto se_client = absl::WrapUnique(
-      tensorflow::down_cast<xla::StreamExecutorGpuClient*>(client.release()));
+      absl::down_cast<xla::StreamExecutorGpuClient*>(client.release()));
 
   XlaCompiler::Options options;
   TF_RETURN_IF_ERROR(CompileTfGraphToHlo(

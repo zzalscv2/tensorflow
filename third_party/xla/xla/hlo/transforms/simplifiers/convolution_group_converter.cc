@@ -22,23 +22,24 @@ limitations under the License.
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
+#include "xla/comparison_util.h"
 #include "xla/hlo/ir/dfs_hlo_visitor_with_default.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/literal.h"
 #include "xla/literal_util.h"
+#include "xla/primitive_util.h"
 #include "xla/service/hlo_creation_utils.h"
+#include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/status_macros.h"
-#include "xla/types.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/logging.h"
-#include "tsl/platform/status.h"
 
 namespace xla {
 
@@ -104,13 +105,13 @@ bool ConvolutionVisitor::Run(
     bool convert_batch_groups_only, bool filter_expansion) {
   ConvolutionVisitor visitor(computation, should_expand, is_cost_viable,
                              convert_batch_groups_only, filter_expansion);
-  TF_CHECK_OK(computation->Accept(&visitor));
+  CHECK_OK(computation->Accept(&visitor));
   return visitor.changed_;
 }
 
 Shape ExpandedFilterShape(const Shape& shape, int64_t group_count,
                           int64_t input_feature_dim) {
-  int64_t num_dims = shape.dimensions_size();
+  int64_t num_dims = shape.dimensions().size();
   CHECK_GE(num_dims, 2);
   Shape expanded_shape = shape;
   expanded_shape.set_dimensions(
@@ -314,10 +315,11 @@ absl::Status ConvolutionVisitor::HandleBatchGroupCount(
             activation, filter, convolution->feature_group_count(),
             /*batch_group_count=*/1, window, dim_numbers,
             convolution->precision_config(),
-            /*preferred_element_type=*/convolution->shape().element_type())
+            /*preferred_element_type=*/convolution->shape().element_type(),
+            convolution->sparsity_config())
             .value();
     convolution->SetupDerivedInstruction(new_convolution);
-    TF_CHECK_OK(computation_->ReplaceInstruction(
+    CHECK_OK(computation_->ReplaceInstruction(
         convolution,
         MakeReshapeHlo(convolution->shape(), new_convolution).value()));
     changed_ = true;
@@ -343,10 +345,13 @@ absl::Status ConvolutionVisitor::HandleBatchGroupCount(
     VLOG(2) << "New output shape of convolution "
             << expanded_filter_shape.ToString();
 
+    CHECK(!convolution->sparsity_config().has_lhs() &&
+          !convolution->sparsity_config().has_rhs());
     auto new_convolution = add(HloInstruction::CreateConvolve(
         expanded_filter_shape, activation, filter,
         /*feature_group_count=*/1, /*batch_group_count=*/1,
-        convolution->window(), dim_numbers, convolution->precision_config()));
+        convolution->window(), dim_numbers, convolution->precision_config(),
+        convolution->sparsity_config()));
 
     VLOG(2) << "Expanded convolution " << new_convolution->ToString();
 
@@ -391,7 +396,7 @@ absl::Status ConvolutionVisitor::HandleBatchGroupCount(
 
     // Create the reduce window.
     Window window;
-    for (int64_t i = 0; i < new_convolution->shape().dimensions_size(); ++i) {
+    for (int64_t i = 0; i < new_convolution->shape().dimensions().size(); ++i) {
       auto* dim = window.add_dimensions();
       dim->set_padding_low(0);
       dim->set_padding_high(0);
@@ -416,7 +421,7 @@ absl::Status ConvolutionVisitor::HandleBatchGroupCount(
     auto reduce_window_converted =
         HloInstruction::CreateConvert(convert_back_shape, reduce_window);
 
-    TF_CHECK_OK(computation_->ReplaceWithNewInstruction(
+    CHECK_OK(computation_->ReplaceWithNewInstruction(
         convolution, std::move(reduce_window_converted)));
     changed_ = true;
   }
@@ -439,7 +444,6 @@ absl::Status ConvolutionVisitor::HandleConvolution(
     return absl::OkStatus();
   }
 
-  changed_ = true;
   ConvolutionDimensionNumbers dim_numbers =
       convolution->convolution_dimension_numbers();
   auto filter = convolution->mutable_operand(1);
@@ -461,7 +465,6 @@ absl::Status ConvolutionVisitor::HandleConvolution(
     // If the code generator handles depthwise separable convolutions
     // inherently, then no filter expansion is needed.
     if (!filter_expansion_ && depthwise_separable) {
-      changed_ = false;
       return absl::OkStatus();
     }
     VLOG(2) << "is_cost_viable_ " << is_cost_viable_(convolution);
@@ -473,7 +476,7 @@ absl::Status ConvolutionVisitor::HandleConvolution(
       auto reshaped_filter =
           add(HloInstruction::CreateReshape(reshaped_filter_shape, filter));
       std::vector<int64_t> broadcast_dims;
-      for (int64_t i = 0; i < filter->shape().dimensions_size(); ++i) {
+      for (int64_t i = 0; i < filter->shape().dimensions().size(); ++i) {
         if (i == kernel_input_feature_dim) {
           continue;
         }
@@ -494,18 +497,19 @@ absl::Status ConvolutionVisitor::HandleConvolution(
           convolution->shape(), convolution->mutable_operand(0), new_filter,
           /*feature_group_count=*/1, /*batch_group_count=*/1,
           convolution->window(), dim_numbers, convolution->precision_config());
+      changed_ = true;
       return computation_->ReplaceWithNewInstruction(
           convolution, std::move(new_convolution));
     }
     // Add a spatial dimension to emulate a larger output feature dimension
     // to avoid creating a convolution with group_count = 1.
     std::vector<int64_t> new_filter_dimension;
-    new_filter_dimension.reserve(filter->shape().dimensions_size() + 1);
+    new_filter_dimension.reserve(filter->shape().dimensions().size() + 1);
     const int64_t depthwise_multiplier =
         filter->shape().dimensions(kernel_output_feature_dim) / group_count;
     // Split the kernel output feature dimension into group count and
     // depthwise mutilipler.
-    for (int64_t i = 0; i < filter->shape().dimensions_size(); ++i) {
+    for (int64_t i = 0; i < filter->shape().dimensions().size(); ++i) {
       if (i == kernel_output_feature_dim) {
         new_filter_dimension.push_back(group_count);
         new_filter_dimension.push_back(depthwise_multiplier);
@@ -531,7 +535,7 @@ absl::Status ConvolutionVisitor::HandleConvolution(
 
     auto new_activation_shape = convolution->operand(0)->shape();
     dim_numbers.add_input_spatial_dimensions(
-        new_activation_shape.dimensions_size());
+        new_activation_shape.dimensions().size());
 
     // Create and activations spatial dimension of size 1 with a reversed
     // window and high and low padding equal to the depthwise_multiplier -1.
@@ -554,8 +558,8 @@ absl::Status ConvolutionVisitor::HandleConvolution(
     // Split the output feature dimension into and output feature of group
     // count and depthwise multipler as an output spatial dimension.
     std::vector<int64_t> new_output_dimension;
-    new_output_dimension.reserve(convolution->shape().dimensions_size() + 1);
-    for (int64_t i = 0; i < convolution->shape().dimensions_size(); ++i) {
+    new_output_dimension.reserve(convolution->shape().dimensions().size() + 1);
+    for (int64_t i = 0; i < convolution->shape().dimensions().size(); ++i) {
       if (i == dim_numbers.output_feature_dimension()) {
         new_output_dimension.push_back(group_count);
         new_output_dimension.push_back(depthwise_multiplier);
@@ -582,6 +586,7 @@ absl::Status ConvolutionVisitor::HandleConvolution(
             new_convolution_output_shape, new_activation, new_filter,
             /*feature_group_count=*/group_count, /*batch_group_count=*/1,
             new_window, dim_numbers, convolution->precision_config()));
+    changed_ = true;
     return computation_->ReplaceWithNewInstruction(
         convolution,
         HloInstruction::CreateReshape(convolution->shape(), new_convolution));
@@ -671,7 +676,8 @@ absl::Status ConvolutionVisitor::HandleConvolution(
           activation, filter, /*feature_group_count=*/1,
           /*batch_group_count=*/1, window, dim_numbers,
           convolution->precision_config(),
-          /*preferred_element_type=*/convolution->shape().element_type())
+          /*preferred_element_type=*/convolution->shape().element_type(),
+          convolution->sparsity_config())
           .value();
   convolution->SetupDerivedInstruction(new_convolution);
   changed_ = true;
@@ -682,11 +688,11 @@ absl::Status ConvolutionVisitor::HandleConvolution(
 
 }  // namespace
 
-absl::StatusOr<bool> ConvolutionGroupConverter::Run(
+absl::StatusOr<bool> ConvolutionGroupConverter::RunImpl(
     HloModule* module,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
-  XLA_VLOG_LINES(
-      2, "ConvolutionGroupConverter::Run(), before:\n" + module->ToString());
+  XLA_VLOG_LINES(2, "ConvolutionGroupConverter::RunImpl(), before:\n" +
+                        module->ToString());
   bool changed = false;
   for (auto* comp : module->MakeNonfusionComputations(execution_threads)) {
     if (ConvolutionVisitor::Run(comp, should_expand_, is_cost_viable_,
@@ -696,7 +702,7 @@ absl::StatusOr<bool> ConvolutionGroupConverter::Run(
     }
   }
   XLA_VLOG_LINES(
-      2, "ConvolutionGroupConverter::Run(), after:\n" + module->ToString());
+      2, "ConvolutionGroupConverter::RunImpl(), after:\n" + module->ToString());
   return changed;
 }
 

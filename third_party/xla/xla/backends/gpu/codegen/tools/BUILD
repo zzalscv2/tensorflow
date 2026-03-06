@@ -2,6 +2,7 @@ load(
     "@local_config_rocm//rocm:build_defs.bzl",
     "if_rocm_is_configured",
 )
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//xla:py_strict.bzl", "py_strict_binary", "py_strict_library", "py_strict_test")
 load("//xla:xla.default.bzl", "xla_cc_binary")
 load(
@@ -14,6 +15,14 @@ package(
     licenses = ["notice"],
 )
 
+package_group(
+    name = "codegen_tests",
+    packages = [
+        "//xla/backends/gpu/codegen/emitters/tests",
+        "//xla/codegen/emitters/tests",
+    ],
+)
+
 cc_library(
     name = "test_lib",
     testonly = 1,
@@ -23,28 +32,12 @@ cc_library(
         "//xla:status_macros",
         "//xla/backends/gpu/codegen:fusions",
         "//xla/backends/gpu/codegen/emitters:emitter_base",
-        "//xla/backends/gpu/codegen/emitters/ir:xla_gpu",
         "//xla/hlo/ir:hlo",
-        "//xla/mlir_hlo",
         "//xla/service/gpu:gpu_device_info_for_tests",
         "//xla/service/gpu:hlo_fusion_analysis",
         "//xla/stream_executor:device_description",
-        "//xla/tools:hlo_module_loader",
-        "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings:string_view",
-        "@llvm-project//mlir:AffineDialect",
-        "@llvm-project//mlir:ArithDialect",
-        "@llvm-project//mlir:ComplexDialect",
-        "@llvm-project//mlir:DLTIDialect",
-        "@llvm-project//mlir:FuncDialect",
-        "@llvm-project//mlir:FuncExtensions",
-        "@llvm-project//mlir:GPUDialect",
         "@llvm-project//mlir:IR",
-        "@llvm-project//mlir:MathDialect",
-        "@llvm-project//mlir:MlirOptLib",
-        "@llvm-project//mlir:SCFDialect",
-        "@llvm-project//mlir:TensorDialect",
         "@llvm-project//mlir:VectorDialect",
     ],
 )
@@ -57,29 +50,43 @@ xla_cc_binary(
     # set linkopts in such a way that dynamic libraries are found, which are
     # symlinked from the lit_lib directory.
     linkopts = ["-Wl,-rpath,$$ORIGIN/../lit_lib"],
-    visibility = ["//xla/backends/gpu/codegen:__subpackages__"],
+    visibility = [":codegen_tests"],
     deps = [
         ":test_lib",
+        "//xla/codegen/tools:test_lib",
+        "//xla/hlo/analysis:symbolic_map",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
         "@llvm-project//llvm:Support",
-        "@local_tsl//tsl/platform:platform_port",
-        "@local_tsl//tsl/platform:statusor",
+        "@tsl//tsl/platform:platform_port",
+        "@tsl//tsl/platform:statusor",
     ],
 )
 
 xla_cc_binary(
-    name = "test_correctness",
+    name = "gpu_test_correctness",
     testonly = 1,
-    srcs = ["test_correctness.cc"],
+    srcs = ["gpu_test_correctness.cc"],
     # We want to use this tool for lit tests. Due to hermetic cuda, we need to
     # set linkopts in such a way that dynamic libraries are found, which are
     # symlinked from the lit_lib directory.
     linkopts = ["-Wl,-rpath,$$ORIGIN/../lit_lib"],
-    visibility = ["//xla/backends/gpu/codegen:__subpackages__"],
+    visibility = [":codegen_tests"],
     deps = [
         ":test_lib",
-        "@com_google_googletest//:gtest",
+        "//xla:debug_options_flags",
+        "//xla:error_spec",
+        "//xla:shape_util",
+        "//xla/codegen/tools:test_lib",
+        "//xla/hlo/analysis:indexing_analysis",
+        "//xla/hlo/analysis:indexing_test_utils",
+        "//xla/hlo/analysis:symbolic_map",
+        "//xla/service:gpu_plugin",
+        "//xla/service/gpu:hlo_fusion_analysis",
+        "//xla/tests:hlo_pjrt_interpreter_reference_mixin",
+        "//xla/tests:hlo_pjrt_test_base",
+        "//xla/tests:pjrt_gpu_client_registry",
+        "//xla/tsl/lib/core:status_test_util",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
@@ -87,20 +94,9 @@ xla_cc_binary(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest",
         "@llvm-project//llvm:Support",
-        "//xla:debug_options_flags",
-        "//xla:error_spec",
-        "//xla:shape_util",
-        # Tool doesn't need to run actual cross GPU collectives.
-        # Otherwise NCCL library should be linked like it's done for lit library when target is built with RBE.
-        "//xla/backends/gpu/collectives:gpu_collectives_stub",
-        "//xla/hlo/analysis:indexing_analysis",
-        "//xla/hlo/analysis:indexing_test_utils",
-        "//xla/service:gpu_plugin_without_collectives",
-        "//xla/service/gpu:hlo_fusion_analysis",
-        "//xla/tests:hlo_test_base",
-        "//xla/tsl/lib/core:status_test_util",
-        "@local_tsl//tsl/platform:statusor",
+        "@tsl//tsl/platform:statusor",
     ] + if_cuda_is_configured([
         "//xla/stream_executor/cuda:all_runtime",
     ]) + if_rocm_is_configured([
@@ -112,14 +108,14 @@ xla_cc_binary(
     name = "fusion_wrapper",
     testonly = 1,
     srcs = ["fusion_wrapper.cc"],
-    visibility = ["//xla/backends/gpu/codegen:__subpackages__"],
+    visibility = ["//visibility:private"],
     deps = [
-        ":test_lib",
+        "//xla/codegen/tools:test_lib",
         "//xla/tsl/platform:statusor",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
         "@llvm-project//llvm:Support",
-        "@local_tsl//tsl/platform:platform_port",
+        "@tsl//tsl/platform:platform_port",
     ],
 )
 

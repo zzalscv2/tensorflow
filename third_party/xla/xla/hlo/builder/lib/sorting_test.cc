@@ -22,22 +22,27 @@ limitations under the License.
 #include <random>
 #include <vector>
 
+#include <gtest/gtest.h>
 #include "absl/algorithm/container.h"
+#include "absl/types/span.h"
 #include "xla/array.h"
 #include "xla/array2d.h"
 #include "xla/error_spec.h"
 #include "xla/hlo/builder/xla_builder.h"
+#include "xla/literal.h"
 #include "xla/literal_util.h"
-#include "xla/tests/client_library_test_base.h"
-#include "xla/tests/test_macros.h"
+#include "xla/tests/client_library_test_runner_mixin.h"
+#include "xla/tests/hlo_pjrt_interpreter_reference_mixin.h"
+#include "xla/tests/hlo_pjrt_test_base.h"
 #include "xla/xla_data.pb.h"
 
 namespace xla {
 namespace {
 
-using SortingTest = ClientLibraryTestBase;
+using SortingTest = ClientLibraryTestRunnerMixin<
+    HloPjRtInterpreterReferenceMixin<HloPjRtTestBase>>;
 
-XLA_TEST_F(SortingTest, TopK3From8Values) {
+TEST_F(SortingTest, TopK3From8Values) {
   XlaBuilder builder(TestName());
   auto x =
       ConstantR1<float>(&builder, {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0});
@@ -45,7 +50,7 @@ XLA_TEST_F(SortingTest, TopK3From8Values) {
   ComputeAndCompareR1<float>(&builder, {7.0, 6.0, 5.0}, {});
 }
 
-XLA_TEST_F(SortingTest, TopK3From8Indices) {
+TEST_F(SortingTest, TopK3From8Indices) {
   XlaBuilder builder(TestName());
   auto x_rev =
       ConstantR1<float>(&builder, {7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0});
@@ -53,7 +58,7 @@ XLA_TEST_F(SortingTest, TopK3From8Indices) {
   ComputeAndCompareR1<int>(&builder, {0, 1, 2}, {});
 }
 
-XLA_TEST_F(SortingTest, TopK3From8Int16Indices) {
+TEST_F(SortingTest, TopK3From8Int16Indices) {
   XlaBuilder builder(TestName());
   auto x =
       ConstantR1<float>(&builder, {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0});
@@ -61,7 +66,7 @@ XLA_TEST_F(SortingTest, TopK3From8Int16Indices) {
   ComputeAndCompareR1<int16_t>(&builder, {7, 6, 5}, {});
 }
 
-XLA_TEST_F(SortingTest, TopKFullSortMinInt) {
+TEST_F(SortingTest, TopKFullSortMinInt) {
   XlaBuilder builder(TestName());
   auto x_rev = ConstantR1<int>(&builder, {std::numeric_limits<int>::min(),
                                           std::numeric_limits<int>::min() + 1,
@@ -70,7 +75,7 @@ XLA_TEST_F(SortingTest, TopKFullSortMinInt) {
   ComputeAndCompareR1<int>(&builder, {2, 1, 0}, {});
 }
 
-XLA_TEST_F(SortingTest, TopKFullSort) {
+TEST_F(SortingTest, TopKFullSort) {
   XlaBuilder builder(TestName());
   const int kSize = 16;
   std::mt19937 eng;
@@ -85,15 +90,16 @@ XLA_TEST_F(SortingTest, TopKFullSort) {
   ComputeAndCompareR1<float>(&builder, inputs, {});
 }
 
-XLA_TEST_F(SortingTest, TopKFullSortWithDuplicates) {
+TEST_F(SortingTest, TopKFullSortWithDuplicates) {
   XlaBuilder builder(TestName());
   XlaOp a;
-  auto a_data = CreateR1Parameter<int>({1, 1, 2, 2, 1}, 0, "a", &builder, &a);
+  Literal a_data =
+      CreateR1Parameter<int>({1, 1, 2, 2, 1}, 0, "a", &builder, &a);
   xla::GetTupleElement(xla::TopK(a, 5), 1);
-  ComputeAndCompareR1<int>(&builder, {2, 3, 0, 1, 4}, {a_data.get()});
+  ComputeAndCompareR1<int>(&builder, {2, 3, 0, 1, 4}, {&a_data});
 }
 
-XLA_TEST_F(SortingTest, TopK3From8Values2Partitions) {
+TEST_F(SortingTest, TopK3From8Values2Partitions) {
   XlaBuilder builder(TestName());
   auto x =
       ConstantR1<float>(&builder, {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0});
@@ -101,7 +107,7 @@ XLA_TEST_F(SortingTest, TopK3From8Values2Partitions) {
   ComputeAndCompareR1<float>(&builder, {7.0, 6.0, 5.0}, {});
 }
 
-XLA_TEST_F(SortingTest, TopK3From8Indices2Partitions) {
+TEST_F(SortingTest, TopK3From8Indices2Partitions) {
   XlaBuilder builder(TestName());
   auto x_rev =
       ConstantR1<float>(&builder, {7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0});
@@ -110,7 +116,7 @@ XLA_TEST_F(SortingTest, TopK3From8Indices2Partitions) {
   ComputeAndCompareR1<int>(&builder, {0, 1, 2}, {});
 }
 
-XLA_TEST_F(SortingTest, TopK3From8Values3Partitions) {
+TEST_F(SortingTest, TopK3From8Values3Partitions) {
   XlaBuilder builder(TestName());
   auto x =
       ConstantR1<float>(&builder, {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0});
@@ -118,7 +124,7 @@ XLA_TEST_F(SortingTest, TopK3From8Values3Partitions) {
   ComputeAndCompareR1<float>(&builder, {7.0, 6.0, 5.0}, {});
 }
 
-XLA_TEST_F(SortingTest, TopK3From8Indices3Partitions) {
+TEST_F(SortingTest, TopK3From8Indices3Partitions) {
   XlaBuilder builder(TestName());
   auto x_rev =
       ConstantR1<float>(&builder, {7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0});
@@ -127,7 +133,7 @@ XLA_TEST_F(SortingTest, TopK3From8Indices3Partitions) {
   ComputeAndCompareR1<int>(&builder, {0, 1, 2}, {});
 }
 
-XLA_TEST_F(SortingTest, TopK3From8Values5Partitions) {
+TEST_F(SortingTest, TopK3From8Values5Partitions) {
   XlaBuilder builder(TestName());
   auto x =
       ConstantR1<float>(&builder, {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0});
@@ -135,12 +141,11 @@ XLA_TEST_F(SortingTest, TopK3From8Values5Partitions) {
   ComputeAndCompareR1<float>(&builder, {7.0, 6.0, 5.0}, {});
 }
 
-XLA_TEST_F(SortingTest, DISABLED_TopKLargeInput) {
+TEST_F(SortingTest, DISABLED_TopKLargeInput) {
   XlaBuilder builder(TestName());
   Array<float> input({2, 1000000});
   input.FillRandom(1.0f, 2.0f);
-  auto x =
-      CreateConstantFromLiteral(LiteralUtil::CreateFromArray(input), &builder);
+  auto x = ConstantLiteral(&builder, LiteralUtil::CreateFromArray(input));
   Array2D<float> expected_array(2, 1000);
   expected_array.Fill(2.0f);
   xla::GetTupleElement(xla::TopK(x, 1000), 0);
@@ -148,7 +153,7 @@ XLA_TEST_F(SortingTest, DISABLED_TopKLargeInput) {
   ComputeAndCompareR2<float>(&builder, expected_array, {}, error_spec);
 }
 
-XLA_TEST_F(SortingTest, TopK3From8Indices5Partitions) {
+TEST_F(SortingTest, TopK3From8Indices5Partitions) {
   XlaBuilder builder(TestName());
   auto x_rev =
       ConstantR1<float>(&builder, {7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0});
@@ -157,7 +162,7 @@ XLA_TEST_F(SortingTest, TopK3From8Indices5Partitions) {
   ComputeAndCompareR1<int>(&builder, {0, 1, 2}, {});
 }
 
-XLA_TEST_F(SortingTest, TopK3From8Int16Indices5Partitions) {
+TEST_F(SortingTest, TopK3From8Int16Indices5Partitions) {
   XlaBuilder builder(TestName());
   auto x_rev =
       ConstantR1<float>(&builder, {7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0});
@@ -167,12 +172,13 @@ XLA_TEST_F(SortingTest, TopK3From8Int16Indices5Partitions) {
   ComputeAndCompareR1<int16_t>(&builder, {0, 1, 2}, {});
 }
 
-XLA_TEST_F(SortingTest, TopKFullSortWithDuplicates2Partitions) {
+TEST_F(SortingTest, TopKFullSortWithDuplicates2Partitions) {
   XlaBuilder builder(TestName());
   XlaOp a;
-  auto a_data = CreateR1Parameter<int>({1, 1, 2, 2, 1}, 0, "a", &builder, &a);
+  Literal a_data =
+      CreateR1Parameter<int>({1, 1, 2, 2, 1}, 0, "a", &builder, &a);
   xla::GetTupleElement(xla::TopKWithPartitions(a, 3, /*num_partitions=*/2), 1);
-  ComputeAndCompareR1<int>(&builder, {2, 3, 0}, {a_data.get()});
+  ComputeAndCompareR1<int>(&builder, {2, 3, 0}, {&a_data});
 }
 
 }  // namespace

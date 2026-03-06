@@ -44,11 +44,12 @@ limitations under the License.
 #include "xla/backends/cpu/codegen/target_machine_features.h"
 #include "xla/codegen/kernel_definition.h"
 #include "xla/codegen/kernel_spec.h"
-#include "xla/codegen/llvm_ir_kernel_source.h"
+#include "xla/codegen/llvm_kernel_source.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/runtime/work_group.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/cpu/backend_config.pb.h"
 #include "xla/service/cpu/ir_emitter.h"
@@ -56,7 +57,6 @@ limitations under the License.
 #include "xla/service/llvm_ir/llvm_util.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/stream_executor/launch_dim.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
@@ -132,7 +132,7 @@ ComputationKernelEmitter::ComputationKernelEmitter(
       buffer_assignment_(buffer_assignment),
       target_machine_(target_machine) {}
 
-absl::StatusOr<KernelDefinition>
+absl::StatusOr<ComputationKernelEmitter::KernelDefinition>
 ComputationKernelEmitter::EmitKernelDefinition() {
   VLOG(2) << "Emit Computation host kernel: " << instr_->name();
 
@@ -166,7 +166,8 @@ ComputationKernelEmitter::EmitKernelDefinition() {
                           std::vector<KernelApiIrBuilder::KernelParameter>(
                               arguments.begin(), arguments.end()),
                           std::vector<KernelApiIrBuilder::KernelParameter>(
-                              results.begin(), results.end())));
+                              results.begin(), results.end()),
+                          BuildModuleMemoryRegionName(name(), instr_)));
 
   llvm::IRBuilder<> ir_builder(*ctx);
   ir_builder.SetInsertPoint(
@@ -181,18 +182,18 @@ ComputationKernelEmitter::EmitKernelDefinition() {
       slice_to_buffer_table_index;
 
   int64_t buffer_table_index = 0;
-  for (const auto& [array, slice] : llvm::zip(
+  for (const auto& [array, arg] : llvm::zip(
            kernel_prototype.arguments, kernel_prototype.argument_buffers)) {
     int64_t index = buffer_table_index++;
-    slice_to_buffer_table_index[slice] = index;
+    slice_to_buffer_table_index[arg.slice] = index;
     llvm::Value* buffer_table_ptr = llvm_ir::EmitBufferIndexingGEP(
         buffer_table, ir_builder.getPtrTy(), index, &ir_builder);
     ir_builder.CreateStore(array.GetBasePointer(), buffer_table_ptr);
   }
-  for (const auto& [array, slice] :
+  for (const auto& [array, result] :
        llvm::zip(kernel_prototype.results, kernel_prototype.result_buffers)) {
     int64_t index = buffer_table_index++;
-    slice_to_buffer_table_index[slice] = index;
+    slice_to_buffer_table_index[result.slice] = index;
     llvm::Value* buffer_table_ptr = llvm_ir::EmitBufferIndexingGEP(
         buffer_table, ir_builder.getPtrTy(), index, &ir_builder);
     ir_builder.CreateStore(array.GetBasePointer(), buffer_table_ptr);
@@ -213,12 +214,18 @@ ComputationKernelEmitter::EmitKernelDefinition() {
                                     buffer_table, llvm_nullptr, llvm_nullptr};
   ir_builder.CreateCall(computation_function, args);
 
-  auto source = std::make_unique<LlvmIrKernelSource>(std::move(ctx),
-                                                     std::move(llvm_module));
+  LlvmKernelSource source(std::move(ctx), std::move(llvm_module));
 
-  KernelSpec spec(kernel_prototype.function->getName(), se::ThreadDim(),
-                  std::move(kernel_prototype.argument_buffers),
-                  std::move(kernel_prototype.result_buffers),
+  KernelSpec::Buffers kernel_arguments, kernel_results;
+  for (const auto& buffer : kernel_prototype.argument_buffers) {
+    kernel_arguments.push_back({buffer.slice, buffer.shape});
+  }
+  for (const auto& buffer : kernel_prototype.result_buffers) {
+    kernel_results.push_back({buffer.slice, buffer.shape});
+  }
+
+  KernelSpec spec(kernel_prototype.function->getName(), NumWorkGroups(),
+                  std::move(kernel_arguments), std::move(kernel_results),
                   std::move(kernel_prototype.invariant_arguments));
 
   return KernelDefinition(std::move(spec), std::move(source));

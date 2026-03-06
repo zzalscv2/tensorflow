@@ -31,6 +31,7 @@ limitations under the License.
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinDialect.h"
+#include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Types.h"
@@ -82,11 +83,11 @@ mlir::FailureOr<mlir::StringAttr> getAttrNameFromVifrtToIfrt(
             attr.getValue().getContext(),
             absl::StrCat(IfrtDialect::getDialectNamespace().str(), ".",
                          name_without_dialect.substr(dot_pos + 1)));
-      } else {
-        return mlir::failure();
       }
-    } else if (dialect->getNamespace() !=
-               mlir::BuiltinDialect::getDialectNamespace()) {
+      return mlir::failure();
+    }
+    if (dialect->getNamespace() !=
+        mlir::BuiltinDialect::getDialectNamespace()) {
       return mlir::failure();
     }
   }
@@ -115,6 +116,9 @@ mlir::Attribute convertGeneric(mlir::Attribute vifrt_attr,
     return IfrtDevicesAttr::get(attr.getContext(), attr.getIds());
   }
   if (auto attr = llvm::dyn_cast<VifrtShardingParamV1Attr>(vifrt_attr)) {
+    return IfrtShardingParamAttr::get(attr.getContext(), attr.getSharding());
+  }
+  if (auto attr = llvm::dyn_cast<VifrtShardingParamV2Attr>(vifrt_attr)) {
     return IfrtShardingParamAttr::get(attr.getContext(), attr.getSharding());
   }
   if (auto attr = llvm::dyn_cast<VifrtUnspecifiedShardingV1Attr>(vifrt_attr)) {
@@ -188,10 +192,9 @@ mlir::Attribute convertGeneric(mlir::Attribute vifrt_attr,
     // raw data. One should use `ArrayAttr` instead for such arrays.
     if (mlir::isa<mlir::IntegerType, mlir::FloatType>(attr.getElementType())) {
       return attr;
-    } else {
-      LLVM_DEBUG(llvm::dbgs() << "Failed to convert: " << vifrt_attr << '\n');
-      return {};
     }
+    LLVM_DEBUG(llvm::dbgs() << "Failed to convert: " << vifrt_attr << '\n');
+    return {};
   }
   if (auto attr = llvm::dyn_cast<mlir::DictionaryAttr>(vifrt_attr)) {
     llvm::SmallVector<mlir::NamedAttribute> ifrt_attrs;
@@ -407,9 +410,8 @@ class VifrtToIfrtOpConverter : public mlir::OpConversionPattern<VifrtOpTy> {
     mlir::ValueRange ifrt_operands = adaptor.getOperands();
 
     // Convert the IFRT op to a VIFRT equivalent op.
-    VifrtToIfrtOp<VifrtOpTy> ifrt_op =
-        rewriter.create<VifrtToIfrtOp<VifrtOpTy>>(vifrt_op.getLoc(), ifrt_types,
-                                                  ifrt_operands, ifrt_attrs);
+    VifrtToIfrtOp<VifrtOpTy> ifrt_op = VifrtToIfrtOp<VifrtOpTy>::create(
+        rewriter, vifrt_op.getLoc(), ifrt_types, ifrt_operands, ifrt_attrs);
 
     // Convert the VIFRT region types to IFRT region types.
     for (auto [vifrt_region, ifrt_region] :
@@ -417,8 +419,9 @@ class VifrtToIfrtOpConverter : public mlir::OpConversionPattern<VifrtOpTy> {
       rewriter.inlineRegionBefore(vifrt_region, ifrt_region, ifrt_region.end());
       if (mlir::failed(rewriter.convertRegionTypes(
               &ifrt_region, *this->getTypeConverter(),
-              /*entryConversion=*/nullptr)))
+              /*entryConversion=*/nullptr))) {
         return mlir::failure();
+      }
     }
     rewriter.replaceOp(vifrt_op, ifrt_op);
     return mlir::success();

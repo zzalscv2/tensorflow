@@ -1,6 +1,7 @@
 # Generates CUDA kernels using MLIR codegen.
 
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load(
     "//tensorflow:tensorflow.bzl",
     "if_cuda_or_rocm",
@@ -469,7 +470,7 @@ tf_cuda_cc_test(
         "@com_google_googletest//:gtest_main",
         "@eigen_archive//:eigen3",
         "@llvm-project//llvm:Support",
-        "@local_xla//xla/tsl/lib/core:status_test_util",
+        "@xla//xla/tsl/lib/core:status_test_util",
     ],
 )
 

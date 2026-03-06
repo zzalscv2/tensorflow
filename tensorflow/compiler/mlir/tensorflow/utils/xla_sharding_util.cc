@@ -52,7 +52,9 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_device.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h"
 #include "xla/hlo/ir/hlo_sharding.h"
+#include "xla/hlo/ir/tile_assignment.h"
 #include "xla/hlo/parser/hlo_parser.h"
+#include "xla/hlo/utils/hlo_sharding_util.h"
 #include "xla/tsl/lib/math/math_util.h"
 #include "xla/xla_data.pb.h"
 #include "tensorflow/core/framework/tensor_shape.h"
@@ -92,22 +94,23 @@ mlir::TF::SliceOp CreateSliceOp(mlir::OpBuilder* builder,
   auto start_position_type =
       mlir::RankedTensorType::get(shape.dims(), builder->getIntegerType(64));
 
-  auto start_position_op = builder->create<mlir::TF::ConstOp>(
-      input.getLoc(), mlir::DenseIntElementsAttr::get(start_position_type,
-                                                      slice_start_position));
+  auto start_position_op =
+      mlir::TF::ConstOp::create(*builder, input.getLoc(),
+                                mlir::DenseIntElementsAttr::get(
+                                    start_position_type, slice_start_position));
 
-  auto slice_size_op = builder->create<mlir::TF::ConstOp>(
-      input.getLoc(), mlir::DenseIntElementsAttr::get(
-                          mlir::RankedTensorType::get(
-                              shape.dims(), builder->getIntegerType(64)),
-                          slice_size));
+  auto slice_size_op = mlir::TF::ConstOp::create(
+      *builder, input.getLoc(),
+      mlir::DenseIntElementsAttr::get(
+          mlir::RankedTensorType::get(shape.dims(),
+                                      builder->getIntegerType(64)),
+          slice_size));
 
   auto slice_result_type =
       mlir::RankedTensorType::get(slice_size, getElementTypeOrSelf(input));
 
-  return builder->create<mlir::TF::SliceOp>(input.getLoc(), slice_result_type,
-                                            input, start_position_op,
-                                            slice_size_op);
+  return mlir::TF::SliceOp::create(*builder, input.getLoc(), slice_result_type,
+                                   input, start_position_op, slice_size_op);
 }
 
 mlir::TF::PadOp CreatePadOp(mlir::OpBuilder* builder,
@@ -133,15 +136,15 @@ mlir::TF::PadOp CreatePadOp(mlir::OpBuilder* builder,
   auto padding_type =
       mlir::RankedTensorType::get({num_dims, 2}, builder->getIntegerType(64));
   auto paddings = mlir::DenseIntElementsAttr::get(padding_type, padding_values);
-  auto paddings_value = builder->create<mlir::TF::ConstOp>(location, paddings);
+  auto paddings_value = mlir::TF::ConstOp::create(*builder, location, paddings);
   mlir::SmallVector<int64_t, 4> expand_shape(padded_shape.begin(),
                                              padded_shape.end());
 
   auto expand_result_type =
       mlir::RankedTensorType::get(expand_shape, input_type.getElementType());
 
-  return builder->create<mlir::TF::PadOp>(location, expand_result_type,
-                                          src_input, paddings_value);
+  return mlir::TF::PadOp::create(*builder, location, expand_result_type,
+                                 src_input, paddings_value);
 }
 
 // Creates a tf::SplitOp that splits 'src_input' into 'num_splits' ways
@@ -196,8 +199,8 @@ mlir::LogicalResult CreateSplitOp(
     output_type = input_type;
   }
 
-  auto split_dimension_op = builder->create<mlir::TF::ConstOp>(
-      location, split_dim_type, split_dimension_attr);
+  auto split_dimension_op = mlir::TF::ConstOp::create(
+      *builder, location, split_dim_type, split_dimension_attr);
   if (is_ici_weight_dist_spmd) {
     split_dimension_op->setAttr(kICIWeightDistributionMlirBridgeMarker,
                                 builder->getBoolAttr(true));
@@ -205,8 +208,9 @@ mlir::LogicalResult CreateSplitOp(
 
   // Creates a split op that splits |src_input| along |split_dimension|.
   llvm::SmallVector<mlir::Type, 4> output_types(num_split, output_type);
-  *split_op = builder->create<mlir::TF::SplitOp>(
-      location, output_types, split_dimension_op.getOutput(), src_input);
+  *split_op =
+      mlir::TF::SplitOp::create(*builder, location, output_types,
+                                split_dimension_op.getOutput(), src_input);
   (*split_op)->setAttr(
       kNumSplitAttr,
       builder->getIntegerAttr(builder->getIntegerType(32), num_split));
@@ -228,8 +232,8 @@ mlir::TF::ConcatOp CreateConcatOp(const int concat_dimension,
       mlir::RankedTensorType::get({}, builder->getIntegerType(32));
   auto concat_dimension_attr =
       mlir::DenseElementsAttr::get(concat_dim_type, concat_dimension);
-  auto concat_dimension_op = builder->create<mlir::TF::ConstOp>(
-      location, concat_dim_type, concat_dimension_attr);
+  auto concat_dimension_op = mlir::TF::ConstOp::create(
+      *builder, location, concat_dim_type, concat_dimension_attr);
 
   // Correctly set output shapes of concat op output if output shape is
   // statically known. Since the shape of TPUExecute op must be the same
@@ -251,8 +255,8 @@ mlir::TF::ConcatOp CreateConcatOp(const int concat_dimension,
     output_type = input_type;
   }
 
-  return builder->create<mlir::TF::ConcatOp>(
-      location, output_type, concat_dimension_op.getOutput(), inputs);
+  return mlir::TF::ConcatOp::create(*builder, location, output_type,
+                                    concat_dimension_op.getOutput(), inputs);
 }
 
 mlir::TF::XlaConcatNDOp CreateXlaConcatNDOp(
@@ -290,9 +294,9 @@ mlir::TF::XlaConcatNDOp CreateXlaConcatNDOp(
     output_type = input_slice_type;
   }
 
-  auto op = builder.create<mlir::TF::XlaConcatNDOp>(
-      location, output_type, inputs, builder.getI64ArrayAttr(num_concats),
-      builder.getI64ArrayAttr(paddings));
+  auto op = mlir::TF::XlaConcatNDOp::create(
+      builder, location, output_type, inputs,
+      builder.getI64ArrayAttr(num_concats), builder.getI64ArrayAttr(paddings));
   return op;
 }
 
@@ -336,9 +340,9 @@ mlir::LogicalResult CreateXlaSplitNDOp(const mlir::Location& location,
           << absl::StrJoin(input_shape, ",")
           << ", Padding: " << absl::StrJoin(paddings, ",");
 
-  *xla_split_op = builder->create<mlir::TF::XlaSplitNDOp>(
-      location, output_types, src_input, builder->getI64ArrayAttr(num_splits),
-      builder->getI64ArrayAttr(paddings));
+  *xla_split_op = mlir::TF::XlaSplitNDOp::create(
+      *builder, location, output_types, src_input,
+      builder->getI64ArrayAttr(num_splits), builder->getI64ArrayAttr(paddings));
   if (is_ici_weight_dist_spmd) {
     (*xla_split_op)
         ->setAttr(kICIWeightDistributionMlirBridgeMarker,
@@ -645,6 +649,7 @@ mlir::LogicalResult ExtractInputsForLogicalDevices(
             .failed()) {
       return cluster_func.emitError("incorrect sharding format for inputs");
     }
+    xla::hlo_sharding_util::ConvertV2ToV1Sharding(sharding);
 
     const auto input_sharding_type = sharding.type();
     auto tiled_sharding_mismatched = [&](int tiled_input_size) {
@@ -758,6 +763,7 @@ mlir::LogicalResult ParseAndValidateOutputSharding(
             .failed()) {
       return cluster_func.emitError("incorrect sharding format for outputs");
     }
+    xla::hlo_sharding_util::ConvertV2ToV1Sharding(sharding);
 
     if (sharding.type() == xla::OpSharding::OTHER &&
         sharding.tile_assignment_devices_size() != num_cores_per_replica)
@@ -1287,6 +1293,63 @@ llvm::SmallVector<llvm::SmallVector<int64_t, 4>, 4> GetMetadataArgumentMapping(
   }
 
   return input_mappings;
+}
+
+namespace {
+mlir::LogicalResult VerifyShardingEquivalent(mlir::Attribute sharding_attr1,
+                                             mlir::Attribute sharding_attr2) {
+  xla::OpSharding sharding_proto1;
+  if (tensorflow::DecodeShardingAttribute(sharding_attr1, sharding_proto1)
+          .failed()) {
+    return mlir::failure();
+  }
+  xla::OpSharding sharding_proto2;
+  if (tensorflow::DecodeShardingAttribute(sharding_attr2, sharding_proto2)
+          .failed()) {
+    return mlir::failure();
+  }
+
+  return tensorflow::VerifyShardingEquivalent(sharding_proto1, sharding_proto2);
+}
+}  // namespace
+
+mlir::LogicalResult VerifyShardingEquivalent(
+    const xla::OpSharding& sharding_proto1,
+    const xla::OpSharding& sharding_proto2) {
+  absl::StatusOr<xla::HloSharding> sharding1 =
+      xla::HloSharding::FromProto(sharding_proto1);
+  if (!sharding1.ok()) {
+    return mlir::failure();
+  }
+  absl::StatusOr<xla::HloSharding> sharding2 =
+      xla::HloSharding::FromProto(sharding_proto2);
+  if (!sharding2.ok()) {
+    return mlir::failure();
+  }
+
+  if (*sharding1 == *sharding2) {
+    return mlir::success();
+  }
+
+  return mlir::failure();
+}
+
+absl::StatusOr<mlir::StringAttr> GetXlaShardingAttrFromShardingOp(
+    mlir::TF::XlaShardingOp sharding) {
+  if (!sharding.get_XlaShardingV2Attr()) {
+    return sharding.get_XlaShardingAttr();
+  }
+
+  if (sharding.get_XlaShardingAttr() &&
+      VerifyShardingEquivalent(sharding.get_XlaShardingV2Attr(),
+                               sharding.get_XlaShardingAttr())
+          .failed()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("_XlaShardingV2 is not equivalent to _XlaSharding: ",
+                     sharding.get_XlaShardingV2().value().str(), " vs ",
+                     sharding.get_XlaSharding().value().str()));
+  }
+  return sharding.get_XlaShardingV2Attr();
 }
 
 }  // namespace tensorflow

@@ -14,8 +14,10 @@ limitations under the License.
 ==============================================================================*/
 
 #include "llvm/ADT/STLExtras.h"
+#include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/OpDefinition.h"  // IWYU pragma: keep
 #include "mlir/IR/Types.h"
 #include "mlir/Support/LLVM.h"
@@ -27,7 +29,9 @@ static mlir::ParseResult parseI64ArrayAttr(mlir::AsmParser& parser,
                                            mlir::DenseI64ArrayAttr& array) {
   array = mlir::dyn_cast_or_null<mlir::DenseI64ArrayAttr>(
       mlir::DenseI64ArrayAttr::parse(parser, mlir::Type{}));
-  if (!array) return mlir::failure();
+  if (!array) {
+    return mlir::failure();
+  }
   return mlir::success();
 }
 
@@ -54,13 +58,15 @@ ParseResult ParseOptionalSwizzleMode(mlir::AsmParser& parser,
 
 Attribute TmaDescriptorAttr::parse(mlir::AsmParser& parser, mlir::Type) {
   int element_byte_size;
-  DenseI64ArrayAttr global_shape, block_shape, layout;
+  DenseI64ArrayAttr global_shape, tile_shape, tile_strides, layout;
   SwizzleModeAttr swizzle_mode = nullptr;
 
   if (parser.parseLess() || parser.parseKeyword("global_shape") ||
       parser.parseEqual() || parseI64ArrayAttr(parser, global_shape) ||
-      parser.parseComma() || parser.parseKeyword("block_shape") ||
-      parser.parseEqual() || parseI64ArrayAttr(parser, block_shape) ||
+      parser.parseComma() || parser.parseKeyword("tile_shape") ||
+      parser.parseEqual() || parseI64ArrayAttr(parser, tile_shape) ||
+      parser.parseComma() || parser.parseKeyword("tile_strides") ||
+      parser.parseEqual() || parseI64ArrayAttr(parser, tile_strides) ||
       parser.parseComma() || parser.parseKeyword("layout") ||
       parser.parseEqual() || parseI64ArrayAttr(parser, layout) ||
       parser.parseComma() || parser.parseKeyword("element_byte_size") ||
@@ -70,15 +76,18 @@ Attribute TmaDescriptorAttr::parse(mlir::AsmParser& parser, mlir::Type) {
   }
 
   return TmaDescriptorAttr::get(parser.getContext(), global_shape.asArrayRef(),
-                                block_shape.asArrayRef(), layout.asArrayRef(),
+                                tile_shape.asArrayRef(),
+                                tile_strides.asArrayRef(), layout.asArrayRef(),
                                 element_byte_size, swizzle_mode);
 }
 
 void TmaDescriptorAttr::print(mlir::AsmPrinter& printer) const {
   printer << "<global_shape = [";
   llvm::interleaveComma(getGlobalShape(), printer);
-  printer << "], block_shape = [";
-  llvm::interleaveComma(getBlockShape(), printer);
+  printer << "], tile_shape = [";
+  llvm::interleaveComma(getTileShape(), printer);
+  printer << "], tile_strides = [";
+  llvm::interleaveComma(getTileStrides(), printer);
   printer << "], layout = [";
   llvm::interleaveComma(getLayout(), printer);
   printer << "], element_byte_size = " << getElementByteSize();

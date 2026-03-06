@@ -36,13 +36,13 @@ absl::StatusOr<std::optional<Shape>> MaybeInferShape(
       return ShapeInference::InferDotOpShape(
           instruction->operand(0)->shape(), instruction->operand(1)->shape(),
           instruction->dot_dimension_numbers(),
-          /*preferred_element_type=*/std::nullopt,
-          Cast<HloDotInstruction>(instruction)->sparsity());
+          /*preferred_element_type=*/std::nullopt);
     case HloOpcode::kConvolution:
       return ShapeInference::InferConvolveShape(
           instruction->operand(0)->shape(), instruction->operand(1)->shape(),
           instruction->feature_group_count(), instruction->batch_group_count(),
           instruction->window(), instruction->convolution_dimension_numbers(),
+          instruction->sparsity_config(),
           /*preferred_element_type=*/std::nullopt);
     default:
       return std::optional<Shape>(std::nullopt);

@@ -1,6 +1,7 @@
 # Description:
 #   Benchmark utility that can run on desktop and Android.
 
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load(
     "//tensorflow:tensorflow.bzl",
     "tf_cc_binary",
@@ -44,7 +45,8 @@ cc_library(
         "//tensorflow/core/platform:numbers",
         "//tensorflow/core/util:stats_calculator_portable",
         "@com_google_absl//absl/status",
-        "@local_xla//xla/tsl/platform:status",
+        "@com_google_absl//absl/strings",
+        "@xla//xla/tsl/platform:status",
     ],
 )
 

@@ -28,11 +28,8 @@ limitations under the License.
 #include "absl/synchronization/mutex.h"
 #include "llvm/IR/Module.h"
 #include "xla/autotune_results.pb.h"
-#include "xla/hlo/analysis/hlo_dataflow_analysis.h"
 #include "xla/hlo/ir/hlo_module.h"
-#include "xla/hlo/pass/hlo_pass_pipeline.h"
-#include "xla/pjrt/distributed/key_value_store_interface.h"
-#include "xla/service/gpu/autotuning/autotuner_util.h"
+#include "xla/service/gpu/alias_info.h"
 #include "xla/service/gpu/gpu_compiler.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/hlo_module_config.h"
@@ -56,35 +53,22 @@ class NVPTXCompiler : public GpuCompiler {
   explicit NVPTXCompiler();
 
   absl::Status OptimizeHloConvolutionCanonicalization(
-      HloModule* hlo_module, se::GpuComputeCapability gpu_version,
+      HloModule* hlo_module, const se::GpuComputeCapability& gpu_version,
       se::dnn::VersionInfo dnn_version,
-      const se::SemanticVersion& toolkit_version) override;
+      const se::SemanticVersion& toolkit_version,
+      CompilationStats* compilation_stats) override;
 
   absl::Status OptimizeHloPostLayoutAssignment(
       HloModule* hlo_module, se::StreamExecutor* stream_exec,
-      const CompileOptions& options, const TargetConfig& gpu_target_config,
-      tsl::thread::ThreadPool* thread_pool) override;
-
-  bool RequiresCollectiveScheduleLinearizer(
-      const HloModule* module, se::StreamExecutor* stream_exec) override;
-
-  absl::Status AddConvAndGemmAutotuningPasses(
-      HloPassPipeline* pipeline, const se::GpuComputeCapability& gpu_version,
-      const CompileOptions& options, HloModule* hlo_module,
-      AutotuneConfig& autotune_config,
-      tsl::thread::ThreadPool* thread_pool) override;
-
-  absl::Status AddGemmFusionAutotuningPasses(
-      HloPassPipeline* pipeline, HloModule* hlo_module,
-      AutotuneConfig& autotune_config, tsl::thread::ThreadPool* thread_pool,
-      const MultiProcessKeyValueStore& key_value_store,
-      const se::SemanticVersion& toolkit_version) override;
+      const CompileOptions& options, const GpuTargetConfig& gpu_target_config,
+      const GpuAliasInfo* alias_info, tsl::thread::ThreadPool* thread_pool,
+      CompilationStats* compilation_stats) override;
 
   absl::Status RunCudnnCompilerPasses(HloModule* module,
                                       se::StreamExecutor* stream_exec,
                                       BinaryMap* dnn_compiled_graphs) override;
 
-  HloDataflowAnalysis::CanShareBuffer GetCanShareBuffer(
+  std::unique_ptr<GpuAliasInfo> GetAliasInfo(
       const se::DeviceDescription& device_description) const override;
 
   absl::StatusOr<BackendCompileResult> CompileTargetBinary(
@@ -100,7 +84,6 @@ class NVPTXCompiler : public GpuCompiler {
  private:
   absl::StatusOr<std::vector<uint8_t>> LinkModules(
       const stream_executor::DeviceDescription& device_description,
-      se::StreamExecutor* stream_exec,
       std::vector<std::vector<uint8_t>> modules,
       const DebugOptions& debug_options) override;
 

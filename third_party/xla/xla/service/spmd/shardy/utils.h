@@ -23,16 +23,21 @@ limitations under the License.
 #include "absl/log/check.h"
 #include "absl/strings/escaping.h"
 #include "absl/strings/string_view.h"
+#include "absl/types/span.h"
 #include "mlir/AsmParser/AsmParser.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/TypeRange.h"
 #include "mlir/Support/LLVM.h"
+#include "shardy/dialect/sdy/ir/dialect.h"
 #include "stablehlo/dialect/StablehloOps.h"
+#include "xla/hlo/ir/hlo_sharding.h"
+#include "xla/hlo/ir/mesh_and_axis.h"
 
 namespace xla {
 namespace sdy {
@@ -76,6 +81,19 @@ bool hasFrontendAttr(mlir::Operation* op, mlir::StringRef key);
 bool hasKey(mlir::DictionaryAttr dictAttr, mlir::StringRef key);
 
 void loadAllRequiredDialects(mlir::MLIRContext* context);
+
+// Adjusts the input sharding based on allowSpmdShardingPropagationToParameters
+// flag.
+void adjustInputSharding(
+    mlir::func::FuncOp func, int idx, mlir::sdy::TensorShardingAttr sharding,
+    int64_t rank,
+    absl::Span<const bool> allowSpmdShardingPropagationToParameters);
+
+// Adjusts the output sharding based on allowSpmdShardingPropagationToOutput
+// flag.
+void adjustOutputSharding(
+    mlir::func::FuncOp func, int idx, mlir::sdy::TensorShardingAttr sharding,
+    int64_t rank, absl::Span<const bool> allowSpmdShardingPropagationToOutput);
 
 // Parses `escapedValue` to an attribute of type `AttrTy`.
 template <typename AttrTy>
@@ -129,6 +147,42 @@ bool isPythonCallbackCustomCall(mlir::stablehlo::CustomCallOp op);
 std::string duplicateShardingsAtIndices(
     mlir::StringRef shardingsFrontendAttr,
     const llvm::BitVector& indicesToDuplicate);
+
+// Returns true if the module has at least one GSPMD attribute or op, like an
+// `mhlo.sharding` attribute or `Sharding` custom call.
+// TODO(b/420837831): delete this once we don't fall back to GSPMD.
+bool hasGspmdAttrsOrOps(mlir::ModuleOp module);
+
+// Check if the module has any sort of Shardy mesh:
+// - `mesh`
+// - `maximal_mesh_{X}`
+// - `empty_mesh`
+// TODO(b/420837831): delete this once we don't fall back to GSPMD.
+bool hasShardyMesh(mlir::ModuleOp module);
+
+// Returns the func result shardings of `funcOp`, with fully-replicated
+// shardings for empty shardings on `funcOp`, by using the ranks from `callOp`.
+mlir::sdy::TensorShardingPerValueAttr getFuncResultShardings(
+    mlir::func::CallOp callOp, mlir::func::FuncOp funcOp,
+    const mlir::SymbolTable& symbolTable);
+
+// Converts an XLA Mesh to an SDY MeshAttr.
+mlir::sdy::MeshAttr toSdyMeshAttr(const Mesh& mesh, mlir::MLIRContext* context);
+
+// Converts an XLA AxisRef to an SDY AxisRefAttr.
+mlir::sdy::AxisRefAttr toSdyAxisRefAttr(const AxisRef& axisRef,
+                                        const Mesh& mesh,
+                                        mlir::MLIRContext* context);
+
+// Converts a non-tuple XLA HloSharding to an SDY TensorShardingAttr.
+mlir::sdy::TensorShardingAttr convertToSdyShardingAttr(
+    const HloSharding& hloSharding, mlir::Type type,
+    mlir::MLIRContext* context);
+
+// Converts a tuple XLA HloSharding to an SDY TensorShardingPerValueAttr.
+mlir::sdy::TensorShardingPerValueAttr convertToSdySharding(
+    const HloSharding& hloSharding, mlir::TypeRange types,
+    mlir::MLIRContext* context);
 
 }  // namespace sdy
 }  // namespace xla

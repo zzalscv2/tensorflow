@@ -55,19 +55,21 @@ using BinaryMap = absl::flat_hash_map<std::string, std::string>;
 
 // If a dimensions is smaller than this, untiled transposition may be more
 // efficient.
-inline constexpr int64_t kMinDimensionToTransposeTiled = 4;
-// If the product of the dimensions to be swapped is larger than
+inline constexpr int64_t kMinDimensionToTransposeTiled = 16;
+// But if both swap dimensions are larger than 'kMinDimensionToTransposeTiled2',
+// and the product of the dimensions to be swapped is larger than
 // 'kMinTotalDimensionsToTransposeTiled', tiled transposition may be more
-// efficient. See go/xla-transpose-emitter-performance-analysis.
-inline constexpr int64_t kMinTotalDimensionsToTransposeTiled = 16 * 16;
+// efficient.
+inline constexpr int64_t kMinDimensionToTransposeTiled2 = 8;
+inline constexpr int64_t kMinTotalDimensionsToTransposeTiled = 64 * 128;
 // As the amount of shared memory is limited, we need to make sure that we don't
 // detect 102 transposes that would require too much bytes for the most minor
 // dimension.
 inline constexpr int64_t kMaxBitsInMostMinorDimension = 8 * 8;
 
-// Matrix multiplication before the rewrite.
-bool IsMatrixMultiplication(const HloInstruction& dot);
-bool IsMatrixVectorMultiplication(const HloInstruction& dot);
+// Returns true if the given dot is supported by cuBLAS.
+absl::StatusOr<bool> IsCublasSupportedMatMul(
+    const HloInstruction& dot, bool allow_matrix_vector_multiplication);
 
 inline constexpr int64_t WarpSize(
     const se::DeviceDescription& gpu_device_info) {
@@ -83,6 +85,10 @@ inline constexpr absl::string_view kCustomFusionKind = "__custom_fusion";
 // kTritonGemmFusionKind.
 inline constexpr absl::string_view kTritonFusionKind = "__triton";
 
+// Used for fusions that codegen a collective.
+inline constexpr absl::string_view kTritonCollectiveFusionKind =
+    "__triton_collective";
+
 // Fusions that use Triton have FusionBackendConfig.kind equal to this string.
 inline constexpr absl::string_view kTritonGemmFusionKind = "__triton_gemm";
 
@@ -91,6 +97,7 @@ inline constexpr absl::string_view kTritonGemmFusionKind = "__triton_gemm";
 inline constexpr absl::string_view kTritonNestedGemmFusionKind =
     "__triton_nested_gemm_fusion";
 
+// Fusions that use Triton have FusionBackendConfig.kind equal to this string.
 inline constexpr absl::string_view kCuDnnFusionKind = "__cudnn$fusion";
 
 // Fusions that can be emitted using a dynamic memcpy. A dynamic memcpy depends
@@ -132,33 +139,23 @@ std::optional<std::string> GetCustomFusionConfigName(
 // fusion. This is determined by checking the name of custom fusion config.
 bool IsDynamicSliceFusion(const HloInstruction* instr);
 
-// Returns the bitwidth of the given primitive type. Unfortunately,
-// primitive_util::BitWidth(PRED) return 1 instead of 8.
-int GetBitwidth(PrimitiveType type);
-
-// Returns true if the given instruction is a dynamic memcpy fusion. This
-// function only checks the fusion kind, which is populated by the
-// FusionDispatch pipeline.
-bool IsDynamicMemcpyFusion(const HloInstruction* instr);
-
-// Returns true if `hlo` will be implemented as a call to a cuSolver routine.
-//
-// This returns true if `hlo` is a CustomCall HLO with a call target equal to
-// one of the kCusolver... constants, but returns *false* for HLOs with
-// say, a kCholesky opcode.
-bool IsCustomCallToCusolver(const HloInstruction& hlo);
-
 // Returns true if `hlo` will be implemented as a call to a TopK routine.
 bool IsCustomCallToTopK(const HloInstruction& hlo);
 
-// Cholesky decomposition. Takes a (batched) matrix as input, and returns a
-// tuple of (result, workspace, info), where result is the result of the
-// Cholesky decomposition, workspace is scratch space for cuSolver, and info
-// is a success/failure code per batch element.
-extern const char* const kCusolverCholeskyCallTarget;
+// Returns true if `hlo` will be implmented as a call to a custom PTX kernel
+// implementation.
+bool IsCustomCallToPtxKernel(const HloInstruction& hlo);
 
-// Returns true if `instr` is a non-strided slice.
-bool IsSliceWithUnitStrides(const HloInstruction* instr);
+// Returns true if `hlo` will be implemented as a call to a Mosaic GPU kernel
+// with nvshmem.
+bool IsMosaicWithNvshmem(const HloInstruction& hlo);
+
+// Returns true if `hlo` will be implemented as a call to a Mosaic GPU kernel
+// with multimem.
+bool IsMosaicWithMultimem(const HloInstruction& hlo);
+
+// Returns true if instruction is a Mosaic GPU collective instruction.
+bool IsCollectiveMosaicGpuInstruction(const HloInstruction& hlo);
 
 // Returns true if `instr` is a slice (or dynamic slice) instruction and
 // operates on a contiguous slice of the input buffer.
@@ -172,27 +169,6 @@ absl::StatusOr<BufferAllocation::Slice> GetAllocationSlice(
     const BufferAssignment& buffer_assignment, const HloInstruction* instr,
     const ShapeIndex& index);
 
-// Returns whether the fusion represented by 'fusion_adaptor' can be emitted
-// with the dynamic update slice in-place emitter. If 'fusion_adaptor'
-// represents a single fusion computation, 'fusion' should provide the fusion
-// instruction corresponding to that fusion computation. 'get_allocation_slice'
-// is a callback for getting the allocated buffer slice, given an instruction
-// and a shape index. This is ignored in case 'fusion' is a nullptr.
-absl::StatusOr<bool> CanEmitFusedDynamicUpdateSliceInPlaceForGpu(
-    const HloFusionAdaptor& fusion_adaptor,
-    std::function<absl::StatusOr<BufferAllocation::Slice>(
-        const HloInstruction* instr, const ShapeIndex& index)>
-        get_allocation_slice,
-    const HloInstruction* fusion = nullptr);
-
-// Returns the dynamic-update-slice instructions defining the results of a
-// fusion node. A dynamic slice update is said to be "defining" of a result if
-// that result is the output of a dynamic slice update, or if that result is the
-// output of a bitcast of a dynamic slice update---since such bitcast may be
-// handled as a no-op.
-std::vector<HloInstructionAdaptor> GetOutputDefiningDynamicUpdateSlices(
-    absl::Span<HloInstructionAdaptor const> roots);
-
 // Returns the first hero instruction reachable from `instr` as root. Hero
 // instruction can be in a different computation if the parent HloFusionAdaptor
 // is a producer-consumer fusion.
@@ -200,6 +176,10 @@ HloInstructionAdaptor FindNonTrivialHero(const HloInstructionAdaptor& instr);
 
 // Same as above, but fusion is the parent computation of the hlo instruction.
 const HloInstruction& FindNonTrivialHero(const HloInstruction& instr);
+
+// Returns the bitwidth of the given primitive type. Unfortunately,
+// primitive_util::BitWidth(PRED) return 1 instead of 8.
+int GetBitwidth(PrimitiveType type);
 
 /// Description of how to emit a given transposition.
 struct TransposeDescription {
@@ -210,6 +190,7 @@ struct TransposeDescription {
   absl::InlinedVector<int64_t, 3> dimensions;
 
   // Permutations of normalized transpose dimensions.
+  // Normalized means that permutation[i] + 1 != permutation[i + 1].
   absl::InlinedVector<int64_t, 3> permutation;
 
   // Required amount of shared memory in bytes.
@@ -251,13 +232,19 @@ std::optional<TransposeDescription> GetDescriptionForTiledTransposeEmitter(
 // 3. <8x2x32x7x6> -> <6x32x2x7x8> becomes <8x2x32x7x6x1> -> <6x32x2x7x8x1>.
 
 // TODO(b/370690811): Unify this with TransposeDescription.
-struct TransposeSpec {
-  PrimitiveType elem_type() const { return input_shape().element_type(); }
+struct PackedTransposeDescription {
+  explicit PackedTransposeDescription(const TransposeDescription& description);
 
-  const Shape& input_shape() const { return transpose->operand(0)->shape(); }
-  const Shape& output_shape() const { return transpose->shape(); }
+  PrimitiveType elem_type() const {
+    return original_input_shape().element_type();
+  }
 
-  int64_t rank() const { return input_shape().dimensions().size(); }
+  const Shape& original_input_shape() const {
+    return transpose->operand(0)->shape();
+  }
+  const Shape& original_output_shape() const { return transpose->shape(); }
+
+  int64_t rank() const { return original_input_shape().dimensions().size(); }
   int64_t canonical_rank() const { return canonical_input_shape.size(); }
 
   int64_t dim_A() const { return canonical_input_shape[dim_A_id()]; }
@@ -291,17 +278,12 @@ struct TransposeSpec {
   llvm::SmallVector<int64_t, 3> canonical_input_shape;
 };
 
-TransposeSpec GetTransposeSpec(const HloTransposeInstruction* transpose);
+// Returns true if the given transpose can be emitted using the packed emitter.
+bool CanEmitPackedTranspose(const TransposeDescription& desc);
 
 // Returns the default tile sizes for the packed transpose emitter.
 absl::StatusOr<absl::InlinedVector<int64_t, 3>> GetPackedTransposeTileSizes(
-    const TransposeSpec& spec);
-
-// Checks if the instruction is elementwise.
-bool IsIntermediate(const HloInstruction* instr, int allowed_operand_count = 1);
-
-// Log the given module if the VLOG level is >= level.
-void VLogModule(int level, const llvm::Module& module);
+    const PackedTransposeDescription& spec);
 
 // Verify the given module, and crash if it failed.
 void VerifyModule(const llvm::Module& module);

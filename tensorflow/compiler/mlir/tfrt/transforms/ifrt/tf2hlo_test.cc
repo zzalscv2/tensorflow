@@ -37,8 +37,9 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/tensorflow/dialect_registration.h"
 #include "tensorflow/compiler/mlir/tfrt/transforms/ifrt/ifrt_types.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
-#include "xla/pjrt/gpu/se_gpu_pjrt_client.h"
-#include "xla/pjrt/pjrt_client.h"
+#include "xla/backends/cpu/target_machine_options.h"
+#include "xla/debug_options_flags.h"
+#include "xla/layout.h"
 #include "xla/pjrt/pjrt_compiler.h"
 #include "xla/pjrt/plugin/xla_cpu/cpu_topology_description.h"
 #include "xla/python/ifrt/client.h"
@@ -46,7 +47,10 @@ limitations under the License.
 #include "xla/python/ifrt/test_util.h"
 #include "xla/python/pjrt_ifrt/pjrt_topology.h"
 #include "xla/service/computation_placer.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
 #include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/platform/statusor.h"
 #include "tensorflow/core/platform/resource_loader.h"
 #include "tensorflow/core/platform/test.h"
 #include "tsl/platform/protobuf.h"
@@ -57,7 +61,6 @@ namespace {
 using ::testing::Eq;
 using ::testing::HasSubstr;
 using ::testing::Ne;
-using tsl::testing::StatusIs;
 
 // TODO(b/229726259): Make EqualsProto available in OSS
 class ProtoStringMatcher {
@@ -120,8 +123,8 @@ TEST_F(Tf2HloTest, Empty) {
 
   const xla::CpuTopologyDescription cpu_topology(
       xla::CpuId(), xla::CpuName(), /*platform_version=*/"",
-      /*cpu_devices=*/{},
-      /*machine_attributes=*/std::vector<std::string>{});
+      xla::CpuTopology(
+          {}, xla::cpu::TargetMachineOptions(xla::GetDebugOptionsFromFlags())));
   std::shared_ptr<xla::CpuTopologyDescription> cpu_topology_ptr =
       std::make_shared<xla::CpuTopologyDescription>(cpu_topology);
 
@@ -169,8 +172,8 @@ TEST_F(Tf2HloTest, Tuple) {
 
   const xla::CpuTopologyDescription cpu_topology(
       xla::CpuId(), xla::CpuName(), /*platform_version=*/"",
-      /*cpu_devices=*/{},
-      /*machine_attributes=*/std::vector<std::string>{});
+      xla::CpuTopology(
+          {}, xla::cpu::TargetMachineOptions(xla::GetDebugOptionsFromFlags())));
   std::shared_ptr<xla::CpuTopologyDescription> cpu_topology_ptr =
       std::make_shared<xla::CpuTopologyDescription>(cpu_topology);
 
@@ -192,13 +195,24 @@ TEST_F(Tf2HloTest, Tuple) {
   TF_ASSERT_OK(result.status());
 }
 
+struct SpmdTestCase {
+  std::string test_name;
+  std::string mlir_file;
+  std::string expected_metadata;
+};
+
 // Spmd and device assignment is given
-TEST_F(Tf2HloTest, Spmd) {
+class Tf2HloSpmdTest : public Tf2HloTest,
+                       public ::testing::WithParamInterface<SpmdTestCase> {};
+
+TEST_P(Tf2HloSpmdTest, SpmdTest) {
+  const SpmdTestCase& test_case = GetParam();
+
   // Create test input module
   constexpr absl::string_view kDataDirectory =
       "tensorflow/compiler/mlir/tfrt/transforms/ifrt/testdata";
   std::string mlir_module_path = tensorflow::GetDataDependencyFilepath(
-      absl::StrCat(kDataDirectory, "/tf2hlo_spmd_with_device_assignment.mlir"));
+      absl::StrCat(kDataDirectory, "/", test_case.mlir_file));
 
   mlir::OwningOpRef<mlir::ModuleOp> mlir_module =
       mlir::parseSourceFile<mlir::ModuleOp>(mlir_module_path, context_.get());
@@ -219,8 +233,8 @@ TEST_F(Tf2HloTest, Spmd) {
 
   const xla::CpuTopologyDescription cpu_topology(
       xla::CpuId(), xla::CpuName(), /*platform_version=*/"",
-      /*cpu_devices=*/{},
-      /*machine_attributes=*/std::vector<std::string>{});
+      xla::CpuTopology(
+          {}, xla::cpu::TargetMachineOptions(xla::GetDebugOptionsFromFlags())));
   std::shared_ptr<xla::CpuTopologyDescription> cpu_topology_ptr =
       std::make_shared<xla::CpuTopologyDescription>(cpu_topology);
 
@@ -243,39 +257,78 @@ TEST_F(Tf2HloTest, Spmd) {
 
   tensorflow::tpu::TPUCompileMetadataProto expected_compile_metadata;
   ASSERT_TRUE(tsl::protobuf::TextFormat::ParseFromString(
-      R"pb(
-        args {
-          dtype: DT_FLOAT
-          shape {
-            dim { size: 4 }
-            dim { size: 64 }
-          }
-          kind: PARAMETER
-          sharding {
-            type: OTHER
-            tile_assignment_dimensions: 2
-            tile_assignment_dimensions: 1
-            tile_assignment_devices: 0
-            tile_assignment_devices: 1
-          }
-          is_bounded_dynamic_dim: false
-        }
-        retvals { sharding {} }
-        num_replicas: 1
-        num_cores_per_replica: 2
-        device_assignment {
-          replica_count: 1
-          computation_count: 2
-          computation_devices { replica_device_ids: 0 }
-          computation_devices { replica_device_ids: 1 }
-        }
-        use_spmd_for_xla_partitioning: true
-        compile_options {}
-      )pb",
-      &expected_compile_metadata));
+      test_case.expected_metadata, &expected_compile_metadata));
 
   EXPECT_THAT(result->compile_metadata, EqualsProto(expected_compile_metadata));
 }
+INSTANTIATE_TEST_SUITE_P(
+    SpmdTests, Tf2HloSpmdTest,
+    ::testing::ValuesIn<SpmdTestCase>({
+        {"SpmdWithDeviceAssignment", "tf2hlo_spmd_with_device_assignment.mlir",
+         R"pb(
+           args {
+             dtype: DT_FLOAT
+             shape {
+               dim { size: 4 }
+               dim { size: 64 }
+             }
+             kind: PARAMETER
+             sharding {
+               type: OTHER
+               tile_assignment_dimensions: 2
+               tile_assignment_dimensions: 1
+               tile_assignment_devices: 0
+               tile_assignment_devices: 1
+             }
+             is_bounded_dynamic_dim: false
+           }
+           retvals { sharding {} }
+           num_replicas: 1
+           num_cores_per_replica: 2
+           device_assignment {
+             replica_count: 1
+             computation_count: 2
+             computation_devices { replica_device_ids: 0 }
+             computation_devices { replica_device_ids: 1 }
+           }
+           use_spmd_for_xla_partitioning: true
+           compile_options {}
+         )pb"},
+        {"SpmdShardy", "tf2hlo_spmd_shardy.mlir",
+         R"pb(
+           args {
+             dtype: DT_FLOAT
+             shape {
+               dim { size: 4 }
+               dim { size: 64 }
+             }
+             kind: PARAMETER
+             sharding {
+               type: OTHER
+               tile_assignment_dimensions: 2
+               tile_assignment_dimensions: 1
+               iota_reshape_dims: 2
+               iota_transpose_perm: 0
+             }
+             is_bounded_dynamic_dim: false
+           }
+           retvals { sharding {} }
+           num_replicas: 1
+           num_cores_per_replica: 2
+           device_assignment {
+             replica_count: 1
+             computation_count: 2
+             computation_devices { replica_device_ids: 0 }
+             computation_devices { replica_device_ids: 1 }
+           }
+           use_spmd_for_xla_partitioning: true
+           use_shardy_partitioner: true
+           compile_options {}
+         )pb"},
+    }),
+    [](const ::testing::TestParamInfo<Tf2HloSpmdTest::ParamType>& info) {
+      return info.param.test_name;
+    });
 
 // Spmd and use default device assignment b/c no device assignment is given
 TEST_F(Tf2HloTest, UsingDefaultDeviceAssignment) {
@@ -306,8 +359,8 @@ TEST_F(Tf2HloTest, UsingDefaultDeviceAssignment) {
 
   const xla::CpuTopologyDescription cpu_topology(
       xla::CpuId(), xla::CpuName(), /*platform_version=*/"",
-      /*cpu_devices=*/{},
-      /*machine_attributes=*/std::vector<std::string>{});
+      xla::CpuTopology(
+          {}, xla::cpu::TargetMachineOptions(xla::GetDebugOptionsFromFlags())));
   std::shared_ptr<xla::CpuTopologyDescription> cpu_topology_ptr =
       std::make_shared<xla::CpuTopologyDescription>(cpu_topology);
 
@@ -418,8 +471,8 @@ TEST_F(Tf2HloTest, XlaCallHostCallback) {
 
   const xla::CpuTopologyDescription cpu_topology(
       xla::CpuId(), xla::CpuName(), /*platform_version=*/"",
-      /*cpu_devices=*/{},
-      /*machine_attributes=*/std::vector<std::string>{});
+      xla::CpuTopology(
+          {}, xla::cpu::TargetMachineOptions(xla::GetDebugOptionsFromFlags())));
   std::shared_ptr<xla::CpuTopologyDescription> cpu_topology_ptr =
       std::make_shared<xla::CpuTopologyDescription>(cpu_topology);
 
@@ -483,9 +536,7 @@ TEST_F(Tf2HloTest, GpuCompile) {
       .entry_function_name = "main",
       .compile_metadata = compile_metadata,
       .shape_representation_fn = tensorflow::IdentityShapeRepresentationFn(),
-      .topology = std::make_shared<xla::ifrt::PjRtTopology>(
-          std::make_shared<xla::StreamExecutorGpuTopologyDescription>(
-              xla::CudaId(), xla::CudaName(), /*gpu_topology=*/nullptr)),
+      .topology = nullptr,
       .platform_name = xla::CudaName(),
   };
 
@@ -495,8 +546,9 @@ TEST_F(Tf2HloTest, GpuCompile) {
   EXPECT_OK(result);
 #else
   LOG(INFO) << "Non-GPU compile failure";
-  EXPECT_THAT(result, StatusIs(absl::StatusCode::kUnimplemented,
-                               HasSubstr("CUDA or ROCM build required")));
+  EXPECT_THAT(result,
+              absl_testing::StatusIs(absl::StatusCode::kUnimplemented,
+                                     HasSubstr("CUDA or ROCM build required")));
 #endif
 }
 
@@ -527,8 +579,8 @@ TEST_F(Tf2HloTest, SameArgProduceSameKeyFingerprint) {
 
   const xla::CpuTopologyDescription cpu_topology(
       xla::CpuId(), xla::CpuName(), /*platform_version=*/"",
-      /*cpu_devices=*/{},
-      /*machine_attributes=*/std::vector<std::string>{});
+      xla::CpuTopology(
+          {}, xla::cpu::TargetMachineOptions(xla::GetDebugOptionsFromFlags())));
   std::shared_ptr<xla::CpuTopologyDescription> cpu_topology_ptr =
       std::make_shared<xla::CpuTopologyDescription>(cpu_topology);
 
@@ -541,6 +593,7 @@ TEST_F(Tf2HloTest, SameArgProduceSameKeyFingerprint) {
       .compile_metadata = compile_metadata,
       .shape_representation_fn = tensorflow::IdentityShapeRepresentationFn(),
       .topology = std::make_shared<xla::ifrt::PjRtTopology>(cpu_topology_ptr),
+      .populate_layout_in_xla_input_shapes = true,
   };
   mlir::OwningOpRef<mlir::ModuleOp> mlir_module_clone =
       mlir::OwningOpRef<mlir::ModuleOp>(mlir_module->clone());
@@ -552,6 +605,7 @@ TEST_F(Tf2HloTest, SameArgProduceSameKeyFingerprint) {
       .compile_metadata = compile_metadata,
       .shape_representation_fn = tensorflow::IdentityShapeRepresentationFn(),
       .topology = std::make_shared<xla::ifrt::PjRtTopology>(cpu_topology_ptr),
+      .populate_layout_in_xla_input_shapes = true,
   };
 
   TfToHloCompiler tf_to_hlo_compiler;
@@ -588,8 +642,8 @@ TEST_F(Tf2HloTest, DifferentCompileMetadataProduceDifferentKeyFingerprint) {
 
   const xla::CpuTopologyDescription cpu_topology(
       xla::CpuId(), xla::CpuName(), /*platform_version=*/"",
-      /*cpu_devices=*/{},
-      /*machine_attributes=*/std::vector<std::string>{});
+      xla::CpuTopology(
+          {}, xla::cpu::TargetMachineOptions(xla::GetDebugOptionsFromFlags())));
   std::shared_ptr<xla::CpuTopologyDescription> cpu_topology_ptr =
       std::make_shared<xla::CpuTopologyDescription>(cpu_topology);
 
@@ -621,6 +675,90 @@ TEST_F(Tf2HloTest, DifferentCompileMetadataProduceDifferentKeyFingerprint) {
   TF_ASSERT_OK_AND_ASSIGN(std::string key0, tf_to_hlo_compiler.Key(arg0));
   TF_ASSERT_OK_AND_ASSIGN(std::string key1, tf_to_hlo_compiler.Key(arg1));
   EXPECT_THAT(key0, Ne(key1));
+}
+
+TEST_F(Tf2HloTest,
+       DifferentPopulateLayoutInXlaInputShapesProduceDifferentKeyFingerprint) {
+  constexpr absl::string_view kDataDirectory =
+      "tensorflow/compiler/mlir/tfrt/transforms/ifrt/testdata";
+  std::string mlir_module_path = tensorflow::GetDataDependencyFilepath(
+      absl::StrCat(kDataDirectory, "/xla_call_host_callback.mlir"));
+
+  mlir::OwningOpRef<mlir::ModuleOp> mlir_module =
+      mlir::parseSourceFile<mlir::ModuleOp>(mlir_module_path,
+                                            mlir::ParserConfig(context_.get()));
+
+  ASSERT_TRUE(mlir_module);
+  ASSERT_TRUE(mlir_module.get() != nullptr);
+
+  TF_ASSERT_OK_AND_ASSIGN(std::shared_ptr<xla::ifrt::Client> client,
+                          xla::ifrt::test_util::GetClient());
+
+  std::vector<DtypeAndShape> dtype_and_shapes;
+  dtype_and_shapes.push_back(DtypeAndShape{DT_INT32, {1}});
+  dtype_and_shapes.push_back(DtypeAndShape{DT_INT32, {1}});
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      tensorflow::tpu::TPUCompileMetadataProto compile_metadata,
+      GetCompileMetadata(mlir_module.get(), *client));
+  TF_ASSERT_OK(UpdateCompileMetadata(compile_metadata, dtype_and_shapes));
+
+  const xla::CpuTopologyDescription cpu_topology(
+      xla::CpuId(), xla::CpuName(), /*platform_version=*/"",
+      xla::CpuTopology(
+          {}, xla::cpu::TargetMachineOptions(xla::GetDebugOptionsFromFlags())));
+  std::shared_ptr<xla::CpuTopologyDescription> cpu_topology_ptr =
+      std::make_shared<xla::CpuTopologyDescription>(cpu_topology);
+
+  std::vector<int> variable_arg_indices;
+  Tf2HloArg arg0{
+      .module = mlir_module.get(),
+      .input_dtypes_and_shapes = dtype_and_shapes,
+      .variable_arg_indices = variable_arg_indices,
+      .entry_function_name = "main",
+      .compile_metadata = compile_metadata,
+      .shape_representation_fn = tensorflow::IdentityShapeRepresentationFn(),
+      .topology = std::make_shared<xla::ifrt::PjRtTopology>(cpu_topology_ptr),
+      .populate_layout_in_xla_input_shapes = true,
+  };
+  mlir::OwningOpRef<mlir::ModuleOp> mlir_module_clone =
+      mlir::OwningOpRef<mlir::ModuleOp>(mlir_module->clone());
+  Tf2HloArg arg1{
+      .module = mlir_module_clone.get(),
+      .input_dtypes_and_shapes = dtype_and_shapes,
+      .variable_arg_indices = variable_arg_indices,
+      .entry_function_name = "main",
+      .compile_metadata = compile_metadata,
+      .shape_representation_fn = tensorflow::IdentityShapeRepresentationFn(),
+      .topology = std::make_shared<xla::ifrt::PjRtTopology>(cpu_topology_ptr),
+      .populate_layout_in_xla_input_shapes = false,
+  };
+
+  TfToHloCompiler tf_to_hlo_compiler;
+
+  TF_ASSERT_OK_AND_ASSIGN(std::string key0, tf_to_hlo_compiler.Key(arg0));
+  TF_ASSERT_OK_AND_ASSIGN(std::string key1, tf_to_hlo_compiler.Key(arg1));
+  EXPECT_THAT(key0, Ne(key1));
+}
+
+TEST_F(Tf2HloTest, ToProtoAndFromProto) {
+  Tf2HloResult result;
+  result.hlo_module_proto.set_name("test_module");
+  result.compile_metadata.set_num_replicas(1);
+
+  xla::Shape shape0 = xla::ShapeUtil::MakeShape(xla::F32, {10, 20});
+  xla::Shape shape1 = xla::ShapeUtil::MakeShape(xla::F32, {30, 40});
+  result.xla_input_shapes = {shape0, shape1};
+
+  TF_ASSERT_OK_AND_ASSIGN(auto proto, result.ToProto());
+  TF_ASSERT_OK_AND_ASSIGN(auto result_from_proto,
+                          Tf2HloResult::FromProto(proto));
+
+  EXPECT_EQ(result_from_proto.hlo_module_proto.name(), "test_module");
+  EXPECT_EQ(result_from_proto.compile_metadata.num_replicas(), 1);
+  ASSERT_EQ(result_from_proto.xla_input_shapes.size(), 2);
+  EXPECT_EQ(result_from_proto.xla_input_shapes[0], shape0);
+  EXPECT_EQ(result_from_proto.xla_input_shapes[1], shape1);
 }
 
 }  // namespace

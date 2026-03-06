@@ -1,3 +1,4 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
 load("//tensorflow:tensorflow.default.bzl", "filegroup")
 
@@ -91,6 +92,6 @@ tf_cc_test(
         "//tensorflow/core:test",
         "//tensorflow/core/platform:statusor",
         "@eigen_archive//:eigen3",
-        "@local_xla//xla/tsl/platform:test_main",
+        "@xla//xla/tsl/platform:test_main",
     ],
 )

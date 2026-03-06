@@ -13,46 +13,51 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <algorithm>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <optional>
-#include <string>
 #include <utility>
-#include <variant>
 #include <vector>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/ascii.h"
 #include "absl/types/span.h"
 #include "third_party/cudnn_frontend/include/cudnn_frontend.h"  // IWYU pragma: keep - cudnn frontend headers are not hermetic
 #include "third_party/cudnn_frontend/include/cudnn_frontend/graph_interface.h"
 #include "third_party/cudnn_frontend/include/cudnn_frontend/graph_properties.h"
 #include "third_party/cudnn_frontend/include/cudnn_frontend_utils.h"
 #include "third_party/gpus/cuda/include/cuda.h"
+#include "xla/backends/gpu/runtime/command.h"
 #include "xla/backends/gpu/runtime/command_buffer_cmd.h"
 #include "xla/backends/gpu/runtime/command_buffer_thunk.h"
-#include "xla/backends/gpu/runtime/sequential_thunk.h"
+#include "xla/backends/gpu/runtime/command_executor.h"
 #include "xla/backends/gpu/runtime/thunk.h"
+#include "xla/runtime/buffer_use.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/gpu/buffer_allocations.h"
 #include "xla/service/platform_util.h"
 #include "xla/service/service_executable_run_options.h"
+#include "xla/service/shaped_slice.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
 #include "xla/stream_executor/command_buffer.h"
 #include "xla/stream_executor/cuda/cuda_compute_capability.h"
 #include "xla/stream_executor/cuda/cuda_dnn.h"
+#include "xla/stream_executor/device_address.h"
+#include "xla/stream_executor/device_address_allocator.h"
 #include "xla/stream_executor/device_description.h"
-#include "xla/stream_executor/device_memory.h"
-#include "xla/stream_executor/device_memory_allocator.h"
 #include "xla/stream_executor/dnn.h"
-#include "xla/stream_executor/numeric_options.h"
+#include "xla/stream_executor/engine_options.h"
+#include "xla/stream_executor/kernel_spec.h"
 #include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/platform_manager.h"
-#include "xla/stream_executor/semantic_version.h"
 #include "xla/stream_executor/stream_executor.h"
 #include "xla/stream_executor/stream_executor_memory_allocator.h"
 #include "xla/tsl/lib/core/status_test_util.h"
-#include "xla/tsl/platform/status_matchers.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/types.h"  // IWYU pragma: keep
 #include "xla/xla_data.pb.h"
@@ -60,7 +65,7 @@ limitations under the License.
 namespace xla::gpu {
 
 using MemoryAccess = BufferUse::MemoryAccess;
-using KernelArgsPacking = se::MultiKernelLoaderSpec::KernelArgsPacking;
+using KernelArgsPacking = se::KernelLoaderSpec::KernelArgsPacking;
 
 namespace {
 
@@ -71,12 +76,9 @@ se::StreamExecutor* GpuExecutor() {
   return platform->ExecutorForDevice(0).value();
 }
 
-// Give a short aliases to execution threads.
-constexpr auto s0 = ExecutionStreamId(0);
-
 // Give a short alias to synchronization mode.
 static constexpr auto serialize =
-    CommandBufferCmdExecutor::SynchronizationMode::kSerialize;
+    CommandExecutor::SynchronizationMode::kSerialize;
 
 }  // namespace
 
@@ -88,6 +90,12 @@ TEST(CommandBufferThunkTest, CuDnnCmd) {
   if (dnn_support.GetVersion().value_or(se::dnn::VersionInfo{0, 0, 0}) <
       se::dnn::VersionInfo(9, 7, 0)) {
     GTEST_SKIP() << "Requires cuDNN 9.7.0 or later.";
+  }
+
+  if (!stream_executor->GetDeviceDescription()
+           .cuda_compute_capability()
+           .IsAtLeastAmpere()) {
+    GTEST_SKIP() << "Requires at least an Ampere GPU.";
   }
 
   constexpr int kDimSize = 32;
@@ -112,12 +120,14 @@ TEST(CommandBufferThunkTest, CuDnnCmd) {
     return graph;
   }());
   int64_t workspace_size = graph.Graph().get_workspace_size();
-  TF_ASSERT_OK(graph.Prepare(dnn_support, se::NumericOptions{}));
+  TF_ASSERT_OK(graph.Prepare(
+      dnn_support, se::EngineOptions{/*require_determinism=*/false,
+                                     /*allow_tf32=*/true,
+                                     /*require_command_buffer=*/true}));
   TF_ASSERT_OK(graph.Build(dnn_support, /*plan_id=*/std::nullopt));
   EXPECT_THAT(graph.SupportsExplicitCommandBufferConstruction(),
-              tsl::testing::IsOkAndHolds(true));
+              absl_testing::IsOkAndHolds(true));
 
-  std::vector<BufferAllocation::Slice> args;
   BufferAllocation alloc_input(/*index=*/0, kTotalElements, /*color=*/0);
   BufferAllocation alloc_output(/*index=*/1, kTotalElements * sizeof(int32_t),
                                 /*color=*/0);
@@ -126,56 +136,61 @@ TEST(CommandBufferThunkTest, CuDnnCmd) {
   BufferAllocation::Slice slice_output(&alloc_output, 0,
                                        kTotalElements * sizeof(int32_t));
 
+  Shape shape = ShapeUtil::MakeShape(S32, {kTotalElements});
+
+  std::vector<ShapedSlice> args;
   args.reserve(4);
-  args.push_back(slice_input);  // multiplying the input by itself
-  args.push_back(slice_input);
-  args.push_back(slice_output);
+  args.push_back({slice_input, shape});  // multiplying the input by itself
+  args.push_back({slice_input, shape});
+  args.push_back({slice_output, shape});
 
   if (workspace_size > 0) {
     BufferAllocation alloc_workspace(
         /*index=*/2, workspace_size, /*color=*/0);
     BufferAllocation::Slice slice_workspace(&alloc_workspace, 0,
                                             workspace_size);
-    args.push_back(slice_workspace);
+    args.push_back(
+        {slice_workspace, ShapeUtil::MakeShape(U8, {workspace_size})});
   }
 
   auto dnn_graph = std::make_unique<se::gpu::CudnnGraph>(std::move(graph));
-  CommandBufferCmdSequence commands;
+  CommandSequence commands;
   commands.Emplace<CuDnnCmd>(
-      s0, args, std::make_shared<se::dnn::LazyDnnGraph>(std::move(dnn_graph)));
+      args, std::make_shared<se::dnn::LazyDnnGraph>(std::move(dnn_graph)));
   TF_ASSERT_OK_AND_ASSIGN(
-      CommandBufferCmdExecutor executor,
-      CommandBufferCmdExecutor::Create(std::move(commands), serialize));
+      CommandExecutor executor,
+      CommandExecutor::Create(std::move(commands), serialize));
 
   // Construct a thunk with command sequence.
   CommandBufferThunk thunk(std::move(executor), Thunk::ThunkInfo());
 
-  std::vector<se::DeviceMemoryBase> operands;
+  std::vector<se::DeviceAddressBase> operands;
   operands.reserve(3);
 
-  se::DeviceMemory<int8_t> input =
+  se::DeviceAddress<int8_t> input =
       stream_executor->AllocateArray<int8_t>(kTotalElements);
   TF_ASSERT_OK(stream->MemZero(&input, input.size()));
 
-  se::DeviceMemory<int32_t> output0 =
+  se::DeviceAddress<int32_t> output0 =
       stream_executor->AllocateArray<int32_t>(kTotalElements);
   TF_ASSERT_OK(stream->Memset32(&output0, 123, output0.size()));
 
   operands.push_back(input);  // multiplying the input by itself
   operands.push_back(output0);
 
-  se::DeviceMemoryBase workspace;
+  se::DeviceAddressBase workspace;
   if (workspace_size > 0) {
     workspace = stream_executor->Allocate(workspace_size);
     operands.push_back(workspace);
   }
 
   ServiceExecutableRunOptions run_options;
-  se::StreamExecutorMemoryAllocator allocator(stream_executor);
+  stream_executor::StreamExecutorAddressAllocator allocator(stream_executor);
   BufferAllocations allocations(operands, 0, &allocator);
 
-  Thunk::ExecuteParams params = Thunk::ExecuteParams::Create(
-      run_options, allocations, stream.get(), stream.get(), nullptr, nullptr);
+  Thunk::ExecuteParams params =
+      Thunk::ExecuteParams::Create(run_options, allocations, stream.get(),
+                                   stream.get(), nullptr, nullptr, nullptr);
 
   Thunk::ExecutableSource source = {/*text=*/"", /*binary=*/{}};
   TF_ASSERT_OK(thunk.Initialize(
@@ -193,7 +208,7 @@ TEST(CommandBufferThunkTest, CuDnnCmd) {
   ASSERT_EQ(dst, std::vector<int32_t>(kTotalElements, 0));
 
   // Prepare buffer allocation for updating command buffer.
-  se::DeviceMemory<int32_t> output1 =
+  se::DeviceAddress<int32_t> output1 =
       stream_executor->AllocateArray<int32_t>(kTotalElements);
   TF_ASSERT_OK(stream->Memset32(&output1, 456, output1.size()));
 

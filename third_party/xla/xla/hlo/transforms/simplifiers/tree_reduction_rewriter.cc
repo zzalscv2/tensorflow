@@ -42,10 +42,14 @@ namespace xla {
 
 class ReductionRewriterVisitor : public DfsHloRewriteVisitor {
  public:
-  explicit ReductionRewriterVisitor(int64_t reduce_window_size)
-      : reduce_window_size_(reduce_window_size) {}
+  ReductionRewriterVisitor(int64_t reduce_window_size, HloPredicate filter)
+      : reduce_window_size_(reduce_window_size), filter_(std::move(filter)) {}
 
   absl::Status HandleReduce(HloInstruction *hlo) override {
+    if (filter_ && !filter_(hlo)) {
+      return absl::OkStatus();
+    }
+
     HloInstruction *reduced_op = hlo->mutable_operand(0);
     HloInstruction *initial_value = hlo->mutable_operand(1);
     const Shape &input_shape = reduced_op->shape();
@@ -71,7 +75,7 @@ class ReductionRewriterVisitor : public DfsHloRewriteVisitor {
 
     std::vector<int64_t> window_dimensions;
     std::vector<int64_t> window_strides;
-    for (int64_t dim_idx = 0; dim_idx < input_shape.dimensions_size();
+    for (int64_t dim_idx = 0; dim_idx < input_shape.dimensions().size();
          dim_idx++) {
       if (!absl::c_linear_search(hlo->dimensions(), dim_idx)) {
         window_dimensions.push_back(1);
@@ -112,12 +116,13 @@ class ReductionRewriterVisitor : public DfsHloRewriteVisitor {
 
  private:
   int64_t reduce_window_size_;
+  HloPredicate filter_;
 };
 
-absl::StatusOr<bool> TreeReductionRewriter::Run(
-    HloModule *module,
-    const absl::flat_hash_set<absl::string_view> &execution_threads) {
-  ReductionRewriterVisitor visitor(reduce_window_size_);
+absl::StatusOr<bool> TreeReductionRewriter::RunImpl(
+    HloModule* module,
+    const absl::flat_hash_set<absl::string_view>& execution_threads) {
+  ReductionRewriterVisitor visitor(reduce_window_size_, filter_);
   bool changed = false;
   for (const auto &computation :
        module->MakeNonfusionComputations(execution_threads)) {

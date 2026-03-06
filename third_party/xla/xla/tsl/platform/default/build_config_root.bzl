@@ -5,8 +5,10 @@ be separate to avoid cyclic references.
 """
 
 load("@local_config_remote_execution//:remote_execution.bzl", "gpu_test_tags")
-load("@local_xla//third_party/py/rules_pywrap:pywrap.default.bzl", "use_pywrap_rules")
+load("@local_config_rocm//rocm:build_defs.bzl", "get_rbe_amdgpu_pool", "is_rocm_configured")
+load("//third_party/py/rules_pywrap:pywrap.default.bzl", "use_pywrap_rules")
 load("//xla/tsl:package_groups.bzl", "DEFAULT_LOAD_VISIBILITY")
+load("//xla/tsl/platform/default:cuda_build_defs.bzl", "is_cuda_configured")
 
 visibility(DEFAULT_LOAD_VISIBILITY)
 
@@ -17,16 +19,50 @@ GPU_TEST_PROPERTIES = {
     "Pool": "gpu-pool",
 }
 
+ROCM_SINGLE_GPU_TEST_PROPERTIES = {
+    "test.Pool": get_rbe_amdgpu_pool(is_single_gpu = True),
+}
+
+ROCM_MULTI_GPU_TEST_PROPERTIES = {
+    "test.Pool": get_rbe_amdgpu_pool(is_single_gpu = False),
+}
+
 def tf_gpu_tests_tags():
-    return ["requires-gpu-nvidia", "gpu"] + gpu_test_tags()
+    """Gets tags for TensorFlow GPU tests based on the configured environment.
+
+    Returns:
+        A list of tags to be added to the test target.
+    """
+    if is_cuda_configured():
+        return ["requires-gpu-cuda", "gpu"] + gpu_test_tags()
+    elif is_rocm_configured():
+        return ["requires-gpu-rocm", "gpu"] + gpu_test_tags()
+    else:
+        # If neither CUDA nor ROCm is configured, we assume no GPU support.
+        # This is a fallback and should not be used in practice.
+        return ["requires-gpu", "gpu"] + gpu_test_tags()
 
 # terminology changes: saving tf_cuda_* for compatibility
 def tf_cuda_tests_tags():
     return tf_gpu_tests_tags()
 
+def tf_has_tag(kwargs, tag):
+    return ("tags" in kwargs and kwargs["tags"] != None and tag in kwargs["tags"])
+
 def tf_exec_properties(kwargs):
-    if ("tags" in kwargs and kwargs["tags"] != None and
-        "remote-gpu" in kwargs["tags"]):
+    """Gets execution_properties for TensorFlow GPU tests based on the provided tags.
+
+    Args:
+      kwargs: all arguments of the xla test target
+    Returns:
+        execution_properties with the execution pool names for rbe.
+    """
+    if is_rocm_configured():
+        if tf_has_tag(kwargs, "multi_gpu"):
+            return ROCM_MULTI_GPU_TEST_PROPERTIES
+        if tf_has_tag(kwargs, "gpu"):
+            return ROCM_SINGLE_GPU_TEST_PROPERTIES
+    elif tf_has_tag(kwargs, "remote-gpu"):
         return GPU_TEST_PROPERTIES
     return {}
 
@@ -105,6 +141,12 @@ def if_llvm_hexagon_available(then, otherwise = []):
 def if_llvm_powerpc_available(then, otherwise = []):
     return select({
         str(Label("//xla/tsl:ppc64le_or_cross")): then,
+        "//conditions:default": otherwise,
+    })
+
+def if_llvm_riscv_available(then, otherwise = []):
+    return select({
+        str(Label("//xla/tsl:riscv64_or_cross")): then,
         "//conditions:default": otherwise,
     })
 

@@ -84,7 +84,15 @@ inline void DequantizeConstantTensor(const TfLiteTensor& tensor,
   if (quant_params->scale->size > 1) {
     // Tensor is per-channel quantized.
     PerChannelDequantizationParams op_params;
-    op_params.zero_point = quant_params->zero_point->data;
+    std::vector<int> zero_points;
+    if (quant_params->zero_point->size != quant_params->scale->size) {
+      zero_points.resize(quant_params->scale->size,
+                         quant_params->zero_point->data[0]);
+      op_params.zero_point = zero_points.data();
+    } else {
+      op_params.zero_point =
+          quant_params->zero_point ? quant_params->zero_point->data : 0;
+    }
     op_params.scale = quant_params->scale->data;
     op_params.quantized_dimension = quant_params->quantized_dimension;
     reference_ops::PerChannelDequantize(op_params, GetTensorShape(&tensor),
@@ -182,8 +190,12 @@ absl::Status CreateVectorCopyData(const TfLiteTensor& src, T* dst) {
           dst[i] = tflite::GetTensorData<uint16_t>(&src)[i];
         }
         return absl::OkStatus();
+      case kTfLiteUInt4:
+        return absl::UnimplementedError("src can't be uint4.");
       case kTfLiteInt4:
         return absl::UnimplementedError("src can't be int4.");
+      case kTfLiteInt2:
+        return absl::UnimplementedError("src can't be int2.");
     }
   }
 }

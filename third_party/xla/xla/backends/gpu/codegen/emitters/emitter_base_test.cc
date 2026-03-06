@@ -17,6 +17,7 @@ limitations under the License.
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
@@ -24,17 +25,8 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/Support/raw_ostream.h"
-#include "mlir/Dialect/Affine/IR/AffineOps.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
-#include "mlir/Dialect/Complex/IR/Complex.h"
-#include "mlir/Dialect/Func/Extensions/InlinerExtension.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/GPU/IR/GPUDialect.h"
-#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
-#include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
-#include "mlir/Dialect/Math/IR/Math.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/IR/MLIRContext.h"
@@ -46,15 +38,15 @@ limitations under the License.
 #include "mlir/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.h"
 #include "xla/codegen/emitters/computation_partitioner.h"
 #include "xla/hlo/analysis/indexing_map.h"
+#include "xla/hlo/analysis/symbolic_expr.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/testlib/filecheck.h"
 #include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
-#include "xla/mlir_hlo/mhlo/IR/hlo_ops.h"
 #include "xla/service/gpu/gpu_device_info_for_tests.h"
 #include "xla/service/gpu/launch_dimensions.h"
 #include "xla/stream_executor/device_description.h"
-#include "tsl/platform/statusor.h"
+#include "xla/tsl/platform/statusor.h"
 
 namespace xla {
 namespace gpu {
@@ -69,8 +61,8 @@ class DummyCopyEmitter : public EmitterBase {
     return std::nullopt;
   }
 
-  std::optional<IndexingMap> ComputeThreadIdToInputIndexing(
-      int64_t, int64_t, mlir::MLIRContext*) const final {
+  std::optional<std::vector<IndexingMap>> ComputeThreadIdToInputIndexing(
+      int64_t, mlir::MLIRContext*) const final {
     return std::nullopt;
   }
 
@@ -83,11 +75,11 @@ class DummyCopyEmitter : public EmitterBase {
     mlir::ImplicitLocOpBuilder b(entry_function.getLoc(), entry_function);
     b.setInsertionPointToStart(entry_function.addEntryBlock());
     auto thread_id = EmitThreadId(b, 0);
-    auto value = b.create<mlir::tensor::ExtractOp>(
-        entry_function.getArgument(0), mlir::ValueRange{thread_id});
-    auto result = b.create<mlir::tensor::InsertOp>(
-        value, entry_function.getArgument(1), mlir::ValueRange{thread_id});
-    b.create<mlir::func::ReturnOp>(result->getResults());
+    auto value = mlir::tensor::ExtractOp::create(
+        b, entry_function.getArgument(0), mlir::ValueRange{thread_id});
+    auto result = mlir::tensor::InsertOp::create(
+        b, value, entry_function.getArgument(1), mlir::ValueRange{thread_id});
+    mlir::func::ReturnOp::create(b, result->getResults());
     return absl::OkStatus();
   }
 };
@@ -95,22 +87,12 @@ class DummyCopyEmitter : public EmitterBase {
 class EmitterBaseTest : public HloHardwareIndependentTestBase {
  protected:
   EmitterBaseTest() {
-    context_.loadDialect<mlir::tensor::TensorDialect, mlir::func::FuncDialect,
-                         mlir::affine::AffineDialect, mlir::arith::ArithDialect,
-                         mlir::complex::ComplexDialect, mlir::math::MathDialect,
-                         mlir::scf::SCFDialect, mlir::mhlo::MhloDialect,
-                         mlir::gpu::GPUDialect, mlir::NVVM::NVVMDialect,
-                         mlir::ROCDL::ROCDLDialect>();
-    mlir::DialectRegistry registry;
-    mlir::func::registerInlinerExtension(registry);
-    mlir::registerBuiltinDialectTranslation(registry);
-    mlir::registerLLVMDialectTranslation(registry);
-    mlir::registerNVVMDialectTranslation(registry);
-    mlir::registerROCDLDialectTranslation(registry);
-    context_.appendDialectRegistry(registry);
+    mlir_context_.appendDialectRegistry(EmitterBase::GetDialectRegistry());
+    mlir_context_.loadAllAvailableDialects();
+    RegisterSymbolicExprStorage(&mlir_context_);
   }
 
-  mlir::MLIRContext context_;
+  mlir::MLIRContext mlir_context_;
   stream_executor::DeviceDescription device_info_ =
       TestGpuDeviceInfo::CudaOrRocmDeviceInfo();
 };
@@ -131,7 +113,7 @@ TEST_F(EmitterBaseTest, CreateMlirModule) {
   TF_ASSERT_OK_AND_ASSIGN(
       auto mlir_module,
       emitter.CreateMLIRModule(
-          context_,
+          mlir_context_,
           *Cast<HloFusionInstruction>(
               module->entry_computation()->root_instruction()),
           "fusion",
@@ -162,7 +144,7 @@ TEST_F(EmitterBaseTest, CreateLLVMModule) {
   TF_ASSERT_OK_AND_ASSIGN(
       auto llvm_module,
       emitter.CreateLLVMModule(
-          context_, llvm_context, device_info_,
+          mlir_context_, llvm_context, device_info_,
           *Cast<HloFusionInstruction>(
               module->entry_computation()->root_instruction()),
           "fusion",
@@ -179,9 +161,9 @@ TEST_F(EmitterBaseTest, CreateLLVMModule) {
                    R"(
     // CHECK: define void @fusion(ptr noalias %[[IN:.*]], ptr noalias %[[OUT:.*]])
     // CHECK:   %[[TID:.*]] = call i32 TIDX()
-    // CHECK:   %[[IN_PTR:.*]] = getelementptr inbounds float, ptr %[[IN]], i32 %[[TID]]
+    // CHECK:   %[[IN_PTR:.*]] = getelementptr inbounds [100 x float], ptr %[[IN]], i32 0, i32 %[[TID]]
     // CHECK:   %[[VAL:.*]] = load float, ptr %[[IN_PTR]], align 4
-    // CHECK:   %[[OUT_PTR:.*]] = getelementptr inbounds float, ptr %[[OUT]], i32 %[[TID]]
+    // CHECK:   %[[OUT_PTR:.*]] = getelementptr inbounds [100 x float], ptr %[[OUT]], i32 0, i32 %[[TID]]
     // CHECK:   store float %[[VAL]], ptr %[[OUT_PTR]], align 4
     // CHECK:   ret void
   )",

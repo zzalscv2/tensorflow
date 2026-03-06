@@ -15,19 +15,22 @@ limitations under the License.
 
 #include <optional>
 #include <string>
+#include <tuple>
 
 #include "absl/strings/str_replace.h"
 #include "absl/strings/substitute.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/testlib/test.h"
-#include "xla/tests/hlo_test_base.h"
-#include "xla/tests/test_macros.h"
+#include "xla/tests/hlo_pjrt_interpreter_reference_mixin.h"
+#include "xla/tests/hlo_pjrt_test_base.h"
 
 namespace xla {
 namespace {
 
-XLA_TEST_F(HloTestBase, InputIsOutput) {
+using Int4Test = HloPjRtInterpreterReferenceMixin<HloPjRtTestBase>;
+
+TEST_F(Int4Test, InputIsOutput) {
   const std::string hlo_text = R"(
   HloModule InputIsOutput
   ENTRY main {
@@ -37,7 +40,7 @@ XLA_TEST_F(HloTestBase, InputIsOutput) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, Reshape) {
+TEST_F(Int4Test, Reshape) {
   const std::string hlo_text = R"(
   HloModule Reshape
   ENTRY main {
@@ -48,7 +51,7 @@ XLA_TEST_F(HloTestBase, Reshape) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, MultiReshape) {
+TEST_F(Int4Test, MultiReshape) {
   // Test reshaping multiple arrays to the same shape.
   const std::string hlo_text = R"(
   HloModule MultiReshape
@@ -64,7 +67,7 @@ XLA_TEST_F(HloTestBase, MultiReshape) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, Slice) {
+TEST_F(Int4Test, Slice) {
   // Tests indexing s4 arrays in the presence of a slice instruction. On
   // CPUs/GPUs, the slice is fused with the s4 array.
   const std::string hlo_text = R"(
@@ -78,7 +81,7 @@ XLA_TEST_F(HloTestBase, Slice) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, Add) {
+TEST_F(Int4Test, Add) {
   const std::string hlo_text = R"(
   HloModule Add
 
@@ -90,7 +93,7 @@ XLA_TEST_F(HloTestBase, Add) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, Dot) {
+TEST_F(Int4Test, Dot) {
   const std::string hlo_text = R"(
   HloModule Dot
 
@@ -103,7 +106,7 @@ XLA_TEST_F(HloTestBase, Dot) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, MixedTypeDot) {
+TEST_F(Int4Test, MixedTypeDot) {
   const std::string hlo_text = R"(
   HloModule Dot
 
@@ -117,7 +120,7 @@ XLA_TEST_F(HloTestBase, MixedTypeDot) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, NonMajorToMinorLayout) {
+TEST_F(Int4Test, NonMajorToMinorLayout) {
   // Tests transposing a matrix with a non-major-to-minor layout.
   const std::string hlo_text = R"(
   HloModule NonMajorToMinorLayout
@@ -128,7 +131,7 @@ XLA_TEST_F(HloTestBase, NonMajorToMinorLayout) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, Transpose4d) {
+TEST_F(Int4Test, Transpose4d) {
   const std::string hlo_text = R"(
   ENTRY main {
     x = s4[2,2,2,2] parameter(0)
@@ -137,7 +140,7 @@ XLA_TEST_F(HloTestBase, Transpose4d) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, TransposeDot) {
+TEST_F(Int4Test, TransposeDot) {
   const std::string hlo_text = R"(
   ENTRY main {
     x = s4[32,32,32] parameter(0)
@@ -149,7 +152,7 @@ XLA_TEST_F(HloTestBase, TransposeDot) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, Int4Output2d) {
+TEST_F(Int4Test, Int4Output2d) {
   // Tests outputting a 2D int4 array.
   const std::string hlo_text = R"(
   HloModule Int4Output2d
@@ -160,7 +163,7 @@ XLA_TEST_F(HloTestBase, Int4Output2d) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, TupleOutput) {
+TEST_F(Int4Test, TupleOutput) {
   // Tests tuple output with an int4 array
   const std::string hlo_text = R"(
   HloModule TupleOutput
@@ -172,7 +175,7 @@ XLA_TEST_F(HloTestBase, TupleOutput) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, OddNumberOfElements) {
+TEST_F(Int4Test, OddNumberOfElements) {
   // Tests writing to s4 arrays with an odd number of elements
   const std::string hlo_text = R"(
   HloModule OddNumberOfElements
@@ -184,7 +187,7 @@ XLA_TEST_F(HloTestBase, OddNumberOfElements) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, Scalar) {
+TEST_F(Int4Test, Scalar) {
   // Tests reading an int4 scalar value
   const std::string hlo_text = R"(
   HloModule Scalar
@@ -197,7 +200,7 @@ XLA_TEST_F(HloTestBase, Scalar) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, HorizontalLoopFusion) {
+TEST_F(Int4Test, HorizontalLoopFusion) {
   // Tests an HLO module where horizontal loop fusion can be done on GPUs
   const std::string hlo_text = R"(
   HloModule HorizontalLoopFusion
@@ -219,7 +222,7 @@ XLA_TEST_F(HloTestBase, HorizontalLoopFusion) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, ReduceMultipleDimensions) {
+TEST_F(Int4Test, ReduceMultipleDimensions) {
   const std::string hlo_text = R"(
   add_computation {
     x = s4[] parameter(0)
@@ -236,7 +239,7 @@ XLA_TEST_F(HloTestBase, ReduceMultipleDimensions) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, ReduceToScalar) {
+TEST_F(Int4Test, ReduceToScalar) {
   const std::string hlo_text = R"(
   add_computation {
     x = s4[] parameter(0)
@@ -253,7 +256,7 @@ XLA_TEST_F(HloTestBase, ReduceToScalar) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, dynamic_slice_fusion) {
+TEST_F(Int4Test, dynamic_slice_fusion) {
   const std::string hlo_text = R"(
   ENTRY main {
     input = s4[101,9] parameter(0)
@@ -264,7 +267,7 @@ XLA_TEST_F(HloTestBase, dynamic_slice_fusion) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-XLA_TEST_F(HloTestBase, dynamic_update_slice_fusion) {
+TEST_F(Int4Test, dynamic_update_slice_fusion) {
   const std::string hlo_text = R"(
   ENTRY main {
     input = s4[101,9] parameter(0)
@@ -276,15 +279,15 @@ XLA_TEST_F(HloTestBase, dynamic_update_slice_fusion) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-class HloTestBaseWithAlgsimpDisabled : public HloTestBase {
+class Int4TestWithAlgsimpDisabled : public Int4Test {
   DebugOptions GetDebugOptionsForTest() const override {
-    DebugOptions options = HloTestBase::GetDebugOptionsForTest();
+    DebugOptions options = Int4Test::GetDebugOptionsForTest();
     options.add_xla_disable_hlo_passes("algsimp");
     return options;
   }
 };
 
-XLA_TEST_F(HloTestBaseWithAlgsimpDisabled, TwoDots) {
+TEST_F(Int4TestWithAlgsimpDisabled, TwoDots) {
   // This tests a regression that occured when a non-parameter non-ROOT
   // instruction was s4 as the input or output of a fusion. Fusion passes tend
   // to make any int4 instructions only internal to a fusion, but this HLO, at
@@ -306,9 +309,10 @@ XLA_TEST_F(HloTestBaseWithAlgsimpDisabled, TwoDots) {
   EXPECT_TRUE(RunAndCompare(hlo_text, std::nullopt));
 }
 
-class ElementwiseTest : public HloTestBase,
-                        public ::testing::WithParamInterface<
-                            std::tuple<HloOpcode, PrimitiveType>> {
+class ElementwiseTest
+    : public HloPjRtInterpreterReferenceMixin<HloPjRtTestBase>,
+      public ::testing::WithParamInterface<
+          std::tuple<HloOpcode, PrimitiveType>> {
  public:
   static std::vector<HloOpcode> GetElementwiseOpcodesWithIntSupportWithArity(
       int arity) {
@@ -338,12 +342,19 @@ class ElementwiseTest : public HloTestBase,
  private:
   static bool IsFloatingPointOnly(HloOpcode opcode) {
     switch (opcode) {
+      case HloOpcode::kAsin:
+      case HloOpcode::kAsinh:
+      case HloOpcode::kAcos:
+      case HloOpcode::kAcosh:
       case HloOpcode::kAtan2:
+      case HloOpcode::kAtanh:
       case HloOpcode::kCbrt:
       case HloOpcode::kCeil:
       case HloOpcode::kComplex:
       case HloOpcode::kCos:
+      case HloOpcode::kCosh:
       case HloOpcode::kSin:
+      case HloOpcode::kSinh:
       case HloOpcode::kErf:
       case HloOpcode::kExp:
       case HloOpcode::kExpm1:

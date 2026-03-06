@@ -1,5 +1,7 @@
 # Fuzztest TensorShape domains
 
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
 # copybara:uncomment package(default_applicable_licenses = ["//tensorflow:license"])
 
 cc_library(
@@ -12,7 +14,7 @@ cc_library(
         "//tensorflow/core:framework",
         "@com_google_absl//absl/status:statusor",
         "@com_google_fuzztest//fuzztest",
-        "@local_xla//xla/tsl/platform:errors",
+        "@xla//xla/tsl/platform:errors",
     ],
 )
 
@@ -29,7 +31,7 @@ cc_library(
         "//tensorflow/core/platform:tstring",
         "@com_google_absl//absl/log",
         "@com_google_fuzztest//fuzztest",
-        "@local_xla//xla/tsl/platform:errors",
+        "@xla//xla/tsl/platform:errors",
     ],
 )
 

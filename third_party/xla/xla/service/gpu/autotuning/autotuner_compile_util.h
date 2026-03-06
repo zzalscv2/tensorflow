@@ -35,8 +35,8 @@ limitations under the License.
 #include "xla/service/gpu/autotuning/autotuner_util.h"
 #include "xla/service/shaped_buffer.h"
 #include "xla/shape.h"
-#include "xla/stream_executor/device_memory.h"
-#include "xla/stream_executor/device_memory_allocator.h"
+#include "xla/stream_executor/device_address.h"
+#include "xla/stream_executor/device_address_allocator.h"
 #include "xla/stream_executor/gpu/redzone_allocator.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/util.h"
@@ -61,7 +61,7 @@ class AutotunerCompileUtil {
 
   // Generates a compile util for a platform associated with the `stream`.
   static absl::StatusOr<AutotunerCompileUtil> Create(
-      const AutotuneConfig& config, const DebugOptions& opts);
+      const DeviceOrDevicelessConfig& config, const DebugOptions& opts);
 
   struct ProfilingOutput {
     ProfilingOutput(absl::Duration duration, ScopedShapedBuffer&& buffer)
@@ -78,7 +78,7 @@ class AutotunerCompileUtil {
   // `(cache_key, config)`.
   absl::StatusOr<ProfilingOutput> ProfileExecutable(
       Executable* executable, se::Stream* stream,
-      absl::Span<se::DeviceMemoryBase const> input_buffers,
+      absl::Span<se::DeviceAddressBase const> input_buffers,
       absl::Span<Shape const> input_shapes);
 
   // Generic method to compile a generated module from `extractor` in isolation.
@@ -98,21 +98,19 @@ class AutotunerCompileUtil {
       GenerateModuleFn extractor);
 
  private:
-  AutotunerCompileUtil(const AutotuneConfig& config,
-                       std::unique_ptr<Compiler> compiler,
+  AutotunerCompileUtil(std::unique_ptr<Compiler> compiler,
                        se::StreamExecutor& stream_executor, se::Stream& stream,
-                       se::DeviceMemoryAllocator& allocator,
+                       se::DeviceAddressAllocator& allocator,
                        const DebugOptions& opts);
 
   absl::StatusOr<ExecutionOutput> Execute(Executable& executable,
                                           std::vector<ExecutionInput> arguments,
                                           ExecutionProfile* profile = nullptr);
 
-  AutotuneConfig config_;
   std::unique_ptr<Compiler> compiler_;
   se::StreamExecutor& stream_executor_;
   se::Stream& stream_;
-  se::DeviceMemoryAllocator& allocator_;
+  se::DeviceAddressAllocator& allocator_;
   DebugOptions opts_;
 };
 

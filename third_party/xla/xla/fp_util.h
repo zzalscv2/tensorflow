@@ -15,8 +15,10 @@ limitations under the License.
 #ifndef XLA_FP_UTIL_H_
 #define XLA_FP_UTIL_H_
 
-#include <algorithm>
+// This must preceed all other headers, otherwise during Windows cross
+// compilation, M_LN2 will not be defined.
 #define _USE_MATH_DEFINES
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -24,6 +26,7 @@ limitations under the License.
 #include <optional>
 #include <utility>
 
+#include "absl/base/casts.h"
 #include "xla/types.h"
 #include "xla/util.h"
 
@@ -276,8 +279,10 @@ constexpr T GoldbergUlp(T x) {
     return GoldbergUlp(std::numeric_limits<T>::min());
   }
   std::optional<int> maybe_exponent = LogBase(x);
-  if (maybe_exponent.has_value(); const int exponent = *maybe_exponent) {
-    return ScaleBase(std::numeric_limits<T>::epsilon(), exponent);
+  if (maybe_exponent.has_value()) {
+    if (const int exponent = *maybe_exponent) {
+      return ScaleBase(std::numeric_limits<T>::epsilon(), exponent);
+    }
   }
   if constexpr (std::numeric_limits<T>::has_quiet_NaN) {
     return std::numeric_limits<T>::quiet_NaN();
@@ -304,6 +309,48 @@ int64_t CalculateDistanceInFloats(T a, T b) {
   // integer overflow.
   int64_t signed_distance = a_distance_from_zero - b_distance_from_zero;
   return std::abs(signed_distance);
+}
+
+// Returns the number of ULPs between two floating point values.
+// Returns std::nullopt if the inputs are not both finite or if they are not
+// both the same infinity.
+template <typename T>
+std::optional<int64_t> UlpDistance(T actual, T expected) {
+  if (std::isnan(expected)) {
+    return std::isnan(actual) ? std::optional<int64_t>(0) : std::nullopt;
+  }
+  if (std::isinf(expected)) {
+    return (std::isinf(actual) &&
+            std::signbit(expected) == std::signbit(actual))
+               ? std::optional<int64_t>(0)
+               : std::nullopt;
+  }
+  if (std::isnan(actual) || std::isinf(actual)) {
+    return std::nullopt;
+  }
+  return std::abs(CalculateDistanceInFloats(actual, expected));
+}
+
+// Packs two float operands into a single 32-bit value as bf16. The lower 16
+// bits == lower operand, and the upper 16 bits == upper operand.
+// Uses truncation to convert float to bf16. No rounding is performed.
+template <typename T>
+T PackFloatPairAsBf16(float lower, float upper) {
+  static_assert(sizeof(T) == 4);
+  uint32_t packed = absl::bit_cast<uint32_t>(lower) >> 16;
+  packed |= (absl::bit_cast<uint32_t>(upper) >> 16) << 16;
+  return absl::bit_cast<T>(packed);
+}
+
+// Unpacks a single 32-bit value as bf16 into two float operands. The lower 16
+// bits == lower operand, and the upper 16 bits == upper operand.
+template <typename T>
+std::pair</*lower=*/float, /*upper=*/float> UnpackFloatPairAsBf16(T packed) {
+  static_assert(sizeof(T) == 4);
+  const uint32_t src = absl::bit_cast<uint32_t>(packed);
+  const float lower = absl::bit_cast<float>(src << 16);
+  const float upper = absl::bit_cast<float>(src & 0xFFFF0000);
+  return std::make_pair(lower, upper);
 }
 
 }  // namespace xla

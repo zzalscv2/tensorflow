@@ -43,7 +43,7 @@ absl::StatusOr<HloInstruction*> FlattenAndTransposeUpdates(
     HloInstruction* updates, absl::Span<const int64_t> update_window_dims,
     absl::Span<const int64_t> inserted_window_dims,
     int64_t scatter_indices_size) {
-  int64_t updates_rank = updates->shape().dimensions_size();
+  int64_t updates_rank = updates->shape().dimensions().size();
 
   std::vector<int64_t> permutation;
   const int64_t num_scatter_dims = updates_rank - update_window_dims.size();
@@ -157,6 +157,7 @@ absl::StatusOr<HloInstruction*> ScatterSimplifier::ExpandInstruction(
 
     auto* call_op = scatter->AddInstruction(HloInstruction::CreateCall(
         scatter->shape(), scatter_operands_and_updates, called_computation));
+    call_op->set_original_value(scatter->original_value());
     TF_RETURN_IF_ERROR(scatter->ReplaceAllUsesWith(call_op));
     TF_ASSIGN_OR_RETURN(auto map, CallInliner::Inline(call_op));
     return map[call_op];
@@ -225,14 +226,14 @@ bool ScatterSimplifier::IsSimplifiedScatter(
     const HloScatterInstruction* scatter) {
   const auto& dims = scatter->scatter_dimension_numbers();
   auto operand_rank =
-      scatter->scatter_operands().front()->shape().dimensions_size();
+      scatter->scatter_operands().front()->shape().dimensions().size();
   if (operand_rank == 0) return false;
 
   bool standard_index_vector_dim =
-      dims.index_vector_dim() ==
-      scatter->scatter_indices()->shape().dimensions_size() - 1;
+      dims.index_vector_dim() + 1 ==
+      scatter->scatter_indices()->shape().dimensions().size();
   int64_t num_scatter_dims =
-      scatter->scatter_updates().front()->shape().dimensions_size() -
+      scatter->scatter_updates().front()->shape().dimensions().size() -
       dims.update_window_dims().size();
   bool scatter_indices_ordered =
       IsIdentityPermutation(dims.scatter_dims_to_operand_dims());

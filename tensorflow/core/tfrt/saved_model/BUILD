@@ -1,3 +1,4 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//tensorflow:tensorflow.bzl", "if_google")
 
 package(
@@ -15,8 +16,6 @@ package_group(
         # copybara:uncomment "//learning/brain/tfrt/...",
         # copybara:uncomment "//learning/infra/mira/...",
         # copybara:uncomment "//learning/serving/...",
-        # copybara:uncomment "//learning/pathways/serving/model_tests/...",
-        # copybara:uncomment "//learning/pathways/serving/runtime/...",
         "//tensorflow/core/runtime_fallback/...",
         "//tensorflow/core/tfrt/mlrt/application/tensorflow/tests/...",
         "//tensorflow/compiler/mlir/tfrt/...",
@@ -79,18 +78,18 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Pass",
-        "@local_tsl//tsl/platform:env",
-        "@local_tsl//tsl/platform:status",
-        "@local_xla//xla/pjrt:pjrt_compiler",
-        "@local_xla//xla/pjrt:pjrt_executable",
-        "@local_xla//xla/pjrt/gpu:se_gpu_pjrt_client",
-        "@local_xla//xla/pjrt/gpu:se_gpu_pjrt_compiler",
-        "@local_xla//xla/service:compiler",
-        "@local_xla//xla/stream_executor/cuda:cuda_platform_id",
         "@tf_runtime//:bef",
         "@tf_runtime//:befexecutor",
         "@tf_runtime//:core_runtime_alwayslink",
         "@tf_runtime//:hostcontext",
+        "@tsl//tsl/platform:env",
+        "@tsl//tsl/platform:status",
+        "@xla//xla/pjrt:pjrt_compiler",
+        "@xla//xla/pjrt:pjrt_executable",
+        "@xla//xla/pjrt/gpu:se_gpu_pjrt_client",
+        "@xla//xla/pjrt/gpu:se_gpu_pjrt_compiler",
+        "@xla//xla/service:compiler",
+        "@xla//xla/stream_executor/cuda:cuda_platform_id",
     ],
 )
 
@@ -164,8 +163,6 @@ cc_library(
         "@com_google_absl//absl/types:span",
         "@llvm-project//mlir:FuncExtensions",
         "@llvm-project//mlir:IR",
-        "@local_tsl//tsl/platform:protobuf",
-        "@local_xla//xla:status_macros",
         "@tf_runtime//:bef",
         "@tf_runtime//:befexecutor",
         "@tf_runtime//:core_runtime_alwayslink",
@@ -173,6 +170,8 @@ cc_library(
         "@tf_runtime//:init_tfrt_dialects",
         "@tf_runtime//:metrics",
         "@tf_runtime//:support",
+        "@tsl//tsl/platform:protobuf",
+        "@xla//xla:status_macros",
     ] + if_google([
         "//third_party/tf_runtime_google:streamz_metrics_registry_alwayslink",
     ]),
@@ -196,8 +195,8 @@ cc_library(
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
-        "@local_tsl//tsl/platform:protobuf",
         "@tf_runtime//:hostcontext",
+        "@tsl//tsl/platform:protobuf",
     ],
 )
 
@@ -215,7 +214,7 @@ cc_library(
         "//tensorflow/core/framework:tensor_proto_cc",
         "//tensorflow/core/platform:thread_annotations",
         "//tensorflow/core/protobuf:for_core_protos_cc",
-        "@local_tsl//tsl/platform:protobuf",
+        "@tsl//tsl/platform:protobuf",
         # TODO(chky): Remove kernel fallback tensor deps.
         "//tensorflow/core/runtime_fallback/kernel:kernel_fallback_tensor_conversion_alwayslink",
         "//tensorflow/core/tfrt/gpu/kernel:gpurt_kernels",
@@ -272,8 +271,8 @@ cc_library(
         ":saved_model_import_input",
         "//tensorflow/cc/saved_model:reader",
         "//tensorflow/compiler/mlir/tensorflow",
+        "//tensorflow/compiler/mlir/tensorflow:deserialize_mlir_module_utils",
         "//tensorflow/compiler/mlir/tensorflow:import_model",
-        "//tensorflow/compiler/mlir/tensorflow:serialize_mlir_module_utils",
         "//tensorflow/compiler/mlir/tfrt:import_model",
         "//tensorflow/compiler/mlir/tfrt:saved_model",
         "//tensorflow/compiler/mlir/tfrt:tfrt_compile_options",
@@ -302,8 +301,8 @@ cc_library(
         "@com_google_absl//absl/types:span",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:IR",
-        "@local_tsl//tsl/platform:protobuf",
         "@tf_runtime//:bef",
         "@tf_runtime//:init_tfrt_dialects",
+        "@tsl//tsl/platform:protobuf",
     ],
 )

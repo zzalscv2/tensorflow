@@ -26,12 +26,14 @@ namespace sdy {
 // Creates the pass to convert frontend attributes to SDY attributes:
 //
 // - Converts meshes from `kMeshesRoundTripAttr` to sdy.mesh symbols
-// - Converts shardings from `kShardingRoundTripAttr` to `kShardingAttr`
+// - Converts shardings from `HloSharding::kShardingFrontendAttrName` to
+//   `kShardingAttr`
 // - Converts sharding rules from `kShardingRuleRoundTripAttr` to
 //   `kShardingRuleAttr`
 // - Replaces `kFuncResultShardingTargetName` custom-calls with the
 //   corresponding func result sharding.
-std::unique_ptr<mlir::Pass> createSdyRoundTripImportShardyAttrsPass();
+std::unique_ptr<mlir::Pass> createSdyRoundTripImportShardyAttrsPass(
+    bool enableHloShardingV3 = false);
 
 // Registers the xla-sdy-round-trip-import-shardy-attrs pass.
 void registerSdyRoundTripImportShardyAttrsPass();

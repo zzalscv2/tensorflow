@@ -19,7 +19,9 @@ limitations under the License.
 #define XLA_LITERAL_UTIL_H_
 
 #include <array>
+#include <cmath>
 #include <cstdint>
+#include <functional>
 #include <initializer_list>
 #include <iterator>
 #include <optional>
@@ -40,6 +42,7 @@ limitations under the License.
 #include "xla/layout.h"
 #include "xla/layout_util.h"
 #include "xla/literal.h"
+#include "xla/literal_util.h"
 #include "xla/primitive_util.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
@@ -120,6 +123,10 @@ class LiteralUtil {
   // Creates a scalar literal value containing the maximum value of the given
   // primitive type. For floating-point types supporting inf, returns inf.
   static Literal MaxValue(PrimitiveType primitive_type);
+  // Creates a scalar literal value containing the maximum finite value of the
+  // given primitive type. For floating-point types that do not support inf,
+  // this is the same as MaxValue.
+  static Literal MaxFiniteValue(PrimitiveType primitive_type);
   // Creates a scalar literal value containing the NaN value of the given
   // primitive type. Fail for non-inexact types. For complex types, returns a
   // nan + nan * j value.
@@ -239,6 +246,8 @@ class LiteralUtil {
   // If the given literal's data type is <SrcType>, converts it to a <DstType>
   // literal; otherwise, returns a copy of it. If the literal is a tuple,
   // recursively converts its elements.
+  static Literal ConvertF8E4M3FNToF32(const LiteralSlice& f8e4m3fn_literal);
+  static Literal ConvertF8E5M2ToF32(const LiteralSlice& f8e5m2_literal);
   static Literal ConvertS8ToF32(const LiteralSlice& s8_literal);
   static Literal ConvertBF16ToF32(const LiteralSlice& bf16_literal);
   static Literal ConvertBF16ToF64(const LiteralSlice& bf16_literal);
@@ -311,6 +320,10 @@ class LiteralUtil {
   // Fails if the literal is not an integral type or if the value it contains
   // cannot be represented as an int64_t.
   static std::optional<int64_t> LiteralAsScalarInt64(const Literal& l);
+
+  // Creates a vector of pointers to the given literals.
+  static std::vector<const Literal*> MakePointers(
+      absl::Span<const Literal> literals);
 };
 
 std::ostream& operator<<(std::ostream& out, const Literal& literal);
@@ -643,12 +656,19 @@ absl::StatusOr<Literal> MakeFakeLiteral(const Shape& shape,
 // 'use_large_range' indicates the sampled data is from the full range of the
 // floating point format. (floating point format only)
 // 'max_bits_of_precision' sets the data to have the given number of bits or
-// less (integer or floating point formats only).
+// less and are not NaNs (integer or floating point formats only).
+// 'float_generator' is a function that generates a floating point value. If
+// null, the values are generated using the engine and the distribution suitable
+// for the type.
+// 'index_alignment' indicates that generated data is aligned to the given
+// number (integer formats only).
 absl::StatusOr<Literal> MakeFakeLiteral(
     const Shape& shape, std::minstd_rand0* engine,
     std::optional<std::pair<int64_t, int64_t>> limit, bool is_sorted,
     bool no_duplicates, bool use_large_range,
-    std::optional<int64_t> max_bits_of_precision);
+    std::optional<int64_t> max_bits_of_precision,
+    std::optional<int64_t> index_alignment = std::nullopt,
+    std::function<double(std::minstd_rand0*)> float_generator = nullptr);
 
 }  // namespace xla
 

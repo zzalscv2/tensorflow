@@ -21,6 +21,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
 #include "xla/hlo/utils/hlo_matchers.h"
+#include "xla/xla_data.pb.h"
 #include "tsl/platform/statusor.h"
 
 namespace op = xla::testing::opcode_matchers;
@@ -251,6 +252,9 @@ ENTRY main {
                         op::Add(op::ReduceScatter(op::Convert()),
                                 op::GetTupleElement()),
                         op::GetTupleElement()));
+  HloComputation* reduction =
+      while_body->root_instruction()->operand(1)->operand(0)->to_apply();
+  EXPECT_EQ(reduction->root_instruction()->shape().element_type(), S32);
 }
 
 TEST_F(ReorderConvertReduceAddTest, ConvertAllReduceAddNotInWhileBody) {
@@ -404,6 +408,48 @@ ENTRY main {
       op::Tuple(op::GetTupleElement(),
                 op::Add(op::AllReduce(op::Convert()), op::GetTupleElement()),
                 op::GetTupleElement()));
+  HloComputation* reduction =
+      while_body->root_instruction()->operand(1)->operand(0)->to_apply();
+  EXPECT_EQ(reduction->root_instruction()->shape().element_type(), S32);
+}
+
+TEST_F(ReorderConvertReduceAddTest, ConvertReduceConvertBackPattern) {
+  constexpr absl::string_view hlo = R"(
+HloModule main
+
+%reduction {
+  %x = bf16[] parameter(0)
+  %y = bf16[] parameter(1)
+  ROOT %add = bf16[] add(bf16[] %x, bf16[] %y)
+}
+
+%while_cond {
+  %param = (f32[4,2], f32[2,4], s32[]) parameter(0)
+  ROOT cond = pred[] constant(true)
+}
+
+%while_body {
+  %param = (f32[4,2], f32[2,4], s32[]) parameter(0)
+  %gte.0 = f32[4,2] get-tuple-element(%param), index=0
+  %gte.1 = f32[2,4] get-tuple-element(%param), index=1
+  %gte.2 = s32[] get-tuple-element(%param), index=2
+  %convert.0 = bf16[4,2] convert(%gte.0)
+  %reshape.0 = bf16[2,4] reshape(%convert.0)
+  %all_reduce.0 = bf16[2,4] all-reduce(%reshape.0), replica_groups={{0,1}}, to_apply=%reduction
+  %convert.1 = f32[2,4] convert(%all_reduce.0)
+  %add.0 = f32[2,4] add(%convert.1, %gte.1)
+  ROOT tuple = (f32[4,2], f32[2,4], s32[]) tuple(%gte.0, %add.0, %gte.2)
+}
+
+ENTRY main {
+  %init_param = (f32[4,2], f32[2,4], s32[]) parameter(0)
+  ROOT while = (f32[4,2], f32[2,4], s32[]) while(%init_param), condition=%while_cond, body=%while_body
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(hlo));
+  ReorderConvertReduceAdd rcra;
+  TF_ASSERT_OK_AND_ASSIGN(bool changed, rcra.Run(module.get()));
+  EXPECT_FALSE(changed);
 }
 
 }  // namespace

@@ -118,6 +118,36 @@ class InterpreterOptions {
     return experimental_shlo_composite_inlining_;
   }
 
+  // Controls to update Tensor names with Signature input & output names.
+  //
+  // WARNING: This is an experimental API and subject to change.
+  void SetUseSignatureTensorNames(bool value) {
+    experimental_use_signature_tensor_names_ = value;
+  }
+
+  // If `true`, the interpreter will use the tensor names from the Signature
+  // inputs and outputs.
+  //
+  // WARNING: This is an experimental API and subject to change.
+  bool GetUseSignatureTensorNames() const {
+    return experimental_use_signature_tensor_names_;
+  }
+
+  // If `true`, per-channel quantization zero-points that are all identical
+  // will be compressed into a single value to reduce memory usage.
+  //
+  // WARNING: This is an experimental API and subject to change.
+  void SetCompressQuantizationZeroPoints(bool value) {
+    experimental_compress_quantization_zero_points_ = value;
+  }
+
+  // Returns whether quantization zero-points compression is enabled.
+  //
+  // WARNING: This is an experimental API and subject to change.
+  bool GetCompressQuantizationZeroPoints() const {
+    return experimental_compress_quantization_zero_points_;
+  }
+
  private:
   bool experimental_preserve_all_tensors_ = false;
   bool experimental_ensure_dynamic_tensors_are_released_ = false;
@@ -125,6 +155,8 @@ class InterpreterOptions {
   bool experimental_disable_delegate_clustering_ = false;
   bool experimental_cache_constant_cast_op_ = false;
   bool experimental_shlo_composite_inlining_ = false;
+  bool experimental_use_signature_tensor_names_ = false;
+  bool experimental_compress_quantization_zero_points_ = false;
 };
 
 }  // namespace tflite

@@ -17,16 +17,24 @@ limitations under the License.
 
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <iostream>
+#include <memory>
 
-#include "xla/cpu_function_runtime.h"
+#include "absl/log/check.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "tensorflow/compiler/tf2xla/allocator.h"
+#include "xla/backends/cpu/runtime/rng_state_lib.h"
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 
 namespace {
 
-int32 GetResultIndex(const int32* result_index_table, int32 num_results) {
+int32_t GetResultIndex(const int32_t* result_index_table, int32_t num_results) {
   auto it =
       std::min_element(result_index_table, result_index_table + num_results);
 
@@ -40,8 +48,9 @@ int32 GetResultIndex(const int32* result_index_table, int32 num_results) {
 
 XlaCompiledCpuFunction::XlaCompiledCpuFunction(const StaticData& static_data,
                                                AllocMode alloc_mode)
-    : temp_allocation_index_(static_data.temp_allocation_index_),
-      raw_function_(static_data.raw_function_),
+    : function_library_symbol_map_(&static_data.function_library_symbol_map_),
+      temp_allocation_index_(static_data.temp_allocation_index_),
+      thunk_run_impl_(static_data.thunk_run_impl_),
       result_index_(GetResultIndex(static_data.result_index_table_,
                                    static_data.num_results_)),
       buffer_table_(new void*[static_data.num_buffers_]),
@@ -62,8 +71,8 @@ XlaCompiledCpuFunction::XlaCompiledCpuFunction(const StaticData& static_data,
   bool allocate_entry_params =
       alloc_mode == AllocMode::ARGS_VARIABLES_RESULTS_PROFILES_AND_TEMPS;
   // Allocate arg and temp buffers.
-  alloc_buffer_table_ = xla::cpu_function_runtime::MallocContiguousBuffers(
-      static_data.buffer_infos_, static_data.num_buffers_,
+  alloc_buffer_table_ = tensorflow::MallocContiguousBuffers(
+      absl::MakeConstSpan(static_data.buffer_infos_, static_data.num_buffers_),
       /*allocate_entry_params=*/allocate_entry_params, buffer_table_,
       /*annotate_initialized=*/true);
   // If Hlo profiling is enabled the generated code expects an appropriately
@@ -74,17 +83,43 @@ XlaCompiledCpuFunction::XlaCompiledCpuFunction(const StaticData& static_data,
   if (hlo_profiling_enabled()) {
     profile_counters_ = new int64_t[static_data.profile_counters_size_]();
   }
+
+  // Setup constants.
+  if (!static_data.embedded_constant_buffers_.empty()) {
+    size_t embedded_constant_buffers_idx = 0;
+    for (size_t i = 0; i < num_buffers(); ++i) {
+      if (!buffer_infos()[i].is_constant()) {
+        continue;
+      }
+
+      const auto& [buffer_size, buffer_data] =
+          static_data
+              .embedded_constant_buffers_[embedded_constant_buffers_idx++];
+
+      CHECK(buffer_size == buffer_infos()[i].size());
+
+      buffer_table()[i] = buffer_data;
+    }
+
+    CHECK(embedded_constant_buffers_idx ==
+          static_data.embedded_constant_buffers_.size());
+  }
+
+  // Setup rng states
+  {
+    rng_states_.reserve(static_data.rng_state_deltas_.size());
+    for (int64_t delta : static_data.rng_state_deltas_) {
+      rng_states_.emplace_back(std::make_unique<xla::cpu::RngState>(delta));
+    }
+  }
 }
 
 bool XlaCompiledCpuFunction::Run() {
-  XlaCustomCallStatus status;
-  raw_function_(buffer_table_[result_index_], &run_options_, nullptr,
-                buffer_table_, &status, profile_counters_);
-  return !xla::CustomCallStatusGetMessage(&status).has_value();
+  return thunk_run_impl_(buffer_table_, &run_options_, rng_states_);
 }
 
 XlaCompiledCpuFunction::~XlaCompiledCpuFunction() {
-  xla::cpu_function_runtime::FreeContiguous(alloc_buffer_table_);
+  FreeContiguous(alloc_buffer_table_);
   delete[] buffer_table_;
   delete[] profile_counters_;
 }
@@ -97,7 +132,7 @@ constexpr int kNotFound = -1;
 // the name isn't found, or is empty.
 //
 // REQUIRES: `names` is a nullptr-terminated array.
-int LookupNameIndex(const string& name, const char** names) {
+int LookupNameIndex(absl::string_view name, const char** names) {
   // Hitting this assert means that there is no name-to-index data available;
   // for AOT try the setting the tfcompile --gen_name_to_index flag.
   assert(names != nullptr);
@@ -115,11 +150,11 @@ int LookupNameIndex(const string& name, const char** names) {
 
 }  // namespace
 
-int XlaCompiledCpuFunction::LookupArgIndex(const string& name) const {
+int XlaCompiledCpuFunction::LookupArgIndex(const std::string& name) const {
   return LookupNameIndex(name, arg_names_);
 }
 
-int XlaCompiledCpuFunction::LookupVariableIndex(const string& name) const {
+int XlaCompiledCpuFunction::LookupVariableIndex(absl::string_view name) const {
   int index = LookupNameIndex(name, variable_names_);
   if (index == kNotFound) {
     return kNotFound;
@@ -127,7 +162,7 @@ int XlaCompiledCpuFunction::LookupVariableIndex(const string& name) const {
   return num_args_ - num_variables_ + index;
 }
 
-int XlaCompiledCpuFunction::LookupResultIndex(const string& name) const {
+int XlaCompiledCpuFunction::LookupResultIndex(const std::string& name) const {
   return LookupNameIndex(name, result_names_);
 }
 

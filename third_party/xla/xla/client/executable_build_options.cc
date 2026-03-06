@@ -39,12 +39,12 @@ limitations under the License.
 namespace xla {
 
 ExecutableBuildOptions& ExecutableBuildOptions::set_device_allocator(
-    se::DeviceMemoryAllocator* allocator) {
+    se::DeviceAddressAllocator* allocator) {
   device_allocator_ = allocator;
   return *this;
 }
 
-se::DeviceMemoryAllocator* ExecutableBuildOptions::device_allocator() const {
+se::DeviceAddressAllocator* ExecutableBuildOptions::device_allocator() const {
   return device_allocator_;
 }
 
@@ -202,6 +202,7 @@ absl::StatusOr<ExecutableBuildOptionsProto> ExecutableBuildOptions::ToProto()
   output.set_use_shardy_partitioner(use_shardy_partitioner());
   output.set_process_index(process_index());
   output.set_process_count(process_count());
+  output.set_slice_size(slice_size());
   return output;
 }
 
@@ -258,6 +259,7 @@ absl::StatusOr<ExecutableBuildOptions> ExecutableBuildOptionsFromProto(
   output.set_use_shardy_partitioner(input.use_shardy_partitioner());
   output.set_process_index(input.process_index());
   output.set_process_count(input.process_count());
+  output.set_slice_size(input.slice_size());
   return output;
 }
 

@@ -18,8 +18,9 @@ limitations under the License.
 
 #include <memory>
 
-#include "xla/pjrt/interpreter/interpreter_client.h"
+#include "xla/hlo/evaluator/hlo_evaluator.h"
 #include "xla/service/hlo_runner_pjrt.h"
+#include "xla/tests/aot_utils.h"
 #include "xla/tests/hlo_runner_agnostic_reference_mixin.h"
 
 namespace xla {
@@ -36,10 +37,8 @@ class HloPjRtInterpreterReferenceMixin
   template <typename... BaseArgs>
   explicit HloPjRtInterpreterReferenceMixin(BaseArgs&&... base_args)
       : HloRunnerAgnosticReferenceMixin<T>(
-            std::make_unique<HloRunnerPjRt>(
-                std::make_unique<InterpreterClient>(),
-                InterpreterClient::DeviceShapeRepresentation,
-                InterpreterClient::ShapeSizeBytes),
+            std::make_unique<HloRunnerPjRt>(MakeInterpreterClientAotAware(
+                []() { return std::make_unique<HloEvaluator>(); })),
             std::forward<BaseArgs>(base_args)...) {}
   ~HloPjRtInterpreterReferenceMixin() override = default;
 };

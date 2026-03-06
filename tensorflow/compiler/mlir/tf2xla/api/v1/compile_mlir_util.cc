@@ -68,6 +68,7 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/tensorflow/utils/convert_tensor.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/convert_type.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/data_dumper_logger_config.h"
+#include "tensorflow/compiler/mlir/tensorflow/utils/deserialize_mlir_module_utils.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/dump_mlir_util.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/dynamic_shape_utils.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/error_util.h"
@@ -87,7 +88,7 @@ limitations under the License.
 #include "xla/hlo/translate/mhlo_to_hlo/layout_util.h"
 #include "xla/hlo/translate/mhlo_to_hlo/mlir_hlo_to_hlo.h"
 #include "xla/hlo/translate/mhlo_to_hlo/type_to_shape.h"
-#include "xla/hlo/translate/stablehlo.h"
+#include "xla/hlo/translate/register.h"
 #include "xla/mlir_hlo/mhlo/IR/hlo_ops.h"
 #include "xla/mlir_hlo/mhlo/transforms/passes.h"
 #include "xla/mlir_hlo/stablehlo_ext/transforms/passes.h"
@@ -680,9 +681,7 @@ absl::Status BuildHloFromTfInner(
                                             custom_legalization_passes,
                                             /*lower_to_xla_hlo=*/true));
 
-  mlir::Block& block =
-      module_op.lookupSymbol<mlir::func::FuncOp>("main").front();
-  return mlir::BuildHloFromMlirHlo(block, builder, xla_params, returns);
+  return mlir::BuildHloFromMlirHlo(module_op, builder, xla_params, returns);
 }
 
 absl::Status ConvertMLIRWithOptionalXlaComputation(
@@ -971,8 +970,8 @@ static absl::StatusOr<std::vector<int>> RewriteWithArgs(
     TF_ASSIGN_OR_RETURN(auto value_attr,
                         ConvertTensor(xla_arg.constant_value, &builder));
     // TODO(hinsu): Use the actual location of the constant.
-    auto constant = builder.create<mlir::TF::ConstOp>(
-        mlir::UnknownLoc::get(module_op.getContext()), value_attr);
+    auto constant = mlir::TF::ConstOp::create(
+        builder, mlir::UnknownLoc::get(module_op.getContext()), value_attr);
     mlir_arg.replaceAllUsesWith(constant);
     args_to_erase.push_back(idx);
   }
@@ -1054,10 +1053,8 @@ absl::Status BuildHloFromModule(mlir::ModuleOp module_op,
 
   TF_RETURN_IF_ERROR(RunMlirPipelineAndMaybeDumpResults(tf2xla, module_op));
 
-  mlir::Block& block =
-      module_op.lookupSymbol<mlir::func::FuncOp>("main").front();
-  TF_RETURN_IF_ERROR(
-      mlir::BuildHloFromMlirHlo(block, builder, remaining_xla_params, returns));
+  TF_RETURN_IF_ERROR(mlir::BuildHloFromMlirHlo(module_op, builder,
+                                               remaining_xla_params, returns));
 
   if (VLOG_IS_ON(2)) {
     tensorflow::DumpMlirOpToFile("build_hlo_tf_after", module_op);

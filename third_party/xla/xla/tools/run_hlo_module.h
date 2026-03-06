@@ -23,9 +23,9 @@ limitations under the License.
 
 #include "absl/status/status.h"
 #include "xla/hlo/ir/hlo_module.h"
-#include "xla/service/hlo_runner.h"
+#include "xla/service/hlo_module_config.h"
+#include "xla/service/hlo_runner_interface.h"
 #include "xla/tools/run_hlo_module.pb.h"
-#include "tsl/platform/status.h"
 
 namespace xla {
 
@@ -40,7 +40,6 @@ struct RunHloModuleOptions {
   bool flatten_control_flow{false};
   bool run_test_hlo_passes{true};
   bool run_reference_hlo_passes{true};
-  bool force_use_cpu_thunk_runtime_for_test{false};
   // Using small float range by default, as otherwise all reductions
   // miscompare vs. the interpreter with inf/nan.
   bool use_large_float_range{false};

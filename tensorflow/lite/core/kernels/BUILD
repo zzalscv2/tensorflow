@@ -1,9 +1,11 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 load("//tensorflow/lite:build_def.bzl", "tflite_copts", "tflite_self_contained_libs_test_suite")
 load("//tensorflow/lite/core:special_rules.bzl", "builtin_ops_visibility_allowlist")
 
 package(
-    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     licenses = ["notice"],
 )
 
@@ -23,6 +25,7 @@ cc_test(
     srcs = ["register_test.cc"],
     deps = [
         ":builtin_ops",
+        "//tensorflow/compiler/mlir/lite/tools/versioning",
         "//tensorflow/lite:mutable_op_resolver",
         "//tensorflow/lite/c:common",
         "//tensorflow/lite/schema:schema_fbs",

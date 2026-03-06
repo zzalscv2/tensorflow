@@ -20,13 +20,14 @@ limitations under the License.
 #include <limits>
 #include <list>
 #include <memory>
-#include <numeric>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/algorithm/container.h"
 #include "absl/base/log_severity.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/log/check.h"
@@ -43,6 +44,26 @@ limitations under the License.
 
 namespace xla {
 namespace {
+
+using ::testing::ElementsAre;
+
+TEST(UtilTest, Product) {
+  EXPECT_EQ(Product({}), 1);
+  EXPECT_EQ(Product({1}), 1);
+  EXPECT_EQ(Product({2, 3}), 2 * 3);
+  EXPECT_EQ(Product({2, 7, 9}), 2 * 7 * 9);
+}
+
+TEST(UtilTest, ToMixedRadix) {
+  EXPECT_THAT(ToMixedRadix<std::vector<int64_t>>(0, {2, 3, 4}),
+              ElementsAre(0, 0, 0));
+  EXPECT_THAT(ToMixedRadix<std::vector<int64_t>>(1, {2, 3, 4}),
+              ElementsAre(0, 0, 1));
+  EXPECT_THAT(ToMixedRadix<std::vector<int64_t>>(19, {2, 3, 4}),
+              ElementsAre(19 / (3 * 4), 7 / 4, 3));
+  EXPECT_THAT(ToMixedRadix<std::vector<int64_t>>(23, {3, 2, 4}),
+              ElementsAre(23 / (2 * 4), 7 / 4, 3));
+}
 
 // Verifies that, even with a different number of leading spaces, the
 // Reindent routine turns them into a uniform number of leading spaces.
@@ -370,7 +391,7 @@ void PackInt4(absl::Span<const char> input, absl::Span<char> output) {
 
 TEST(UtilTest, PackInt4) {
   std::vector<char> input(7);
-  std::iota(input.begin(), input.end(), 0);
+  absl::c_iota(input, 0);
 
   std::vector<char> output_ref(CeilOfRatio<int64_t>(input.size(), 2));
   PackInt4(input, absl::MakeSpan(output_ref));
@@ -387,6 +408,27 @@ TEST(UtilTest, PackInt4) {
     EXPECT_EQ(unpacked[i], input[i]) << i;
   }
 }
+
+class PackUnpackIntNTest : public testing::TestWithParam<int> {};
+
+TEST_P(PackUnpackIntNTest, RoundTrip) {
+  const int bitwidth = GetParam();
+  std::vector<char> input(15);
+  for (int i = 0; i < input.size(); ++i) {
+    input[i] = i & LsbMask<uint8_t>(bitwidth);
+  }
+
+  std::vector<char> packed(CeilOfRatio<int64_t>(input.size(), 8 / bitwidth));
+  PackIntN(bitwidth, input, absl::MakeSpan(packed));
+  std::vector<char> unpacked(input.size());
+  UnpackIntN(bitwidth, packed, absl::MakeSpan(unpacked));
+  for (size_t i = 0; i < input.size(); ++i) {
+    EXPECT_EQ(unpacked[i], input[i]) << i;
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(PackUnpackIntNTest, PackUnpackIntNTest,
+                         testing::Values(1, 2, 4));
 
 TEST(UtilTest, MaybeOwningTestNull) {
   MaybeOwning<char> m(nullptr);

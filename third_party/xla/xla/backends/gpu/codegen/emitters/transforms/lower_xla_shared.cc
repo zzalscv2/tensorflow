@@ -24,8 +24,8 @@ limitations under the License.
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Attributes.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/Dominance.h"
-#include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/PatternMatch.h"
@@ -35,7 +35,7 @@ limitations under the License.
 #include "mlir/Pass/Pass.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include "xla/codegen/emitters/ir/xla_dialect.h.inc"
+#include "xla/codegen/emitters/ir/xla_ops.h"
 
 namespace xla::gpu {
 
@@ -70,8 +70,8 @@ struct LowerForall : mlir::OpRewritePattern<mlir::scf::ForallOp> {
       // xla.range is a closed interval so we subtract 1 from the size which is
       // half-open.
       int64_t upper_range = size - 1;
-      auto thread_id = b.create<mlir::gpu::ThreadIdOp>(
-          static_cast<mlir::gpu::Dimension>(idx));
+      auto thread_id = mlir::gpu::ThreadIdOp::create(
+          b, static_cast<mlir::gpu::Dimension>(idx));
       thread_id->setAttr("xla.range", b.getIndexArrayAttr({0, upper_range}));
       new_args.push_back(thread_id);
     }
@@ -95,13 +95,45 @@ struct LowerForall : mlir::OpRewritePattern<mlir::scf::ForallOp> {
   }
 };
 
+struct LowerWorkgroupId : mlir::OpRewritePattern<WorkGroupIdOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult matchAndRewrite(
+      WorkGroupIdOp op, mlir::PatternRewriter& rewriter) const override {
+    switch (op.getDimension()) {
+      case WorkGroupDimension::x:
+        return replaceWorkgroupId(op, rewriter, mlir::gpu::Dimension::x);
+      case WorkGroupDimension::y:
+        return replaceWorkgroupId(op, rewriter, mlir::gpu::Dimension::y);
+      case WorkGroupDimension::z:
+        return replaceWorkgroupId(op, rewriter, mlir::gpu::Dimension::z);
+      default:
+        return mlir::failure();
+    }
+  }
+
+ private:
+  mlir::LogicalResult replaceWorkgroupId(WorkGroupIdOp op,
+                                         mlir::PatternRewriter& rewriter,
+                                         mlir::gpu::Dimension dimension) const {
+    mlir::Location loc = op.getLoc();
+    mlir::ImplicitLocOpBuilder b(loc, rewriter);
+    auto block_id = mlir::gpu::BlockIdOp::create(b, dimension);
+    if (mlir::Attribute range = op->getAttr("xla.range")) {
+      block_id->setAttr("xla.range", op->getAttr("xla.range"));
+    }
+    rewriter.replaceOp(op, block_id);
+    return mlir::success();
+  }
+};
+
 struct LowerXlaSharedPass final
     : public impl::LowerXlaSharedPassBase<LowerXlaSharedPass> {
  public:
   void runOnOperation() final {
     mlir::MLIRContext* context = &getContext();
     mlir::RewritePatternSet patterns(context);
-    patterns.add<LowerForall>(context);
+    patterns.add<LowerForall, LowerWorkgroupId>(context);
     if (mlir::failed(
             mlir::applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       signalPassFailure();

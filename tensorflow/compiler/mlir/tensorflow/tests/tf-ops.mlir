@@ -272,7 +272,7 @@ func.func @testBroadcastGradientArgsIncompatibleBroadcastShape() -> (tensor<1xi3
 
 // -----
 
-func.func @testBroadcastGradientArgsInvalidS0Rank() -> (tensor<2x2xi32>, tensor<0xi32>) {
+func.func @testBroadcastGradientArgsInvalidS0Rank() -> (tensor<1xi32>, tensor<0xi32>) {
   %s0 = "tf.Const"() {value = dense<[[4, 1], [2, 3]]> : tensor<2x2xi32>} : () -> tensor<2x2xi32>
   %s1 = "tf.Const"() {value = dense<[2, 4]> : tensor<2xi32>} : () -> tensor<2xi32>
   // expected-error @+1 {{failed to verify that operand 0 is 1-D}}
@@ -282,7 +282,7 @@ func.func @testBroadcastGradientArgsInvalidS0Rank() -> (tensor<2x2xi32>, tensor<
 
 // -----
 
-func.func @testBroadcastGradientArgsInvalidS1Rank() -> (tensor<2xi32>, tensor<i32>) {
+func.func @testBroadcastGradientArgsInvalidS1Rank() -> (tensor<1xi32>, tensor<0xi32>) {
   %s0 = "tf.Const"() {value = dense<[4, 1]> : tensor<2xi32>} : () -> tensor<2xi32>
   %s1 = "tf.Const"() {value = dense<1> : tensor<i32>} : () -> tensor<i32>
   // expected-error @+1 {{failed to verify that operand 1 is 1-D}}
@@ -1184,7 +1184,7 @@ func.func @testInvalidIfOp(tensor<i1>, tensor<*xf32>) -> tensor<2xf32> {
 // -----
 
 // Test invalid tf.Yield operation (parent should be IfRegion)
-func.func @testInvalidYieldOp(%arg0: f32) -> () {
+func.func @testInvalidYieldOp(%arg0: f32) -> f32 {
   // expected-error @+1 {{'tf.Yield' op expects parent op to be one of 'tf.CaseRegion, tf.IfRegion, tf.WhileRegion, tf.GeneratorDatasetRegion'}}
   "tf.Yield"(%arg0) : (f32) -> ()
 }
@@ -1317,9 +1317,10 @@ func.func @testIfRegionElseTerminator(%arg0: tensor<i1>, %arg1: tensor<2xf32>) -
 
 // tf.Region yield number of results should match op number of results
 func.func @testIfRegionThenResultCount(%arg0: tensor<i1>, %arg1: tensor<2xf32>) -> tensor<2xf32> {
-  // expected-error @+1 {{'tf.IfRegion' op region control flow edge from Region #0 to parent results: source has 2 operands, but target successor needs 1}}
+  // expected-error @+1 {{'tf.IfRegion' op along control flow edge from Operation tf.Yield to parent: region branch point has 2 operands, but region successor needs 1 inputs}}
   %0 = "tf.IfRegion"(%arg0) ({
      %t = "tf.Abs"(%arg1) : (tensor<2xf32>) -> tensor<2xf32>
+     // expected-note @+1 {{region branch point}}
      "tf.Yield"(%t, %t) : (tensor<2xf32>, tensor<2xf32>) -> ()
     }, {
      %e = "tf.Acos"(%arg1) : (tensor<2xf32>) -> tensor<2xf32>
@@ -1332,12 +1333,13 @@ func.func @testIfRegionThenResultCount(%arg0: tensor<i1>, %arg1: tensor<2xf32>) 
 // -----
 
 func.func @testIfRegionElseResultCount(%arg0: tensor<i1>, %arg1: tensor<2xf32>) -> tensor<2xf32> {
-  // expected-error @+1 {{'tf.IfRegion' op region control flow edge from Region #1 to parent results: source has 2 operands, but target successor needs 1}}
+  // expected-error @+1 {{'tf.IfRegion' op along control flow edge from Operation tf.Yield to parent: region branch point has 2 operands, but region successor needs 1 inputs}}
   %0 = "tf.IfRegion"(%arg0) ({
      %t = "tf.Abs"(%arg1) : (tensor<2xf32>) -> tensor<2xf32>
      "tf.Yield"(%t) : (tensor<2xf32>) -> ()
     }, {
      %e = "tf.Acos"(%arg1) : (tensor<2xf32>) -> tensor<2xf32>
+     // expected-note @+1 {{region branch point}}
      "tf.Yield"(%e, %e) : (tensor<2xf32>, tensor<2xf32>) -> ()
     }) { is_stateless = false} : (tensor<i1>) -> tensor<2xf32>
 
@@ -2546,7 +2548,7 @@ func.func @testVariableShapeMultipleSubtypes(%arg0: tensor<*x!tf_type.resource<t
 
 // -----
 
-func.func @testVariableShapeWrongResultElemType(%arg0: tensor<*x!tf_type.resource<tensor<1x32x32x16xf32>>>) -> tensor<?xf32> {
+func.func @testVariableShapeWrongResultElemType(%arg0: tensor<*x!tf_type.resource<tensor<1x32x32x16xf32>>>) -> tensor<4xf32> {
   // expected-error @+1 {{result #0 must be tensor of 32/64-bit signed integer values}}
   %0 = "tf.VariableShape"(%arg0) : (tensor<*x!tf_type.resource<tensor<1x32x32x16xf32>>>) -> tensor<4xf32>
   func.return %0 : tensor<4xf32>
@@ -5134,6 +5136,29 @@ func.func @testUniformQuantizedClipByValue(
   func.return
 }
 
+// -----
+
+// CHECK-LABEL: func @testValidFusedConv2DBiasActivation
+func.func @testValidFusedConv2DBiasActivation(
+    %conv_input: tensor<*xf32>,
+    %filter: tensor<*xf32>,
+    %bias: tensor<*xf32>,
+    %side_input: tensor<*xf32>,
+    %conv_input_scale: tensor<*xf32>,
+    %side_input_scale: tensor<*xf32>) -> tensor<*xf32> {
+  %0 ="tf.FusedConv2DBiasActivation"(%conv_input, %filter, %bias, %side_input, %conv_input_scale, %side_input_scale) {
+    T = f32, Tbias = f32,
+    activation_mode = "Relu",
+    data_format = "NHWC",
+    dilations = [1, 1, 1, 1],
+    filter_format = "HWIO",
+    padding = "SAME",
+    strides = [1, 2, 2, 1]
+  } : (tensor<*xf32>, tensor<*xf32>, tensor<*xf32>, tensor<*xf32>, tensor<*xf32>, tensor<*xf32>) -> (tensor<*xf32>)
+  func.return %0 : tensor<*xf32>
+}
+
+
 // Following tests are for LegacyCall symbol use verifier.
 
 // -----
@@ -5198,6 +5223,7 @@ func.func @test_xla_call_module_with_invalid_symbol() {
   func.return
 }
 
+
 // -----
 
 func.func @init(%arg0: tensor<4xf32>) -> tensor<7xf32> {
@@ -5234,4 +5260,9 @@ func.func @testGeneratorDataset(%arg0: tensor<4xf32>,
               tensor<!tf_type.resource>,
               tensor<2xf32>) -> tensor<!tf_type.variant>
   return %0 : tensor<!tf_type.variant>
+}
+
+func.func @testDebugIdentity(%arg0: tensor<i32>) -> tensor<i32> {
+  %0 = "tf.DebugIdentity"(%arg0) {debug_urls = ["file:///tmp/foo"], device_name = "CPU", tensor_name = "test_tensor"} : (tensor<i32>) -> tensor<i32>
+  func.return %0 : tensor<i32>
 }

@@ -24,6 +24,7 @@ limitations under the License.
 #include "rocm/include/rocprim/thread/radix_key_codec.hpp"
 #include "rocm/include/rocprim/type_traits.hpp"
 #include "rocm/rocm_config.h"
+#include "xla/backends/gpu/ffi.h"
 #include "xla/ffi/ffi.h"
 #include "xla/ffi/ffi_api.h"  // IWYU pragma: keep
 #include "xla/stream_executor/rocm/rocm_status.h"
@@ -31,9 +32,9 @@ limitations under the License.
 
 // Required for sorting Eigen::half and bfloat16.
 namespace rocprim {
-namespace detail {
 
-#if (TF_ROCM_VERSION >= 50200)
+#if (TF_ROCM_VERSION >= 50200 && TF_ROCM_VERSION < 70000)
+namespace detail {
 template <>
 struct float_bit_mask<Eigen::half> {
   static constexpr uint16_t sign_bit = 0x8000;
@@ -49,14 +50,38 @@ struct float_bit_mask<tsl::bfloat16> {
   static constexpr uint16_t mantissa = 0x007F;
   using bit_type = uint16_t;
 };
-#endif  // TF_ROCM_VERSION >= 50200
+
 template <>
 struct radix_key_codec_base<Eigen::half>
     : radix_key_codec_floating<Eigen::half, uint16_t> {};
 template <>
 struct radix_key_codec_base<tsl::bfloat16>
     : radix_key_codec_floating<tsl::bfloat16, uint16_t> {};
-};  // namespace detail
+}  // namespace detail
+#else   // TF_ROCM_VERSION >= 70000
+namespace traits {
+
+template <>
+struct define<Eigen::half> {
+  using float_bit_mask =
+      rocprim::traits::float_bit_mask::values<uint16_t, 0x8000, 0x7C00, 0x03FF>;
+  using is_arithmetic = rocprim::traits::is_arithmetic::values<true>;
+  using number_format = rocprim::traits::number_format::values<
+      traits::number_format::kind::floating_point_type>;
+};
+
+template <>
+struct define<tsl::bfloat16> {
+  using float_bit_mask =
+      rocprim::traits::float_bit_mask::values<uint16_t, 0x8000, 0x7F80, 0x007F>;
+  using is_arithmetic = rocprim::traits::is_arithmetic::values<true>;
+  using number_format = rocprim::traits::number_format::values<
+      traits::number_format::kind::floating_point_type>;
+};
+
+}  // namespace traits
+#endif  // TF_ROCM_VERSION >= 50200 && TF_ROCM_VERSION < 70000
+
 };  // namespace rocprim
 
 namespace stream_executor {
@@ -227,7 +252,7 @@ static absl::Status CubSortPairsGetScratchSize(size_t* temp_bytes,
           .Attr<size_t>("num_items")                                          \
           .Attr<size_t>("batch_size"));                                       \
   XLA_FFI_REGISTER_HANDLER(                                                   \
-      xla::ffi::GetXlaFfiApi(), "xla.gpu.ext.cub_sort_keys_" #suffix, "CUDA", \
+      xla::ffi::GetXlaFfiApi(), "xla.gpu.ext.cub_sort_keys_" #suffix, "ROCM", \
       {/* .instantiate = */ nullptr, /* .prepare = */ nullptr,                \
        /* .initialize = */ kCubSortKeysInitialize_##suffix,                   \
        /* .execute = */ kCubSortKeysExecute_##suffix});
@@ -253,14 +278,14 @@ static absl::Status CubSortPairsGetScratchSize(size_t* temp_bytes,
           .Attr<size_t>("num_items")                                           \
           .Attr<size_t>("batch_size"));                                        \
   XLA_FFI_REGISTER_HANDLER(                                                    \
-      xla::ffi::GetXlaFfiApi(), "xla.gpu.ext.cub_sort_pairs_" #suffix, "CUDA", \
+      xla::ffi::GetXlaFfiApi(), "xla.gpu.ext.cub_sort_pairs_" #suffix, "ROCM", \
       {/* .instantiate = */ nullptr, /* .prepare = */ nullptr,                 \
        /* .initialize = */ kCubSortPairsInitialize_##suffix,                   \
        /* .execute = */ kCubSortPairsExecute_##suffix});
 
 // Floating point types.
 #ifdef CUB_TYPE_BF16
-XLA_CUB_DEFINE_SORT_KEYS(bf16, __nv_bfloat16)
+XLA_CUB_DEFINE_SORT_KEYS(bf16, hip_bfloat16)
 #endif
 #ifdef CUB_TYPE_F16
 XLA_CUB_DEFINE_SORT_KEYS(f16, __half)
@@ -323,6 +348,9 @@ XLA_CUB_DEFINE_SORT_PAIRS(u16_b64, uint16_t, uint64_t)
 #endif
 
 // Pairs with 32-bit key.
+#ifdef CUB_TYPE_S32_B32
+XLA_CUB_DEFINE_SORT_PAIRS(s32_b32, int32_t, uint32_t)
+#endif
 #ifdef CUB_TYPE_U32_B16
 XLA_CUB_DEFINE_SORT_PAIRS(u32_b16, uint32_t, uint16_t)
 #endif

@@ -25,6 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -33,18 +34,24 @@ limitations under the License.
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "google/protobuf/descriptor.h"
 #include "xla/client/executable_build_options.h"
+#include "xla/debug_options_flags.h"
 #include "xla/layout.h"
 #include "xla/pjrt/pjrt_common.h"
 #include "xla/pjrt/pjrt_layout.h"
 #include "xla/pjrt/proto/compile_options.pb.h"
+#include "xla/pjrt/proto/executable_metadata.pb.h"
 #include "xla/pjrt/proto/execute_options.pb.h"
 #include "xla/service/buffer_assignment.h"
+#include "xla/service/compiler.h"
 #include "xla/service/computation_layout.h"
 #include "xla/service/hlo_cost_analysis.h"
 #include "xla/service/hlo_value.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 #include "xla/xla.pb.h"
 #include "xla/xla_data.pb.h"
@@ -77,12 +84,16 @@ absl::StatusOr<CompileOptionsProto> CompileOptions::ToProto() const {
       *output.add_argument_layouts() = layout.ToProto();
     }
   }
+  output.set_allow_in_place_mlir_modification(allow_in_place_mlir_modification);
+  output.set_matrix_unit_operand_precision(matrix_unit_operand_precision);
   output.set_parameter_is_tupled_arguments(parameter_is_tupled_arguments);
   TF_ASSIGN_OR_RETURN(*output.mutable_executable_build_options(),
                       executable_build_options.ToProto());
   output.set_compile_portable_executable(compile_portable_executable);
   output.set_profile_version(profile_version);
-  if (multi_slice_config != nullptr) {
+  if (!serialized_multi_slice_config.empty()) {
+    output.set_serialized_multi_slice_config(serialized_multi_slice_config);
+  } else if (multi_slice_config != nullptr) {
     output.set_serialized_multi_slice_config(multi_slice_config->Serialize());
   }
   for (auto& env_option_override : env_option_overrides) {
@@ -92,20 +103,24 @@ absl::StatusOr<CompileOptionsProto> CompileOptions::ToProto() const {
                env_option_override.second);
   }
 
-  if (target_config.has_value()) {
-    *output.mutable_target_config() = target_config->ToProto();
+  if (gpu_target_config.has_value()) {
+    *output.mutable_target_config() = gpu_target_config->ToProto();
+  }
+  if (compiler_variant.has_value()) {
+    output.set_compiler_variant(*compiler_variant);
   }
   return output;
 }
 
 absl::StatusOr<CompileOptions> CompileOptions::FromProto(
     const CompileOptionsProto& proto) {
+  CompileOptions output;
   if (!proto.serialized_multi_slice_config().empty()) {
-    return Unimplemented(
-        "multi_slice_config not supported in CompileOptions::FromProto.");
+    LOG(WARNING) << "Multi slice config from proto, must deserialize to use.";
+    output.serialized_multi_slice_config =
+        proto.serialized_multi_slice_config();
   }
 
-  CompileOptions output;
   if (proto.argument_layouts_size() > 0) {
     std::vector<Shape> output_argument_layouts;
     output_argument_layouts.reserve(proto.argument_layouts_size());
@@ -115,6 +130,9 @@ absl::StatusOr<CompileOptions> CompileOptions::FromProto(
     }
     output.argument_layouts = std::move(output_argument_layouts);
   }
+  output.allow_in_place_mlir_modification =
+      proto.allow_in_place_mlir_modification();
+  output.matrix_unit_operand_precision = proto.matrix_unit_operand_precision();
   output.parameter_is_tupled_arguments = proto.parameter_is_tupled_arguments();
   TF_ASSIGN_OR_RETURN(
       ExecutableBuildOptions executable_build_options,
@@ -126,9 +144,26 @@ absl::StatusOr<CompileOptions> CompileOptions::FromProto(
                       LoadEnvOptionOverrides(proto.env_option_overrides()));
 
   if (proto.has_target_config()) {
-    output.target_config = xla::Compiler::TargetConfig(proto.target_config());
+    TF_ASSIGN_OR_RETURN(
+        output.gpu_target_config,
+        Compiler::GpuTargetConfig::FromProto(proto.target_config()));
+  }
+  if (proto.has_compiler_variant()) {
+    output.compiler_variant = proto.compiler_variant();
   }
   return output;
+}
+
+bool IsEarlyExitCompilation(const xla::CompileOptions& compile_options) {
+  for (int i = compile_options.env_option_overrides.size() - 1; i >= 0; --i) {
+    const auto& [k, v] = compile_options.env_option_overrides[i];
+    if (k == "xla_early_exit_with_layouts") {
+      return std::get<bool>(v);
+    }
+  }
+  return compile_options.executable_build_options.has_debug_options() &&
+         compile_options.executable_build_options.debug_options()
+             .xla_early_exit_with_layouts();
 }
 
 MultiSliceConfig::~MultiSliceConfig() = default;
@@ -136,8 +171,8 @@ MultiSliceConfig::~MultiSliceConfig() = default;
 absl::StatusOr<ExecuteOptionsProto> ExecuteOptions::ToProto() const {
   ExecuteOptionsProto proto;
 
-  proto.set_arguments_are_tupled(arguments_are_tupled);
-  proto.set_untuple_result(untuple_result);
+  proto.set_arguments_are_tupled(false);
+  proto.set_untuple_result(true);
   proto.set_launch_id(launch_id);
   if (context != nullptr) {
     return absl::UnimplementedError(
@@ -185,8 +220,6 @@ absl::StatusOr<ExecuteOptions> ExecuteOptions::FromProto(
     const ExecuteOptionsProto& proto) {
   ExecuteOptions options;
 
-  options.arguments_are_tupled = proto.arguments_are_tupled();
-  options.untuple_result = proto.untuple_result();
   options.launch_id = proto.launch_id();
   options.strict_shape_checking = proto.strict_shape_checking();
   options.use_major_to_minor_data_layout_for_callbacks =
@@ -228,6 +261,8 @@ CompiledMemoryStatsProto CompiledMemoryStats::ToProto() const {
   proto.set_host_output_size_in_bytes(host_output_size_in_bytes);
   proto.set_host_alias_size_in_bytes(host_alias_size_in_bytes);
   proto.set_host_temp_size_in_bytes(host_temp_size_in_bytes);
+  proto.set_peak_memory_in_bytes(peak_memory_in_bytes);
+  proto.set_total_size_in_bytes(total_size_in_bytes);
   return proto;
 }
 
@@ -246,80 +281,9 @@ CompiledMemoryStats CompiledMemoryStats::FromProto(
   stats.host_output_size_in_bytes = proto.host_output_size_in_bytes();
   stats.host_alias_size_in_bytes = proto.host_alias_size_in_bytes();
   stats.host_temp_size_in_bytes = proto.host_temp_size_in_bytes();
+  stats.peak_memory_in_bytes = proto.peak_memory_in_bytes();
+  stats.total_size_in_bytes = proto.total_size_in_bytes();
   return stats;
-}
-
-// Recomputes the memory stats from allocations. Why recompute?
-// Firstly, there are cases in which gpu::Executable inherits its allocations
-// from elsewhere, and no buffer assignment is available.
-// Secondly, exec->buffer_assignment()->GetStats() provides the statistics we
-// want, but does not distinguish between device and host memory, and does
-// not account for aliased memory.
-void CompiledMemoryStats::PopulateBufferStatsFromAllocations(
-    absl::Span<const BufferAllocation> allocs) {
-  argument_size_in_bytes = 0;
-  output_size_in_bytes = 0;
-  temp_size_in_bytes = 0;
-  alias_size_in_bytes = 0;
-  host_argument_size_in_bytes = 0;
-  host_output_size_in_bytes = 0;
-  host_temp_size_in_bytes = 0;
-  host_alias_size_in_bytes = 0;
-
-  for (auto& alloc : allocs) {
-    // All logical buffers assigned to a buffer allocation share a color.
-    // With buffer assigner's default colorer the color happens to be the
-    // memory space of the underlying HLO value. Callers may choose other
-    // colorers, however, e.g.:
-    // https://github.com/openxla/xla/blob/50c6489cb058881cc65622605c9c55029abebc5b/xla/service/gpu/compile_module_to_llvm_ir.cc#L152
-    // Until buffer allocations provide a stronger guarantee about colors,
-    // we sanity-check that the default coloring behavior was used.
-    int64_t alloc_memory_space = -1;
-    for (const auto& [value, _] : alloc.assigned_buffers()) {
-      const HloPosition& defining_position = value->defining_position();
-      int64_t memory_space = Layout::kDefaultMemorySpace;
-      if (defining_position.shape().has_layout()) {
-        memory_space = defining_position.shape().layout().memory_space();
-      }
-      if (alloc_memory_space == -1) {
-        alloc_memory_space = memory_space;
-      } else {
-        CHECK(alloc_memory_space == memory_space &&
-              "expected same memory space for all assignments in allocation");
-      }
-    }
-
-    bool is_host = alloc_memory_space == Layout::kHostMemorySpace;
-    int64_t size = alloc.size();
-    if (alloc.is_entry_computation_parameter()) {
-      if (is_host) {
-        host_argument_size_in_bytes += size;
-      } else {
-        argument_size_in_bytes += size;
-      }
-      if (alloc.is_parameter_aliased_with_output()) {
-        if (is_host) {
-          host_alias_size_in_bytes += size;
-        } else {
-          alias_size_in_bytes += size;
-        }
-      }
-    }
-    if (alloc.maybe_live_out()) {
-      if (is_host) {
-        host_output_size_in_bytes += size;
-      } else {
-        output_size_in_bytes += size;
-      }
-    }
-    if (alloc.IsPreallocatedTempBuffer()) {
-      if (is_host) {
-        host_temp_size_in_bytes += size;
-      } else {
-        temp_size_in_bytes += size;
-      }
-    }
-  }
 }
 
 void GetOpSharding(std::vector<OpSharding>& out, const OpSharding& sharding) {
@@ -637,6 +601,12 @@ absl::Status CompileOptions::ApplyOption(const std::string& key,
   auto* xla_field = xla::DebugOptions::descriptor()->FindFieldByName(key);
   if (xla_field == nullptr) {
     return InvalidArgument("No such compile option: '%s'", key);
+  }
+  if (xla::GetFlagStatus(key) == xla::FlagStatus::kDeprecated) {
+    LOG(WARNING) << "Compile option '" << key
+                 << "' is deprecated and will not be supported when 6 months "
+                    "deprecation period ends. Check the flag description "
+                    "for more details.";
   }
   xla::DebugOptions& debug_options =
       *executable_build_options.mutable_debug_options();

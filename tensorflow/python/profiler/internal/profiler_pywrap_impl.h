@@ -33,14 +33,14 @@ class ProfilerSessionWrapper {
  public:
   absl::Status Start(
       const char* logdir,
-      const absl::flat_hash_map<std::string, std::variant<int, std::string>>&
-          options);
-  absl::Status Stop(tensorflow::string* result);
+      const absl::flat_hash_map<std::string,
+                                std::variant<bool, int, std::string>>& options);
+  absl::Status Stop(std::string* result);
   absl::Status ExportToTensorBoard();
 
  private:
   std::unique_ptr<tsl::ProfilerSession> session_;
-  tensorflow::string logdir_;
+  std::string logdir_;
 };
 
 }  // namespace pywrap

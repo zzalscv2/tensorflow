@@ -31,6 +31,7 @@ limitations under the License.
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
+#include "xla/hlo/analysis/alias_info.h"
 #include "xla/hlo/analysis/hlo_alias_analysis.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding_cost_graph.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding_device_mesh.h"
@@ -181,14 +182,15 @@ ENTRY %elementwise {
   void RunAutoShardingWithOptions(HloModule* module, AutoShardingOption option,
                                   size_t expected_num_tiles,
                                   size_t expected_sharded_dimensions = 1) {
-    TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module));
+    TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                            AutoSharding(option, &alias_info_).Run(module));
     EXPECT_TRUE(changed);
     // To simplify the test, only checking the sharding of root.
     auto* root = FindInstruction(module, "root");
     ASSERT_NE(root, nullptr);
     EXPECT_EQ(root->sharding().NumTiles(), expected_num_tiles);
     EXPECT_EQ(VectorGreaterThanOneElementCount(
-                  root->sharding().tile_assignment().dimensions(),
+                  root->sharding().dimensions(),
                   root->sharding().ReplicateOnLastTileDim()),
               expected_sharded_dimensions);
   }
@@ -201,7 +203,7 @@ ENTRY %elementwise {
 
   void RunAutoShardingWithOptionsExpectFail(HloModule* module,
                                             AutoShardingOption option) {
-    EXPECT_FALSE(AutoSharding(option).Run(module).ok());
+    EXPECT_FALSE(AutoSharding(option, &alias_info_).Run(module).ok());
   }
 
   void RunMatMulAutoShardingWithOptionsNoDeviceIds(
@@ -217,16 +219,18 @@ ENTRY %elementwise {
                                              AutoShardingOption option,
                                              std::vector<int64_t> expected_tile,
                                              bool expected_last_dim_replicate) {
-    TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module));
+    TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                            AutoSharding(option, &alias_info_).Run(module));
     EXPECT_TRUE(changed);
     // To simplify the test, only checking the sharding of root.
     HloInstruction* root = FindInstruction(module, "root");
     ASSERT_NE(root, nullptr);
     EXPECT_EQ(root->sharding().ReplicateOnLastTileDim(),
               expected_last_dim_replicate);
-    EXPECT_THAT(root->sharding().tile_assignment().dimensions(),
-                ElementsAreArray(expected_tile));
+    EXPECT_THAT(root->sharding().dimensions(), ElementsAreArray(expected_tile));
   }
+
+  AliasInfo alias_info_;
 };
 
 TEST_F(AutoShardingTest, MatmulMeshShape1DMeshShape) {
@@ -508,17 +512,18 @@ TEST_F(AutoShardingTest, InvalidOptions) {
 
 TEST_F(AutoShardingTest, MemoryBudgetTest) {
   auto compute_memory_budget_lower_bound =
-      [](const HloModule& module, int64_t num_devices,
-         const absl::flat_hash_map<std::string, std::vector<HloSharding>>&
-             preserved_shardings = {}) -> absl::StatusOr<int64_t> {
+      [this](const HloModule& module, int64_t num_devices,
+             const absl::flat_hash_map<std::string, std::vector<HloSharding>>&
+                 preserved_shardings = {}) -> absl::StatusOr<int64_t> {
     auto size_fn = [](const BufferValue& buffer) {
       return spmd::ByteSizeOfShape(buffer.shape());
     };
-    TF_ASSIGN_OR_RETURN(HloSchedule schedule,
-                        ScheduleModule(&module, DFSMemoryScheduler(size_fn)));
+    TF_ASSIGN_OR_RETURN(
+        HloSchedule schedule,
+        ScheduleModule(&module, DFSMemoryScheduler(&alias_info_, size_fn)));
     const HloComputation* entry_computation = module.entry_computation();
     std::unique_ptr<HloAliasAnalysis> alias_analysis =
-        HloAliasAnalysis::Run(&module).value();
+        HloAliasAnalysis::Run(&module, &alias_info_).value();
 
     TF_ASSIGN_OR_RETURN(
         std::unique_ptr<HloLiveRange> hlo_live_range,
@@ -587,7 +592,8 @@ ENTRY %elementwise {
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* instruction = FindInstruction(module.get(), "param0");
@@ -612,7 +618,8 @@ ENTRY %elementwise {
       AutoShardingOption::PreserveShardingsType::kKeepAllShardings;
   option.enable = true;
   option.device_mesh_shape = {16, 8};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(5) << module->ToString();
   EXPECT_TRUE(changed);
   std::vector<HloInstruction*> instructions =
@@ -636,7 +643,8 @@ ENTRY %elementwise {
   AutoShardingOption option;
   option.enable = true;
   option.device_mesh_shape = {512};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(5) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* convolution =
@@ -667,7 +675,8 @@ ENTRY %elementwise {
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
                           ParseAndReturnVerifiedModule(kHloString));
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
   HloInstruction* slice = FindInstruction(module.get(), "slice");
@@ -691,7 +700,8 @@ ENTRY %elementwise {
       bool changed, AutoSharding(/* option */ {.enable = true,
                                                .device_mesh_shape = {2, 2},
                                                .device_mesh_alpha = {1.0, 1.0},
-                                               .device_mesh_beta = {0.01, 1.0}})
+                                               .device_mesh_beta = {0.01, 1.0}},
+                                 &alias_info_)
                         .Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
@@ -720,7 +730,8 @@ ENTRY %elementwise {
       bool changed, AutoSharding(/* option */ {.enable = true,
                                                .device_mesh_shape = {64, 1},
                                                .device_mesh_alpha = {1.0, 1.0},
-                                               .device_mesh_beta = {0.01, 1.0}})
+                                               .device_mesh_beta = {0.01, 1.0}},
+                                 &alias_info_)
                         .Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
@@ -745,7 +756,8 @@ ENTRY %elementwise {
       bool changed, AutoSharding(/* option */ {.enable = true,
                                                .device_mesh_shape = {64, 1},
                                                .device_mesh_alpha = {1.0, 1.0},
-                                               .device_mesh_beta = {0.01, 1.0}})
+                                               .device_mesh_beta = {0.01, 1.0}},
+                                 &alias_info_)
                         .Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
@@ -770,15 +782,15 @@ ENTRY %elementwise {
   TF_ASSERT_OK_AND_ASSIGN(
       bool changed,
       AutoSharding(
-          /* option */ {
-              .enable = true,
-              .preserve_shardings =
-                  AutoShardingOption::PreserveShardingsType::kKeepAllShardings,
-              .allow_mixed_mesh_shape = false,
-              .only_allow_divisible_input_output = false,
-              .device_mesh_shape = {16, 16},
-              .device_mesh_alpha = {1.0, 1.0},
-              .device_mesh_beta = {0.01, 1.0}})
+          /* option */ {.enable = true,
+                        .preserve_shardings = AutoShardingOption::
+                            PreserveShardingsType::kKeepAllShardings,
+                        .allow_mixed_mesh_shape = false,
+                        .only_allow_divisible_input_output = false,
+                        .device_mesh_shape = {16, 16},
+                        .device_mesh_alpha = {1.0, 1.0},
+                        .device_mesh_beta = {0.01, 1.0}},
+          &alias_info_)
           .Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
@@ -804,15 +816,15 @@ ENTRY %elementwise {
   TF_ASSERT_OK_AND_ASSIGN(
       bool changed,
       AutoSharding(
-          /* option */ {
-              .enable = true,
-              .preserve_shardings =
-                  AutoShardingOption::PreserveShardingsType::kKeepAllShardings,
-              .solve_nd_sharding_iteratively = true,
-              .device_mesh_shape = {2, 2},
-              .device_mesh_ids = {0, 2, 1, 3},
-              .device_mesh_alpha = {1.0, 1.0},
-              .device_mesh_beta = {0.01, 1.0}})
+          /* option */ {.enable = true,
+                        .preserve_shardings = AutoShardingOption::
+                            PreserveShardingsType::kKeepAllShardings,
+                        .solve_nd_sharding_iteratively = true,
+                        .device_mesh_shape = {2, 2},
+                        .device_mesh_ids = {0, 2, 1, 3},
+                        .device_mesh_alpha = {1.0, 1.0},
+                        .device_mesh_beta = {0.01, 1.0}},
+          &alias_info_)
           .Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
@@ -844,15 +856,15 @@ ENTRY %slicemodule {
   TF_ASSERT_OK_AND_ASSIGN(
       bool changed,
       AutoSharding(
-          /* option */ {
-              .enable = true,
-              .preserve_shardings =
-                  AutoShardingOption::PreserveShardingsType::kKeepAllShardings,
-              .solve_nd_sharding_iteratively = true,
-              .device_mesh_shape = {2, 2},
-              .device_mesh_ids = {0, 2, 1, 3},
-              .device_mesh_alpha = {1.0, 1.0},
-              .device_mesh_beta = {0.01, 1.0}})
+          /* option */ {.enable = true,
+                        .preserve_shardings = AutoShardingOption::
+                            PreserveShardingsType::kKeepAllShardings,
+                        .solve_nd_sharding_iteratively = true,
+                        .device_mesh_shape = {2, 2},
+                        .device_mesh_ids = {0, 2, 1, 3},
+                        .device_mesh_alpha = {1.0, 1.0},
+                        .device_mesh_beta = {0.01, 1.0}},
+          &alias_info_)
           .Run(module.get()));
 
   VLOG(10) << module->ToString();
@@ -882,13 +894,15 @@ ENTRY %elementwise {
   TF_ASSERT_OK_AND_ASSIGN(
       bool changed,
       AutoSharding(
-          /* option */ AutoShardingOption{
+          /* option */
+          AutoShardingOption{
               .enable = true,
               .preserve_shardings =
                   AutoShardingOption::PreserveShardingsType::kKeepAllShardings,
               .device_mesh_shape = {128, 1},
               .device_mesh_alpha = {1.0, 1.0},
-              .device_mesh_beta = {0.01, 1.0}})
+              .device_mesh_beta = {0.01, 1.0}},
+          &alias_info_)
           .Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
@@ -910,7 +924,8 @@ ENTRY %elementwise {
   TF_ASSERT_OK_AND_ASSIGN(
       bool changed,
       AutoSharding(
-          /* option */ AutoShardingOption{
+          /* option */
+          AutoShardingOption{
               .enable = true,
               .preserve_shardings =
                   AutoShardingOption::PreserveShardingsType::kKeepAllShardings,
@@ -919,7 +934,8 @@ ENTRY %elementwise {
               .device_mesh_shape = {16, 16},
               .device_mesh_alpha = {1.0, 1.0},
               .device_mesh_beta = {0.01, 1.0},
-              .allow_shardings_small_dims_across_many_devices = true})
+              .allow_shardings_small_dims_across_many_devices = true},
+          &alias_info_)
           .Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
@@ -931,7 +947,8 @@ ENTRY %elementwise {
   TF_ASSERT_OK_AND_ASSIGN(
       changed,
       AutoSharding(
-          /* option */ AutoShardingOption{
+          /* option */
+          AutoShardingOption{
               .enable = true,
               .preserve_shardings =
                   AutoShardingOption::PreserveShardingsType::kKeepAllShardings,
@@ -940,7 +957,8 @@ ENTRY %elementwise {
               .device_mesh_shape = {16, 16},
               .device_mesh_alpha = {1.0, 1.0},
               .device_mesh_beta = {0.01, 1.0},
-              .allow_shardings_small_dims_across_many_devices = false})
+              .allow_shardings_small_dims_across_many_devices = false},
+          &alias_info_)
           .Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
@@ -964,7 +982,8 @@ ENTRY %elementwise {
   TF_ASSERT_OK_AND_ASSIGN(
       bool changed,
       AutoSharding(
-          /* option */ AutoShardingOption{
+          /* option */
+          AutoShardingOption{
               .enable = true,
               .preserve_shardings =
                   AutoShardingOption::PreserveShardingsType::kKeepAllShardings,
@@ -975,7 +994,8 @@ ENTRY %elementwise {
               .device_mesh_shape = {16, 16},
               .device_mesh_alpha = {1.0, 1.0},
               .device_mesh_beta = {0.01, 1.0},
-              .allow_shardings_small_dims_across_many_devices = true})
+              .allow_shardings_small_dims_across_many_devices = true},
+          &alias_info_)
           .Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
@@ -990,7 +1010,8 @@ ENTRY %elementwise {
   TF_ASSERT_OK_AND_ASSIGN(
       changed,
       AutoSharding(
-          /* option */ AutoShardingOption{
+          /* option */
+          AutoShardingOption{
               .enable = true,
               .preserve_shardings =
                   AutoShardingOption::PreserveShardingsType::kKeepAllShardings,
@@ -1001,7 +1022,8 @@ ENTRY %elementwise {
               .device_mesh_shape = {16, 16},
               .device_mesh_alpha = {1.0, 1.0},
               .device_mesh_beta = {0.01, 1.0},
-              .allow_shardings_small_dims_across_many_devices = false})
+              .allow_shardings_small_dims_across_many_devices = false},
+          &alias_info_)
           .Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
@@ -1028,7 +1050,8 @@ ENTRY %RngBitGenerator (p0: u64[2]) -> (u64[2], u32[16,16]) {
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {1.0, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* instruction = FindInstruction(module.get(), "p0");
@@ -1079,7 +1102,8 @@ ENTRY main {
   option.device_mesh_shape = {4, 4};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {1.0, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   LOG(INFO) << module->ToString();
   EXPECT_TRUE(changed);
 
@@ -1138,7 +1162,8 @@ ENTRY main {
   option.device_mesh_shape = {4, 4};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {1.0, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
 
@@ -1203,10 +1228,11 @@ ENTRY main {
   option.device_mesh_shape = {4, 4};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {1.0, 1.0};
-  EXPECT_DEATH(auto status = AutoSharding(option).Run(module.get()),
-               "Auto-sharding cannot infer a single appropriate mesh shape for "
-               "this HLO, and AutoShardingption::try_multiple_mesh_shapes is "
-               "set to false. Please re-run with the option set to true.");
+  EXPECT_DEATH(
+      auto status = AutoSharding(option, &alias_info_).Run(module.get()),
+      "Auto-sharding cannot infer a single appropriate mesh shape for "
+      "this HLO, and AutoShardingption::try_multiple_mesh_shapes is "
+      "set to false. Please re-run with the option set to true.");
 }
 
 TEST_F(AutoShardingTest, RngBitGeneratorTupleInput) {
@@ -1228,7 +1254,8 @@ ENTRY %RngBitGenerator {
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* param0 = FindInstruction(module.get(), "param.0");
@@ -1260,7 +1287,8 @@ ENTRY %entry {
   option.solve_nd_sharding_iteratively = false;
   option.preserve_shardings =
       AutoShardingOption::PreserveShardingsType::kKeepAllShardings;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(2) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* param0 = FindInstruction(module.get(), "param0");
@@ -1297,7 +1325,8 @@ ENTRY %entry {
   option.solver_timeout_in_seconds = -300;
   option.preserve_shardings =
       AutoShardingOption::PreserveShardingsType::kKeepAllShardings;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(2) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* param0 = FindInstruction(module.get(), "param0");
@@ -1332,7 +1361,8 @@ ENTRY %entry {
   option.device_mesh_beta = {0.01, 1.0};
   option.preserve_shardings =
       AutoShardingOption::PreserveShardingsType::kKeepAllShardings;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(2) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* param0 = FindInstruction(module.get(), "param0");
@@ -1364,7 +1394,8 @@ ENTRY %entry {
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
   option.allow_mixed_mesh_shape = false;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(2) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* param0 = FindInstruction(module.get(), "param0");
@@ -1417,7 +1448,8 @@ ENTRY %entry {
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
   option.allow_mixed_mesh_shape = false;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(2) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* param0 = FindInstruction(module.get(), "param0");
@@ -1470,7 +1502,8 @@ ENTRY %entry {
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
   option.allow_mixed_mesh_shape = false;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(2) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* param0 = FindInstruction(module.get(), "param0");
@@ -1514,7 +1547,8 @@ ENTRY twomatmul {
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* param1 = FindInstruction(module.get(), "parameter.1");
@@ -1563,7 +1597,8 @@ ENTRY twomatmul {
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* param1 = FindInstruction(module.get(), "parameter.1");
@@ -1611,7 +1646,8 @@ ENTRY %entry {
   option.device_mesh_shape = {2, 2};
   option.preserve_shardings =
       AutoShardingOption::PreserveShardingsType::kKeepAllShardings;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   EXPECT_TRUE(changed);
   // %annotate's sharding is moved to %copy.
   auto* copy = FindInstruction(module.get(), "copy");
@@ -1644,10 +1680,10 @@ ENTRY %entry (param0: f32[4,256,64], param1: f32[4,256,32]) -> f32[64,32] {
   TF_ASSERT_OK_AND_ASSIGN(
       AutoShardingImplementation::SaveShardingAnnotationsResult
           saved_shardings_result,
-      AutoShardingImplementation(option).SaveAndRemoveShardingAnnotation(
-          module.get(), instructions_to_shard,
-          /* replicated_small_tensors */ {},
-          /* execution_threads */ {}));
+      AutoShardingImplementation(option, &alias_info_)
+          .SaveAndRemoveShardingAnnotation(module.get(), instructions_to_shard,
+                                           /* replicated_small_tensors */ {},
+                                           /* execution_threads */ {}));
   absl::flat_hash_map<std::string, std::vector<HloSharding>> saved_shardings =
       saved_shardings_result.preserved_shardings;
   EXPECT_FALSE(saved_shardings_result.module_is_changed);
@@ -1702,10 +1738,11 @@ ENTRY %entry (param0: f32[4,256,64], param1: f32[4,256,32]) -> f32[64,32] {
   TF_ASSERT_OK_AND_ASSIGN(
       AutoShardingImplementation::SaveShardingAnnotationsResult
           saved_shardings_result,
-      AutoShardingImplementation(option).SaveAndRemoveShardingAnnotation(
-          module.get(), instructions_to_shard,
-          /* replicated_small_tensors */ {"dot"},
-          /* execution_threads */ {}));
+      AutoShardingImplementation(option, &alias_info_)
+          .SaveAndRemoveShardingAnnotation(
+              module.get(), instructions_to_shard,
+              /* replicated_small_tensors */ {"dot"},
+              /* execution_threads */ {}));
   absl::flat_hash_map<std::string, std::vector<HloSharding>> saved_shardings =
       saved_shardings_result.preserved_shardings;
   EXPECT_FALSE(saved_shardings_result.module_is_changed);
@@ -1758,10 +1795,10 @@ ENTRY %entry (param0: f32[4,256,64], param1: f32[4,256,32]) -> f32[64,32] {
   TF_ASSERT_OK_AND_ASSIGN(
       AutoShardingImplementation::SaveShardingAnnotationsResult
           saved_shardings_result,
-      AutoShardingImplementation(option).SaveAndRemoveShardingAnnotation(
-          module.get(), instructions_to_shard,
-          /* replicated_small_tensors */ {},
-          /* execution_threads */ {}));
+      AutoShardingImplementation(option, &alias_info_)
+          .SaveAndRemoveShardingAnnotation(module.get(), instructions_to_shard,
+                                           /* replicated_small_tensors */ {},
+                                           /* execution_threads */ {}));
   absl::flat_hash_map<std::string, std::vector<HloSharding>> saved_shardings =
       saved_shardings_result.preserved_shardings;
   EXPECT_TRUE(saved_shardings_result.module_is_changed);
@@ -1843,10 +1880,10 @@ ENTRY %entry (param0: f32[4,256,64], param1: f32[4,256,32]) -> f32[64,32] {
   TF_ASSERT_OK_AND_ASSIGN(
       AutoShardingImplementation::SaveShardingAnnotationsResult
           saved_shardings_result,
-      AutoShardingImplementation(option).SaveAndRemoveShardingAnnotation(
-          module.get(), instructions_to_shard,
-          /* replicated_small_tensors */ {},
-          /* execution_threads */ {}));
+      AutoShardingImplementation(option, &alias_info_)
+          .SaveAndRemoveShardingAnnotation(module.get(), instructions_to_shard,
+                                           /* replicated_small_tensors */ {},
+                                           /* execution_threads */ {}));
   absl::flat_hash_map<std::string, std::vector<HloSharding>> saved_shardings =
       saved_shardings_result.preserved_shardings;
   EXPECT_TRUE(saved_shardings_result.module_is_changed);
@@ -1881,10 +1918,11 @@ ENTRY %entry (param0: f32[4,256,64], param1: f32[4,256,32]) -> f32[64,32] {
   TF_ASSERT_OK_AND_ASSIGN(
       AutoShardingImplementation::SaveShardingAnnotationsResult
           saved_shardings_result,
-      AutoShardingImplementation(option).SaveAndRemoveShardingAnnotation(
-          module.get(), instructions_to_shard,
-          /* replicated_small_tensors */ {"dot", "copy"},
-          /* execution_threads */ {}));
+      AutoShardingImplementation(option, &alias_info_)
+          .SaveAndRemoveShardingAnnotation(
+              module.get(), instructions_to_shard,
+              /* replicated_small_tensors */ {"dot", "copy"},
+              /* execution_threads */ {}));
   absl::flat_hash_map<std::string, std::vector<HloSharding>> saved_shardings =
       saved_shardings_result.preserved_shardings;
   EXPECT_TRUE(saved_shardings_result.module_is_changed);
@@ -1948,7 +1986,8 @@ ENTRY %entry {
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   EXPECT_TRUE(changed);
   const HloInstruction* reduce = FindInstruction(module.get(), "reduce");
   ASSERT_NE(reduce, nullptr);
@@ -1961,7 +2000,7 @@ ENTRY %entry {
             op::Sharding("{{devices=[1,4]0,1,2,3}, "
                          "{devices=[1,4]0,1,2,3}}")));
   const HloSharding& sharding = reduce->sharding();
-  TF_EXPECT_OK(sharding.Validate(reduce->shape(), 4));
+  EXPECT_OK(sharding.Validate(reduce->shape(), 4));
 }
 
 TEST_F(AutoShardingTest, ReduceTest) {
@@ -1987,7 +2026,8 @@ ENTRY %entry {
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   EXPECT_TRUE(changed);
   const HloInstruction* reduce = FindInstruction(module.get(), "reduce");
   const HloInstruction* param0 = FindInstruction(module.get(), "param0");
@@ -2007,7 +2047,7 @@ ENTRY %entry {
       (Matches(param0_matcher2)(param0) && Matches(reduce_matcher2)(reduce)) ||
       (Matches(param0_matcher3)(param0) && Matches(reduce_matcher3)(reduce)));
   const HloSharding& sharding = reduce->sharding();
-  TF_EXPECT_OK(sharding.Validate(reduce->shape(), 4));
+  EXPECT_OK(sharding.Validate(reduce->shape(), 4));
 }
 
 TEST_F(AutoShardingTest, ScatterTest2D) {
@@ -2038,13 +2078,14 @@ ENTRY %Scatter {
   // tensors are sharded 4-ways
   option.memory_budget_per_device = 1185;  // bytes required to
 
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* scatter = FindInstruction(module.get(), "scatter");
   ASSERT_NE(scatter, nullptr);
   EXPECT_EQ(scatter->sharding().NumTiles(), 4);
-  TF_EXPECT_OK(scatter->sharding().Validate(scatter->shape(), 4));
+  EXPECT_OK(scatter->sharding().Validate(scatter->shape(), 4));
 }
 
 TEST_F(AutoShardingTest, ScatterTest3D) {
@@ -2075,13 +2116,14 @@ ENTRY %Scatter {
   // sharded only 2-ways
   option.memory_budget_per_device = 4 * 2 * (4 * 128 * 128 / 4) + 48 + 1024 + 1;
 
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* scatter = FindInstruction(module.get(), "scatter");
   ASSERT_NE(scatter, nullptr);
   EXPECT_EQ(scatter->sharding().NumTiles(), 4);
-  TF_EXPECT_OK(scatter->sharding().Validate(scatter->shape(), 4));
+  EXPECT_OK(scatter->sharding().Validate(scatter->shape(), 4));
 }
 
 TEST_F(AutoShardingTest, GatherTest) {
@@ -2104,7 +2146,8 @@ ENTRY %module {
   option.device_mesh_beta = {0.01, 1.0};
   option.preserve_shardings =
       AutoShardingOption::PreserveShardingsType::kKeepAllShardings;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(0) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* gather = FindInstruction(module.get(), "gather");
@@ -2132,7 +2175,8 @@ ENTRY %module {
   option.device_mesh_beta = {0.01, 1.0};
   option.preserve_shardings =
       AutoShardingOption::PreserveShardingsType::kKeepAllShardings;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(0) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* gather = FindInstruction(module.get(), "gather");
@@ -2157,7 +2201,8 @@ ENTRY %entry {
   option.device_mesh_alpha = {1.0, 1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0, 1.0};
   option.memory_budget_per_device = (1000 * 128 + 8 * 128) / 8 + 8;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(5) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* gather = FindInstruction(module.get(), "gather");
@@ -2168,7 +2213,7 @@ ENTRY %entry {
                             op::Sharding("{devices=[8,1,1]<=[8]}")));
   EXPECT_THAT(data, AnyOf(op::Sharding("{devices=[1,8]<=[8]}"),
                           op::Sharding("{devices=[8,1]<=[8]}")));
-  TF_EXPECT_OK(gather->sharding().Validate(gather->shape(), 8));
+  EXPECT_OK(gather->sharding().Validate(gather->shape(), 8));
   // Ensure no resharding op is created for operand 0 of gather in this case.
   EXPECT_EQ(data, gather->operand(0));
 }
@@ -2194,7 +2239,8 @@ ENTRY %entry {
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   EXPECT_TRUE(changed);
   const HloInstruction* gather = FindInstruction(module.get(), "gather");
   const HloInstruction* conv = FindInstruction(module.get(), "convolution");
@@ -2231,13 +2277,14 @@ ENTRY %entry (param0: f32[4,256,64], param1: f32[4,256,32]) -> f32[64,32] {
   option.device_mesh_shape = {2, 2};
   option.preserve_shardings =
       AutoShardingOption::PreserveShardingsType::kKeepInputOutputShardings;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   EXPECT_TRUE(changed);
   auto* dot_after = FindInstruction(module.get(), "dot");
   ASSERT_NE(dot_after, nullptr);
   EXPECT_THAT(dot_after, op::Sharding("{devices=[2,2]0,1,2,3}"));
   auto sharding = dot_after->sharding();
-  TF_EXPECT_OK(sharding.Validate(dot_after->shape(), 4));
+  EXPECT_OK(sharding.Validate(dot_after->shape(), 4));
 }
 
 TEST_F(AutoShardingTest, AutoShardingKeepUserShardingAdd) {
@@ -2259,7 +2306,8 @@ ENTRY %elementwise {
   option.device_mesh_shape = {2, 2};
   option.preserve_shardings =
       AutoShardingOption::PreserveShardingsType::kKeepAllShardings;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   EXPECT_TRUE(changed);
   LOG(INFO) << module->ToString();
   const HloInstruction* param0_after = FindInstruction(module.get(), "param0");
@@ -2307,7 +2355,8 @@ ENTRY %entry (param0: f32[4,256,64], param1: f32[4,256,32]) -> f32[64,32] {
   option.device_mesh_shape = {2, 2};
   option.preserve_shardings =
       AutoShardingOption::PreserveShardingsType::kKeepAllShardings;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   EXPECT_TRUE(changed);
   const HloInstruction* param0_after = FindInstruction(module.get(), "param0");
   ASSERT_NE(param0_after, nullptr);
@@ -2357,7 +2406,8 @@ ENTRY %entry {
   // Keep all users shardings.
   option.preserve_shardings =
       AutoShardingOption::PreserveShardingsType::kKeepAllShardings;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   EXPECT_TRUE(changed);
   auto* reduce = FindInstruction(module.get(), "reduce");
   ASSERT_NE(reduce, nullptr);
@@ -2365,7 +2415,7 @@ ENTRY %entry {
                           "{{devices=[1,2,2]0,1,2,3 last_tile_dim_replicate}, "
                           "{devices=[1,2,2]0,1,2,3 last_tile_dim_replicate}}"));
   auto sharding = reduce->sharding();
-  TF_EXPECT_OK(sharding.Validate(reduce->shape(), 4));
+  EXPECT_OK(sharding.Validate(reduce->shape(), 4));
   auto* param0 = FindInstruction(module.get(), "param0");
   ASSERT_NE(param0, nullptr);
   // There are multiple valid shardings, and we only
@@ -2394,7 +2444,8 @@ ENTRY %tupleparameter {
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* param1 = FindInstruction(module.get(), "param1");
@@ -2424,7 +2475,8 @@ ENTRY %tupleparameter {
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* tuple_param =
@@ -2451,7 +2503,7 @@ ENTRY %tupleparameter {
   EXPECT_EQ(tuple_param->sharding().tuple_elements()[0], first->sharding());
   EXPECT_EQ(tuple_param->sharding().tuple_elements()[1], second->sharding());
 
-  TF_EXPECT_OK(tuple_param->sharding().Validate(tuple_param->shape(), 4));
+  EXPECT_OK(tuple_param->sharding().Validate(tuple_param->shape(), 4));
 }
 
 TEST_F(AutoShardingTest, GetTupleElementWithUserShardingTest) {
@@ -2497,7 +2549,8 @@ ENTRY %entry (param0: f32[16,256,256], param1: f32[16,256,256]) -> f32[16,256,25
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   EXPECT_TRUE(changed);
 }
 
@@ -2546,7 +2599,8 @@ ENTRY %entry {
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(0) << module->ToString();
   EXPECT_TRUE(changed);
   auto* while_op = FindInstruction(module.get(), "while");
@@ -2605,7 +2659,8 @@ ENTRY %entry {
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(0) << module->ToString();
   EXPECT_TRUE(changed);
 }
@@ -2631,7 +2686,8 @@ ENTRY %entry {
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(0) << module->ToString();
   EXPECT_TRUE(changed);
 }
@@ -2658,7 +2714,8 @@ ENTRY %entry {
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(0) << module->ToString();
   EXPECT_TRUE(changed);
 }
@@ -2705,7 +2762,8 @@ ENTRY %entry {
   option.device_mesh_ids = {0, 1, 2, 3};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(0) << module->ToString();
   EXPECT_TRUE(changed);
   EXPECT_TRUE(module->entry_computation()->root_instruction()->has_sharding());
@@ -2737,7 +2795,8 @@ ENTRY %entry {
   std::iota(option.device_mesh_ids.begin(), option.device_mesh_ids.end(), 0);
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(1) << module->ToString();
   EXPECT_TRUE(changed);
 }
@@ -2761,7 +2820,8 @@ ENTRY %entry {
   std::iota(option.device_mesh_ids.begin(), option.device_mesh_ids.end(), 0);
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   EXPECT_TRUE(changed);
   VLOG(1) << module->ToString();
   HloInstruction* reshape = FindInstruction(module.get(), "reshape");
@@ -2787,7 +2847,8 @@ ENTRY %entry {
   option.device_mesh_shape = {8, 4, 8};
   option.device_mesh_alpha = {1.0, 1.0, 1.0};
   option.device_mesh_beta = {1.0, 1.0, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   EXPECT_TRUE(changed);
   VLOG(1) << module->ToString();
   const HloInstruction* sharding_call_copy =
@@ -2812,7 +2873,8 @@ ENTRY %entry {
   option.enable = true;
   option.device_mesh_shape = {1, 1, 64};
   option.memory_budget_per_device = 1025 * 1024 * 1024;  // 1025MB
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(1) << module->ToString();
   EXPECT_TRUE(changed);
 }
@@ -2836,7 +2898,7 @@ ENTRY %entry {
   option.device_mesh_alpha = {1, 1};
   option.preserve_shardings =
       AutoShardingOption::PreserveShardingsType::kKeepAllShardings;
-  AutoSharding pass(option);
+  AutoSharding pass(option, &alias_info_);
   TF_ASSERT_OK_AND_ASSIGN(bool changed, pass.Run(module.get()));
   EXPECT_TRUE(changed);
   LOG(INFO) << module->ToString();
@@ -2865,7 +2927,8 @@ ENTRY %entry {
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
   option.allow_alias_to_follower_conversion = true;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(0) << module->ToString();
   EXPECT_TRUE(changed);
 }
@@ -2892,7 +2955,8 @@ ENTRY %entry {
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
   option.allow_alias_to_follower_conversion = false;
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(0) << module->ToString();
   EXPECT_TRUE(changed);
 }
@@ -2917,7 +2981,8 @@ ENTRY entry {
   // auto-sharding
   const HloBufferDonorConfig buffer_donor_config_before =
       module->buffer_donor_config();
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   EXPECT_TRUE(changed);
   const HloBufferDonorConfig& buffer_donor_config_after =
       module->buffer_donor_config();
@@ -2945,7 +3010,8 @@ ENTRY entry {
   // auto-sharding
   const HloInputOutputAliasConfig input_output_alias_config_before =
       module->input_output_alias_config();
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   EXPECT_TRUE(changed);
   const HloInputOutputAliasConfig& input_output_alias_config_after =
       module->input_output_alias_config();
@@ -2981,7 +3047,8 @@ ENTRY %entry {
   option.device_mesh_shape = {32, 1};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   ASSERT_TRUE(changed);
   VLOG(5) << module->ToString();
 
@@ -3029,7 +3096,7 @@ ENTRY matmul {
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
   // TODO(b/369616683) Fix the error message output in this case.
-  EXPECT_THAT(AutoSharding(option).Run(module.get()),
+  EXPECT_THAT(AutoSharding(option, &alias_info_).Run(module.get()),
               StatusIs(absl::StatusCode::kInternal,
                        HasSubstr("Auto-sharding currently does not support "
                                  "shard_as/shard_like sharding annotations")));
@@ -3055,7 +3122,8 @@ ENTRY matmul {
   option.device_mesh_shape = {4, 1};
   option.device_mesh_alpha = {1.0, 1.0};
   option.device_mesh_beta = {0.01, 1.0};
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   EXPECT_TRUE(changed);
 }
 
@@ -3083,7 +3151,8 @@ ENTRY %entry {
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
                           ParseAndReturnVerifiedModule(kHloString));
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(5) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* slice = FindInstruction(module.get(), "reduce");
@@ -3116,7 +3185,8 @@ ENTRY %entry {
 
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
                           ParseAndReturnVerifiedModule(kHloString));
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(5) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* slice = FindInstruction(module.get(), "reduce");
@@ -3154,13 +3224,14 @@ ENTRY %Scatter {
   option.memory_budget_per_device = 0;
   option.memory_budget_ratio = -1.1;  // Disables the soft memory constraint.
 
-  TF_ASSERT_OK_AND_ASSIGN(bool changed, AutoSharding(option).Run(module.get()));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          AutoSharding(option, &alias_info_).Run(module.get()));
   VLOG(10) << module->ToString();
   EXPECT_TRUE(changed);
   const HloInstruction* scatter = FindInstruction(module.get(), "scatter");
   ASSERT_NE(scatter, nullptr);
   EXPECT_EQ(scatter->sharding().NumTiles(), 4);
-  TF_EXPECT_OK(scatter->sharding().Validate(scatter->shape(), 4));
+  EXPECT_OK(scatter->sharding().Validate(scatter->shape(), 4));
 }
 
 TEST(NormalizeTest, NormalizeHandlesNegativeCosts) {

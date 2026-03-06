@@ -1,3 +1,4 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
 load(
     "//tensorflow/core/platform:build_config.bzl",
@@ -35,10 +36,10 @@ cc_library(
         "@llvm-project//mlir:Pass",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:Transforms",
-        "@local_tsl//tsl/platform:path",
-        "@local_tsl//tsl/platform:stringpiece",
-        "@local_xla//xla/tsl/lib/io:buffered_file",
-        "@local_xla//xla/tsl/platform:env",
+        "@tsl//tsl/platform:path",
+        "@tsl//tsl/platform:stringpiece",
+        "@xla//xla/tsl/lib/io:buffered_file",
+        "@xla//xla/tsl/platform:env",
     ],
 )
 
@@ -59,8 +60,8 @@ tf_cc_test(
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Pass",
         "@llvm-project//mlir:Support",
-        "@local_tsl//tsl/platform:path",
-        "@local_xla//xla/tsl/lib/core:status_test_util",
-        "@local_xla//xla/tsl/platform:env",
+        "@tsl//tsl/platform:path",
+        "@xla//xla/tsl/lib/core:status_test_util",
+        "@xla//xla/tsl/platform:env",
     ],
 )

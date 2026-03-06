@@ -34,6 +34,7 @@ limitations under the License.
 #include "xla/hlo/analysis/indexing_map.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/utils/hlo_traversal.h"
 #include "xla/stream_executor/device_description.h"
 
@@ -69,7 +70,8 @@ llvm::SmallVector<mlir::Value, 2> ProvideParameterRange(
 absl::Status SubgraphToMlirFunction(
     const PartitionedComputation& computation,
     const PartitionedComputation::Subgraph& subgraph, mlir::func::FuncOp& func,
-    const CallTargetProvider& call_target_provider);
+    const CallTargetProvider& call_target_provider,
+    mlir::MLIRContext* mlir_context);
 
 // Creates an `apply_indexing` op for the given map.
 llvm::SmallVector<mlir::Value, 3> ApplyIndexing(IndexingMap map,
@@ -142,6 +144,9 @@ void GetLoopBoundsFromIndexingMap(mlir::ImplicitLocOpBuilder& b,
                                   llvm::SmallVectorImpl<mlir::Value>* lbs,
                                   llvm::SmallVectorImpl<mlir::Value>* ubs,
                                   llvm::SmallVectorImpl<mlir::Value>* steps);
+
+// Is an operation with the given opcode supported by the elemental IR emitter?
+bool IsSupportedElementalOp(HloOpcode opcode);
 
 }  // namespace emitters
 }  // namespace xla

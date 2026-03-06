@@ -18,11 +18,13 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -35,21 +37,20 @@ limitations under the License.
 #include "xla/literal.h"
 #include "xla/literal_util.h"
 #include "xla/mlir_hlo/mhlo/IR/hlo_ops.h"
-#include "xla/pjrt/gpu/gpu_topology.h"
 #include "xla/pjrt/gpu/se_gpu_pjrt_client.h"
 #include "xla/pjrt/gpu/se_gpu_topology_description.h"
+#include "xla/pjrt/maybe_owning_mlir_module.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/pjrt_common.h"
 #include "xla/pjrt/pjrt_compiler.h"
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/pjrt/plugin/xla_gpu/xla_gpu_client_options.h"
+#include "xla/service/gpu_topology.h"
 #include "xla/tests/literal_test_util.h"
-#include "xla/tsl/platform/status_matchers.h"
 #include "xla/tsl/platform/statusor.h"
 
 namespace xla {
 namespace {
-
-using ::tsl::testing::StatusIs;
 
 constexpr absl::string_view kFakeDeviceName = "Fake_device";
 
@@ -76,42 +77,40 @@ absl::StatusOr<xla::XlaComputation> GetXlaComputation(
 }
 
 std::shared_ptr<xla::GpuTopology> GetGpuTopology(
-    std::vector<int> device_ids, absl::string_view platform_version,
-    int num_slices, int num_hosts_per_slice, int num_devices_per_host,
+    absl::string_view platform_version, int num_partitions,
+    int num_hosts_per_partition, int num_devices_per_host,
     int core_count_per_chip) {
-  return std::make_shared<xla::GpuTopology>(device_ids, platform_version,
-                                            num_slices, num_hosts_per_slice,
+  return std::make_shared<xla::GpuTopology>(platform_version, num_partitions,
+                                            num_hosts_per_partition,
                                             num_devices_per_host);
 }
 
 TEST(StreamExecutorGpuCompilerTest, NoClientXla) {
-  StreamExecutorGpuCompiler compiler;
+  StreamExecutorGpuCompiler compiler(CudaId());
   StreamExecutorGpuTopologyDescription topology(
-      CudaId(), CudaName(),
-      GetGpuTopology({0, 1}, kFakeDeviceName, 1, 1, 2, 10));
+      CudaId(), CudaName(), GetGpuTopology(kFakeDeviceName, 1, 1, 2, 10));
 
   TF_ASSERT_OK_AND_ASSIGN(auto computation, GetXlaComputation(kProgram));
   EXPECT_THAT(compiler.Compile(xla::CompileOptions(), computation, topology,
                                /*client=*/nullptr),
-              StatusIs(absl::StatusCode::kUnimplemented));
+              absl_testing::StatusIs(absl::StatusCode::kUnimplemented));
 }
 
 TEST(StreamExecutorGpuCompilerTest, TopologyNotSameXla) {
-  StreamExecutorGpuCompiler compiler;
+  StreamExecutorGpuCompiler compiler(CudaId());
   StreamExecutorGpuTopologyDescription topology(
-      CudaId(), CudaName(),
-      GetGpuTopology({0, 1}, kFakeDeviceName, 1, 1, 2, 10));
+      CudaId(), CudaName(), GetGpuTopology(kFakeDeviceName, 1, 1, 2, 10));
 
   TF_ASSERT_OK_AND_ASSIGN(auto client,
                           GetStreamExecutorGpuClient(GpuClientOptions()));
   TF_ASSERT_OK_AND_ASSIGN(auto computation, GetXlaComputation(kProgram));
   EXPECT_THAT(compiler.Compile(xla::CompileOptions(), computation, topology,
                                client.get()),
-              StatusIs(absl::StatusCode::kOk));
+              absl_testing::StatusIs(absl::StatusCode::kOk));
 }
 
 TEST(StreamExecutorGpuCompilerTest, SuccessXla) {
-  StreamExecutorGpuCompiler compiler;
+  StreamExecutorGpuCompiler compiler(CudaId());
 
   TF_ASSERT_OK_AND_ASSIGN(auto client,
                           GetStreamExecutorGpuClient(GpuClientOptions()));
@@ -128,64 +127,68 @@ TEST(StreamExecutorGpuCompilerTest, SuccessXla) {
   std::vector<std::unique_ptr<xla::PjRtBuffer>>& result_buffers = result[0];
   ASSERT_EQ(result_buffers.size(), 1);
   TF_ASSERT_OK_AND_ASSIGN(std::shared_ptr<xla::Literal> result_literal,
-                          result_buffers[0]->ToLiteralSync());
+                          result_buffers[0]->ToLiteral().Await());
   EXPECT_TRUE(
       LiteralTestUtil::Equal(LiteralUtil::CreateR0(2), *result_literal));
 }
 
 TEST(StreamExecutorGpuCompilerTest, NoClientMlir) {
-  StreamExecutorGpuCompiler compiler;
+  StreamExecutorGpuCompiler compiler(CudaId());
 
-  mlir::MLIRContext context;
-  context.loadDialect<mlir::mhlo::MhloDialect, mlir::func::FuncDialect>();
+  auto context = std::make_unique<mlir::MLIRContext>();
+  context->loadDialect<mlir::mhlo::MhloDialect, mlir::func::FuncDialect>();
 
   auto mlir_module =
-      mlir::parseSourceString<mlir::ModuleOp>(mlir_str, &context);
+      mlir::parseSourceString<mlir::ModuleOp>(mlir_str, context.get());
 
   StreamExecutorGpuTopologyDescription topology(
-      CudaId(), CudaName(),
-      GetGpuTopology({0, 1}, kFakeDeviceName, 1, 1, 2, 10));
+      CudaId(), CudaName(), GetGpuTopology(kFakeDeviceName, 1, 1, 2, 10));
 
-  EXPECT_THAT(
-      compiler.Compile(xla::CompileOptions(), mlir_module.get(), topology,
-                       /*client=*/nullptr),
-      StatusIs(absl::StatusCode::kUnimplemented));
+  EXPECT_THAT(compiler.Compile(xla::CompileOptions(),
+                               MaybeOwningMlirModule(std::move(context),
+                                                     std::move(mlir_module)),
+                               topology,
+                               /*client=*/nullptr),
+              absl_testing::StatusIs(absl::StatusCode::kUnimplemented));
 }
 
 TEST(StreamExecutorGpuCompilerTest, TopologyNotSameMlir) {
-  StreamExecutorGpuCompiler compiler;
+  StreamExecutorGpuCompiler compiler(CudaId());
 
-  mlir::MLIRContext context;
-  context.loadDialect<mlir::mhlo::MhloDialect, mlir::func::FuncDialect>();
+  auto context = std::make_unique<mlir::MLIRContext>();
+  context->loadDialect<mlir::mhlo::MhloDialect, mlir::func::FuncDialect>();
 
   auto mlir_module =
-      mlir::parseSourceString<mlir::ModuleOp>(mlir_str, &context);
+      mlir::parseSourceString<mlir::ModuleOp>(mlir_str, context.get());
 
   StreamExecutorGpuTopologyDescription topology(
-      CudaId(), CudaName(),
-      GetGpuTopology({0, 1}, kFakeDeviceName, 1, 1, 2, 10));
+      CudaId(), CudaName(), GetGpuTopology(kFakeDeviceName, 1, 1, 2, 10));
 
   TF_ASSERT_OK_AND_ASSIGN(auto client,
                           GetStreamExecutorGpuClient(GpuClientOptions()));
-  EXPECT_THAT(compiler.Compile(xla::CompileOptions(), mlir_module.get(),
+  EXPECT_THAT(compiler.Compile(xla::CompileOptions(),
+                               MaybeOwningMlirModule(std::move(context),
+                                                     std::move(mlir_module)),
                                topology, client.get()),
-              StatusIs(absl::StatusCode::kOk));
+              absl_testing::StatusIs(absl::StatusCode::kOk));
 }
 
 TEST(StreamExecutorGpuCompilerTest, SuccessMlir) {
-  StreamExecutorGpuCompiler compiler;
+  StreamExecutorGpuCompiler compiler(CudaId());
 
-  mlir::MLIRContext context;
-  context.loadDialect<mlir::mhlo::MhloDialect, mlir::func::FuncDialect>();
+  auto context = std::make_unique<mlir::MLIRContext>();
+  context->loadDialect<mlir::mhlo::MhloDialect, mlir::func::FuncDialect>();
 
   auto mlir_module =
-      mlir::parseSourceString<mlir::ModuleOp>(mlir_str, &context);
+      mlir::parseSourceString<mlir::ModuleOp>(mlir_str, context.get());
 
   TF_ASSERT_OK_AND_ASSIGN(auto client,
                           GetStreamExecutorGpuClient(GpuClientOptions()));
   TF_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<xla::PjRtLoadedExecutable> loaded_executable,
-      client->CompileAndLoad(mlir_module.get(), xla::CompileOptions()));
+      client->CompileAndLoad(
+          MaybeOwningMlirModule(std::move(context), std::move(mlir_module)),
+          xla::CompileOptions()));
 
   TF_ASSERT_OK_AND_ASSIGN(auto result,
                           loaded_executable->Execute(
@@ -195,31 +198,32 @@ TEST(StreamExecutorGpuCompilerTest, SuccessMlir) {
   std::vector<std::unique_ptr<xla::PjRtBuffer>>& result_buffers = result[0];
   ASSERT_EQ(result_buffers.size(), 1);
   TF_ASSERT_OK_AND_ASSIGN(std::shared_ptr<xla::Literal> result_literal,
-                          result_buffers[0]->ToLiteralSync());
+                          result_buffers[0]->ToLiteral().Await());
   EXPECT_TRUE(
       LiteralTestUtil::Equal(LiteralUtil::CreateR0(2), *result_literal));
 }
 
 TEST(StreamExecutorGpuCompilerTest, SuccessMlirCanBeSerialized) {
-  StreamExecutorGpuCompiler compiler;
+  StreamExecutorGpuCompiler compiler(CudaId());
 
-  mlir::MLIRContext context;
-  context.loadDialect<mlir::mhlo::MhloDialect, mlir::func::FuncDialect>();
+  auto context = std::make_unique<mlir::MLIRContext>();
+  context->loadDialect<mlir::mhlo::MhloDialect, mlir::func::FuncDialect>();
 
   auto mlir_module =
-      mlir::parseSourceString<mlir::ModuleOp>(mlir_str, &context);
+      mlir::parseSourceString<mlir::ModuleOp>(mlir_str, context.get());
 
   TF_ASSERT_OK_AND_ASSIGN(auto client,
                           GetStreamExecutorGpuClient(GpuClientOptions()));
 
   StreamExecutorGpuTopologyDescription topology(
-      CudaId(), CudaName(),
-      GetGpuTopology({0, 1}, kFakeDeviceName, 1, 1, 2, 10));
+      CudaId(), CudaName(), GetGpuTopology(kFakeDeviceName, 1, 1, 2, 10));
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<xla::PjRtExecutable> executable,
-      compiler.Compile(xla::CompileOptions(), mlir_module.get(), topology,
-                       client.get()));
+      compiler.Compile(
+          xla::CompileOptions(),
+          MaybeOwningMlirModule(std::move(context), std::move(mlir_module)),
+          topology, client.get()));
 
   TF_ASSERT_OK_AND_ASSIGN(std::string serialized,
                           executable->SerializeExecutable());
@@ -237,9 +241,15 @@ TEST(StreamExecutorGpuCompilerTest, SuccessMlirCanBeSerialized) {
   std::vector<std::unique_ptr<xla::PjRtBuffer>>& result_buffers = result[0];
   ASSERT_EQ(result_buffers.size(), 1);
   TF_ASSERT_OK_AND_ASSIGN(std::shared_ptr<xla::Literal> result_literal,
-                          result_buffers[0]->ToLiteralSync());
+                          result_buffers[0]->ToLiteral().Await());
   EXPECT_TRUE(
       LiteralTestUtil::Equal(LiteralUtil::CreateR0(2), *result_literal));
+}
+
+TEST(StreamExecutorGpuCompilerTest, PlatformId) {
+  constexpr PjRtPlatformId kPlatformId = PjRtPlatformId(1234);
+  StreamExecutorGpuCompiler compiler(kPlatformId);
+  EXPECT_EQ(compiler.pjrt_platform_id(), kPlatformId);
 }
 
 }  // namespace

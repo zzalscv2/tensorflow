@@ -40,22 +40,29 @@ limitations under the License.
 #include "xla/pjrt/c/pjrt_c_api_layouts_extension.h"
 #include "xla/pjrt/c/pjrt_c_api_memory_descriptions_extension.h"
 #include "xla/pjrt/c/pjrt_c_api_profiler_extension.h"
+#include "xla/pjrt/c/pjrt_c_api_shardings_extension.h"
 #include "xla/pjrt/c/pjrt_c_api_stream_extension.h"
 #include "xla/pjrt/c/pjrt_c_api_triton_extension.h"
 #include "xla/pjrt/c/pjrt_c_api_triton_internal.h"
 #include "xla/pjrt/c/pjrt_c_api_wrapper_impl.h"
+#include "xla/pjrt/extensions/cross_host_transfers/pjrt_c_api_cross_host_transfers_extension.h"
 #include "xla/pjrt/gpu/gpu_helpers.h"
-#include "xla/pjrt/gpu/gpu_topology.h"
 #include "xla/pjrt/gpu/se_gpu_pjrt_client.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_common.h"
 #include "xla/pjrt/pjrt_compiler.h"
 #include "xla/pjrt/pjrt_device_description.h"
 #include "xla/pjrt/pjrt_executable.h"
+#include "xla/pjrt/plugin/xla_gpu/xla_gpu_pjrt_client.h"
 #include "xla/python/custom_call_batch_partitioner.h"
 #include "xla/python/custom_partition_callback.h"
 #include "xla/service/compiler.h"
 #include "xla/service/custom_call_target_registry.h"
+#include "xla/service/gpu_topology.h"
+
+#if GOOGLE_CUDA
+#include "third_party/gpus/cuda/include/cuda_runtime_api.h"
+#endif  // GOOGLE_CUDA
 
 namespace pjrt {
 namespace gpu_plugin {
@@ -87,9 +94,12 @@ PJRT_Error* PJRT_Client_Create(PJRT_Client_Create_Args* args) {
           {"num_nodes", PJRT_NamedValue_Type::PJRT_NamedValue_kInt64},
           {"should_stage_host_to_device_transfers",
            PJRT_NamedValue_Type::PJRT_NamedValue_kBool},
+          {"abort_collectives_on_failure",
+           PJRT_NamedValue_Type::PJRT_NamedValue_kBool},
+          {"use_tfrt_gpu_client", PJRT_NamedValue_Type::PJRT_NamedValue_kBool},
           {"enable_mock_nccl", PJRT_NamedValue_Type::PJRT_NamedValue_kBool},
           {"mock_gpu_topology", PJRT_NamedValue_Type::PJRT_NamedValue_kString},
-          {"slice_index", PJRT_NamedValue_Type::PJRT_NamedValue_kInt64},
+          {"partition_index", PJRT_NamedValue_Type::PJRT_NamedValue_kInt64},
       });
   PJRT_RETURN_IF_ERROR(
       ValidateCreateOptions(create_options, kExpectedOptionNameAndTypes));
@@ -149,6 +159,16 @@ PJRT_Error* PJRT_Client_Create(PJRT_Client_Create_Args* args) {
       it != create_options.end()) {
     should_stage_host_to_device_transfers = std::get<bool>(it->second);
   }
+  bool abort_collectives_on_failure = false;
+  if (auto it = create_options.find("abort_collectives_on_failure");
+      it != create_options.end()) {
+    abort_collectives_on_failure = std::get<bool>(it->second);
+  }
+  bool use_tfrt_gpu_client = false;
+  if (auto it = create_options.find("use_tfrt_gpu_client");
+      it != create_options.end()) {
+    use_tfrt_gpu_client = std::get<bool>(it->second);
+  }
   bool enable_mock_nccl = false;
   if (auto it = create_options.find("enable_mock_nccl");
       it != create_options.end()) {
@@ -159,10 +179,10 @@ PJRT_Error* PJRT_Client_Create(PJRT_Client_Create_Args* args) {
       it != create_options.end()) {
     mock_gpu_topology = std::get<std::string>(it->second);
   }
-  std::optional<int64_t> slice_index;
-  if (auto it = create_options.find("slice_index");
+  std::optional<int64_t> partition_index;
+  if (auto it = create_options.find("partition_index");
       it != create_options.end()) {
-    slice_index = std::get<int64_t>(it->second);
+    partition_index = std::get<int64_t>(it->second);
   }
 
   xla::GpuClientOptions options;
@@ -176,11 +196,13 @@ PJRT_Error* PJRT_Client_Create(PJRT_Client_Create_Args* args) {
       args->kv_try_get_user_arg, args->kv_put_callback, args->kv_put_user_arg);
   options.should_stage_host_to_device_transfers =
       should_stage_host_to_device_transfers;
+  options.abort_collectives_on_failure = abort_collectives_on_failure;
+  options.use_tfrt_gpu_client = use_tfrt_gpu_client;
   options.enable_mock_nccl = enable_mock_nccl;
   options.mock_gpu_topology = mock_gpu_topology;
-  options.slice_index = slice_index;
+  options.partition_index = partition_index;
   PJRT_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> client,
-                        xla::GetStreamExecutorGpuClient(options));
+                        xla::GetXlaPjrtGpuClient(options));
   args->client = pjrt::CreateWrapperClient(std::move(client));
   return nullptr;
 }
@@ -231,7 +253,7 @@ absl::StatusOr<TargetConfigAndDevices> GetTargetConfigFromOptions(
        xla_client->backend().stream_executors()) {
     device_ids.push_back(executor->device_ordinal());
   }
-  auto gpu_target_config = xla::Compiler::TargetConfig(executor);
+  auto gpu_target_config = xla::Compiler::GpuTargetConfig(executor);
   return {{gpu_target_config.ToProto(), device_ids}};
 }
 
@@ -286,8 +308,8 @@ PJRT_Error* PJRT_GpuDeviceTopology_Create(
   }
 
   auto gpu_topology = std::make_shared<const xla::GpuTopology>(
-      device_ids, target_config_proto.device_description_str(),
-      sizes.num_slices, sizes.num_hosts_per_slice, sizes.num_devices_per_host);
+      target_config_proto.device_description_str(), sizes.num_partitions,
+      sizes.num_hosts_per_partition, sizes.num_devices_per_host);
 
   std::string target_config_attr;
   if (!tsl::protobuf::TextFormat::PrintToString(target_config_proto,
@@ -302,6 +324,50 @@ PJRT_Error* PJRT_GpuDeviceTopology_Create(
               {"target_config", std::move(target_config_attr)}},
           std::move(target_config_proto));
   args->topology = CreateWrapperDeviceTopology(std::move(pjrt_topology));
+  return nullptr;
+}
+
+#if GOOGLE_CUDA && defined(CUDART_VERSION)  // cuda
+namespace {
+
+const std::vector<PJRT_NamedValue>* MakeCudaPluginCAttributes() {
+  std::vector<PJRT_NamedValue>* attributes = new std::vector<PJRT_NamedValue>();
+  const std::vector<PJRT_NamedValue>& base_attributes =
+      pjrt::GetXlaPluginCAttributes();
+  attributes->reserve(base_attributes.size() + 1);
+  attributes->assign(base_attributes.begin(), base_attributes.end());
+  {
+    // Include the cuda_version attribute.
+    PJRT_NamedValue c_value;
+    c_value.struct_size = PJRT_NamedValue_STRUCT_SIZE;
+    c_value.extension_start = nullptr;
+    absl::string_view name = "cuda_version";
+    c_value.name = name.data();
+    c_value.name_size = name.size();
+    c_value.type = PJRT_NamedValue_Type::PJRT_NamedValue_kInt64;
+    c_value.int64_value = CUDART_VERSION;
+    c_value.value_size = 1;
+    attributes->push_back(c_value);
+  }
+  return attributes;
+}
+
+}  // namespace
+#endif
+
+PJRT_Error* PJRT_Plugin_Attributes_Gpu(PJRT_Plugin_Attributes_Args* args) {
+  PJRT_RETURN_IF_ERROR(ActualStructSizeIsGreaterOrEqual(
+      "PJRT_Plugin_Attributes_Args", PJRT_Plugin_Attributes_Args_STRUCT_SIZE,
+      args->struct_size));
+#if GOOGLE_CUDA && defined(CUDART_VERSION)  // cuda
+  static const std::vector<PJRT_NamedValue>* attributes =
+      MakeCudaPluginCAttributes();
+#else
+  const std::vector<PJRT_NamedValue>* attributes =
+      &pjrt::GetXlaPluginCAttributes();
+#endif
+  args->num_attributes = attributes->size();
+  args->attributes = attributes->data();
   return nullptr;
 }
 
@@ -445,12 +511,18 @@ const PJRT_Api* GetGpuPjrtApi() {
   static PJRT_Triton_Extension triton_extension =
       pjrt::CreateTritonExtension(&memory_descriptions_extension.base);
 
+  static PJRT_CrossHostTransfers_Extension cross_host_transfers_extension =
+      pjrt::CreateCrossHostTransfersExtension(&triton_extension.base);
+
+  static PJRT_Shardings_Extension shardings_extension =
+      pjrt::CreateShardingsExtension(&cross_host_transfers_extension.base);
+
   static const PJRT_Api pjrt_api = pjrt::CreatePjrtApi(
       pjrt::gpu_plugin::PJRT_Client_Create,
       pjrt::gpu_plugin::PJRT_ExecuteContext_Create,
       pjrt::gpu_plugin::PJRT_GpuDeviceTopology_Create,
-      pjrt::PJRT_Plugin_Initialize_NoOp, &triton_extension.base,
-      pjrt::PJRT_Plugin_Attributes_Xla);
+      pjrt::PJRT_Plugin_Initialize_NoOp, &shardings_extension.base,
+      pjrt::gpu_plugin::PJRT_Plugin_Attributes_Gpu);
 
   return &pjrt_api;
 }

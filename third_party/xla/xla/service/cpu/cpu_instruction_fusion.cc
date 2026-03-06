@@ -19,14 +19,20 @@ limitations under the License.
 
 #include "absl/algorithm/container.h"
 #include "absl/log/log.h"
+#include "xla/codegen/emitters/elemental_hlo_to_mlir.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
+#include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/layout_util.h"
+#include "xla/service/cpu/cpu_options.h"
 #include "xla/service/fusion_node_indexing_evaluation.h"
+#include "xla/service/hlo_module_config.h"
 #include "xla/service/instruction_fusion.h"
+#include "xla/service/pattern_matcher.h"
 #include "xla/shape_util.h"
+#include "xla/xla_data.pb.h"
 
 namespace xla {
 namespace cpu {
@@ -36,8 +42,7 @@ namespace {
 bool CanBeLoopFused(const HloInstruction& hlo) {
   // These are the only ones we fuse since we rely on effective elemental IR
   // generation.
-  return hlo.IsElementwise() ||  //
-         hlo.opcode() == HloOpcode::kBitcast ||
+  return hlo.IsElementwise() || hlo.opcode() == HloOpcode::kBitcast ||
          hlo.opcode() == HloOpcode::kBroadcast ||
          hlo.opcode() == HloOpcode::kConcatenate ||
          hlo.opcode() == HloOpcode::kDynamicSlice ||
@@ -77,7 +82,205 @@ bool CanBeOutputFusedIntoSomeOperand(const HloInstruction* consumer) {
           CanBeOutputFused(consumer->operand(1), consumer));
 }
 
+// Should we block the fusion of the subcomputation of the passed instruction?
+bool BlockSubcomputationFusion(const HloInstruction* instruction,
+                               const HloModuleConfig& config) {
+  HloOpcode opcode = instruction->opcode();
+  const bool is_fusion_emitters =
+      config.debug_options().xla_cpu_use_fusion_emitters();
+
+  if (is_fusion_emitters && opcode == HloOpcode::kScatter) {
+    return true;
+  }
+
+  const bool use_experemental_fusion_emitters =
+      options::UseExperimentalLoopFusion(config);
+
+  // If the instruction itself can be fused then the subcomputation should be
+  // blocked as the fusion emitter can't emit fusion ops inside another
+  // fusion.
+  if (is_fusion_emitters && use_experemental_fusion_emitters &&
+      emitters::IsSupportedElementalOp(opcode)) {
+    return true;
+  }
+
+  return false;
+}
+
 }  // namespace
+
+bool CpuInstructionFusion::IsExpensive(const HloInstruction& instruction) {
+  namespace m = match;
+
+  switch (instruction.opcode()) {
+    case HloOpcode::kAdd:
+    case HloOpcode::kAnd:
+    case HloOpcode::kBitcast:
+    case HloOpcode::kBitcastConvert:
+    case HloOpcode::kBroadcast:
+    case HloOpcode::kCeil:
+    case HloOpcode::kClamp:
+    case HloOpcode::kClz:
+    case HloOpcode::kCompare:
+    case HloOpcode::kComplex:
+    case HloOpcode::kConcatenate:
+    case HloOpcode::kConstant:
+    case HloOpcode::kCopy:
+    case HloOpcode::kCopyDone:
+    case HloOpcode::kCopyStart:
+    case HloOpcode::kDynamicReshape:
+    case HloOpcode::kDynamicSlice:
+    case HloOpcode::kDynamicUpdateSlice:
+    case HloOpcode::kFloor:
+    case HloOpcode::kGetTupleElement:
+    case HloOpcode::kImag:
+    case HloOpcode::kInfeed:
+    case HloOpcode::kIota:
+    case HloOpcode::kIsFinite:
+    case HloOpcode::kMaximum:
+    case HloOpcode::kMinimum:
+    case HloOpcode::kMultiply:
+    case HloOpcode::kNegate:
+    case HloOpcode::kNot:
+    case HloOpcode::kOptimizationBarrier:
+    case HloOpcode::kOr:
+    case HloOpcode::kOutfeed:
+    case HloOpcode::kPad:
+    case HloOpcode::kPartitionId:
+    case HloOpcode::kPopulationCount:
+    case HloOpcode::kReal:
+    case HloOpcode::kReducePrecision:
+    case HloOpcode::kReplicaId:
+    case HloOpcode::kReshape:
+    case HloOpcode::kReverse:
+    case HloOpcode::kRoundNearestAfz:
+    case HloOpcode::kRoundNearestEven:
+    case HloOpcode::kSelect:
+    case HloOpcode::kShiftLeft:
+    case HloOpcode::kShiftRightArithmetic:
+    case HloOpcode::kShiftRightLogical:
+    case HloOpcode::kSlice:
+    case HloOpcode::kStochasticConvert:
+    case HloOpcode::kSubtract:
+    case HloOpcode::kTranspose:
+    case HloOpcode::kTuple:
+    case HloOpcode::kXor:
+      return false;
+
+    // Cheap instructions for reals, but expensive for complex.
+    case HloOpcode::kAbs:
+    case HloOpcode::kSign:
+      return ShapeUtil::ElementIsComplex(instruction.shape());
+
+    case HloOpcode::kConvert:
+      // Converting from f32 to bf16 is expensive as we have to do multiple
+      // checks for NaN, converting from bf16 to f32 is cheap as it is a simple
+      // shift.
+      return instruction.shape().element_type() == PrimitiveType::BF16 &&
+             instruction.operand(0)->shape().element_type() ==
+                 PrimitiveType::F32;
+
+    // We say that integer div/mod by a constant is cheap because it gets
+    // compiled down to multiplies and shifts, and we consider those to be
+    // cheap.
+    case HloOpcode::kDivide:
+    case HloOpcode::kRemainder:
+      return !ShapeUtil::ElementIsIntegral(instruction.shape()) ||
+             !Match(instruction.operand(0),
+                    m::AnyOf<const HloInstruction>(
+                        m::ConstantEffectiveScalar(),
+                        m::Broadcast(m::ConstantEffectiveScalar())));
+
+    case HloOpcode::kCos:
+    case HloOpcode::kSin:
+    case HloOpcode::kTan:
+      return ShapeUtil::ElementIsComplex(instruction.shape());
+
+    case HloOpcode::kAcos:
+    case HloOpcode::kAcosh:
+    case HloOpcode::kSinh:
+    case HloOpcode::kAsin:
+    case HloOpcode::kAsinh:
+    case HloOpcode::kAtan2:
+    case HloOpcode::kAtanh:
+    case HloOpcode::kCosh:
+    case HloOpcode::kTanh:
+      return true;
+
+    case HloOpcode::kCbrt:
+    case HloOpcode::kPower:
+    case HloOpcode::kRsqrt:
+    case HloOpcode::kSqrt:
+      return true;
+
+    case HloOpcode::kErf:
+    case HloOpcode::kExp:
+    case HloOpcode::kExpm1:
+    case HloOpcode::kLog:
+    case HloOpcode::kLog1p:
+      return true;
+
+      // Expensive instructions or unusual instructions for which fusion is
+      // nonsensical.
+    case HloOpcode::kAddDependency:
+    case HloOpcode::kAfterAll:
+    case HloOpcode::kAsyncStart:
+    case HloOpcode::kAsyncUpdate:
+    case HloOpcode::kAsyncDone:
+    case HloOpcode::kBatchNormGrad:
+    case HloOpcode::kBatchNormInference:
+    case HloOpcode::kBatchNormTraining:
+    case HloOpcode::kCall:
+    case HloOpcode::kCholesky:
+    case HloOpcode::kConditional:
+    case HloOpcode::kConvolution:
+    case HloOpcode::kAllGather:
+    case HloOpcode::kAllGatherStart:
+    case HloOpcode::kAllGatherDone:
+    case HloOpcode::kAllReduce:
+    case HloOpcode::kReduceScatter:
+    case HloOpcode::kAllReduceStart:
+    case HloOpcode::kAllReduceDone:
+    case HloOpcode::kAllToAll:
+    case HloOpcode::kCollectiveBroadcast:
+    case HloOpcode::kCollectivePermute:
+    case HloOpcode::kCollectivePermuteDone:
+    case HloOpcode::kCollectivePermuteStart:
+    case HloOpcode::kCustomCall:
+    case HloOpcode::kDomain:
+    case HloOpcode::kDot:
+    case HloOpcode::kFft:
+    case HloOpcode::kFusion:
+    case HloOpcode::kGather:
+    case HloOpcode::kLogistic:
+    case HloOpcode::kMap:
+    case HloOpcode::kParameter:
+    case HloOpcode::kRaggedAllToAll:
+    case HloOpcode::kRaggedDot:
+    case HloOpcode::kRecv:
+    case HloOpcode::kRecvDone:
+    case HloOpcode::kReduce:
+    case HloOpcode::kReduceWindow:
+    case HloOpcode::kRng:
+    case HloOpcode::kRngGetAndUpdateState:
+    case HloOpcode::kRngBitGenerator:
+    case HloOpcode::kScaledDot:
+    case HloOpcode::kScan:
+    case HloOpcode::kScatter:
+    case HloOpcode::kSelectAndScatter:
+    case HloOpcode::kSend:
+    case HloOpcode::kSendDone:
+    case HloOpcode::kSort:
+    case HloOpcode::kTopK:
+    case HloOpcode::kTriangularSolve:
+    case HloOpcode::kWhile:
+    case HloOpcode::kGetDimensionSize:
+    case HloOpcode::kSetDimensionSize:
+      return true;
+  }
+
+  return false;
+}
 
 void CpuInstructionFusion::ComputeInstructionsToSkip(
     HloModule* module,
@@ -85,13 +288,12 @@ void CpuInstructionFusion::ComputeInstructionsToSkip(
   const auto computations_list =
       module->MakeComputationPostOrder(execution_threads);
   instructions_to_skip_.clear();
-  const bool is_fusion_emitters =
-      module->config().debug_options().xla_cpu_use_thunk_runtime() &&
-      module->config().debug_options().xla_cpu_use_fusion_emitters();
+
   for (auto* computation : computations_list) {
     for (auto* instruction : computation->MakeInstructionPostOrder()) {
-      if (instruction->IsCustomFusion() ||
-          instruction->opcode() == HloOpcode::kCustomCall) {
+      if (instruction->IsCustomFusion()) {
+        instructions_to_skip_.insert(instruction);
+      } else if (instruction->opcode() == HloOpcode::kCustomCall) {
         HloCallableInstruction* callable =
             Cast<HloCallableInstruction>(instruction);
         if (callable->called_computations().empty()) {
@@ -100,12 +302,8 @@ void CpuInstructionFusion::ComputeInstructionsToSkip(
         for (HloInstruction* instr :
              callable->called_computation()->instructions())
           instructions_to_skip_.insert(instr);
-      } else if (is_fusion_emitters &&
-                 instruction->opcode() == HloOpcode::kScatter) {
-        // Disallow fusions in the called computation (e.g. reduction)
-        // of a scatter "fusion"; the fusion emitter can't handle them.
-        auto* scatter = Cast<HloScatterInstruction>(instruction);
-        for (const auto* computation : scatter->called_computations()) {
+      } else if (BlockSubcomputationFusion(instruction, module->config())) {
+        for (const auto* computation : instruction->called_computations()) {
           for (const auto* instr : computation->instructions()) {
             instructions_to_skip_.insert(instr);
           }
@@ -138,8 +336,9 @@ FusionDecision CpuInstructionFusion::ShouldFuse(HloInstruction* consumer,
   // number of arguments.
   static constexpr int64_t kMaxConcatenateArguments = 8;
 
-  if (IsLargeConstant(producer)) {
-    return FusionDecision::Forbid("Don't fuse large constants.");
+  if (HloPredicateIsOp<HloOpcode::kConstant>(producer) &&
+      !ShapeUtil::IsEffectiveScalar(producer->shape())) {
+    return FusionDecision::Forbid("Don't fuse non-scalar constants.");
   }
 
   if (CanBeOutputFused(producer, consumer)) {
@@ -190,6 +389,26 @@ FusionDecision CpuInstructionFusion::ShouldFuse(HloInstruction* consumer,
 
   RETURN_IF_NOT_FUSIBLE(InstructionFusion::ShouldFuse(consumer, operand_index));
 
+  // Fusing too many reductions together can lead to a giant LLVM modules after
+  // loop unrolling. We prefer to split such fusions into multiple kernels to
+  // avoid excessive compilation times. X86TargetLowering::PerformDAGCombine
+  // spends tens of minutes trying to combine load operations.
+  //
+  // TODO(b/419635451): Remove this once we have a better way to control the
+  // size of the generated LLVM IR.
+  static constexpr int64_t kMaxReductionsInFusion = 5;
+  if (consumer->opcode() == HloOpcode::kFusion &&
+      producer->opcode() == HloOpcode::kReduce) {
+    int64_t num_fused_reductions = absl::c_count_if(
+        consumer->fused_instructions(), [](const HloInstruction* instr) {
+          return instr->opcode() == HloOpcode::kReduce;
+        });
+    if (num_fused_reductions > kMaxReductionsInFusion) {
+      return FusionDecision::Forbid(
+          "Too many reductions inside single fusion.");
+    }
+  }
+
   // Fuse constants in general but avoid creating 2-instruction fusions with
   // just a constant and another node.
   if (producer->opcode() == HloOpcode::kConstant &&
@@ -208,7 +427,7 @@ FusionDecision CpuInstructionFusion::ShouldFuse(HloInstruction* consumer,
   // inefficiencies in the fusion emitter.
   // TODO(b/119692968): Remove this once the fusion emitter can handle
   // arbitrary fusion nodes.
-  if (consumer->opcode() == HloOpcode::kFusion) {
+  if (may_duplicate() && consumer->opcode() == HloOpcode::kFusion) {
     if (fusion_node_evaluations_.find(consumer) ==
         fusion_node_evaluations_.end()) {
       // We have no cached results for this fusion node yet. This can happen
@@ -276,6 +495,10 @@ HloInstruction::FusionKind CpuInstructionFusion::ChooseKind(
 
 HloInstruction* CpuInstructionFusion::FuseInstruction(
     HloInstruction* fusion_instruction, HloInstruction* producer) {
+  if (!may_duplicate()) {
+    return InstructionFusion::FuseInstruction(fusion_instruction, producer);
+  }
+
   auto evaluation = fusion_node_evaluations_.find(fusion_instruction);
   if (evaluation == fusion_node_evaluations_.end()) {
     evaluation = fusion_node_evaluations_
@@ -290,11 +513,5 @@ HloInstruction* CpuInstructionFusion::FuseInstruction(
   return new_producer;
 }
 
-bool CpuInstructionFusion::IsLargeConstant(
-    const HloInstruction* constant) const {
-  return constant->IsConstant() &&
-         Cast<HloConstantInstruction>(constant)->literal().size_bytes() >
-             GetLargeConstantThresholdBytes();
-}
 }  // namespace cpu
 }  // namespace xla

@@ -17,7 +17,7 @@ load("//tensorflow:tensorflow.bzl", "py_test")
 load("//tensorflow:tensorflow.default.bzl", "pybind_extension")
 
 package(
-    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = [
         "//tensorflow/compiler/mlir/lite/integrations:__subpackages__",
         "//third_party/odml/litert/litert/python/tools/model_utils:__subpackages__",
@@ -40,6 +40,7 @@ pybind_extension(
         "//tensorflow/compiler/mlir/tensorflow:convert_tensor",
         "//tensorflow/python/lib/core:ndarray_tensor",
         "//tensorflow/python/lib/core:py_func_lib",
+        "@com_google_absl//absl/strings:string_view",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:AllPassesAndDialects",
         "@llvm-project//mlir:ArithDialect",
@@ -48,18 +49,17 @@ pybind_extension(
         "@llvm-project//mlir:FuncExtensions",
         "@llvm-project//mlir:FuncTransforms",
         "@llvm-project//mlir:IR",
-        "@llvm-project//mlir:MLIRBindingsPythonHeaders",
-        "@llvm-project//mlir:MLIRBindingsPythonHeadersAndDeps",
+        "@llvm-project//mlir:MLIRBindingsPythonNanobindHeadersAndDeps",
         "@llvm-project//mlir:MlirOptLib",
         "@llvm-project//mlir:Pass",
         "@llvm-project//mlir:QuantOps",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:Transforms",
-        "@local_xla//third_party/python_runtime:headers",
-        "@pybind11",
+        "@nanobind",
         "@stablehlo//:register",
         "@stablehlo//:stablehlo_ops",
         "@stablehlo//:vhlo_ops",
+        "@xla//third_party/python_runtime:headers",
     ],
 )
 

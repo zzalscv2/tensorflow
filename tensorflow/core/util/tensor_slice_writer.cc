@@ -36,7 +36,8 @@ namespace {
 
 class TableBuilder : public TensorSliceWriter::Builder {
  public:
-  TableBuilder(const string& name, WritableFile* f) : name_(name), file_(f) {
+  TableBuilder(const std::string& name, WritableFile* f)
+      : name_(name), file_(f) {
     table::Options option;
     option.compression = table::kNoCompression;
     builder_ = std::make_unique<table::TableBuilder>(option, f);
@@ -63,14 +64,14 @@ class TableBuilder : public TensorSliceWriter::Builder {
   }
 
  private:
-  string name_;
+  std::string name_;
   std::unique_ptr<WritableFile> file_;
   std::unique_ptr<table::TableBuilder> builder_;
 };
 }  // anonymous namespace
 
 absl::Status CreateTableTensorSliceBuilder(
-    const string& name, TensorSliceWriter::Builder** builder) {
+    const std::string& name, TensorSliceWriter::Builder** builder) {
   *builder = nullptr;
   std::unique_ptr<WritableFile> f;
   absl::Status s = Env::Default()->NewWritableFile(name, &f);
@@ -82,21 +83,21 @@ absl::Status CreateTableTensorSliceBuilder(
   }
 }
 
-TensorSliceWriter::TensorSliceWriter(const string& filename,
+TensorSliceWriter::TensorSliceWriter(const std::string& filename,
                                      CreateBuilderFunction create_builder)
     : filename_(filename),
       create_builder_(std::move(create_builder)),
       slices_(0) {
   Env* env = Env::Default();
-  absl::Status status = env->CanCreateTempFile(filename_, &use_temp_file_);
+  absl::Status status = env->HasAtomicMove(filename_, &use_temp_file_);
   if (!status.ok()) {
-    LOG(ERROR) << "Failed to get CanCreateTempFile attribute: " << filename_;
+    LOG(ERROR) << "Failed to get HasAtomicMove attribute: " << filename_;
     use_temp_file_ = true;
   }
 
   data_filename_ = filename_;
   if (use_temp_file_) {
-    data_filename_ = strings::StrCat(filename_, ".tempstate", random::New64());
+    data_filename_ = absl::StrCat(filename_, ".tempstate", random::New64());
   }
   VersionDef* versions = sts_.mutable_meta()->mutable_versions();
   versions->set_producer(TF_CHECKPOINT_VERSION);
@@ -113,7 +114,7 @@ absl::Status TensorSliceWriter::Finish() {
   std::unique_ptr<Builder> builder(b);
 
   // We save the saved tensor slice metadata as the first element.
-  string meta;
+  std::string meta;
   sts_.AppendToString(&meta);
   builder->Add(kSavedTensorSlicesKey, meta);
 

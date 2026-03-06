@@ -57,9 +57,9 @@ class EagerOperation : public ImmediateExecutionOperation {
     return Reset(op, raw_device_name, false, nullptr);
   }
 
-  const string& Name() const override { return attrs_.op_name(); }
+  const std::string& Name() const override { return attrs_.op_name(); }
 
-  const string& DeviceName() const override { return device_name_; }
+  const std::string& DeviceName() const override { return device_name_; }
 
   ImmediateExecutionContext* GetContext() const override { return &ctx_; }
 
@@ -196,9 +196,9 @@ class EagerOperation : public ImmediateExecutionOperation {
 
   // This is useful if we want the EagerOperation to point to a different
   // function.
-  void UpdateName(const string& name) {
-    op_name_ = name.c_str();
+  void UpdateName(const std::string& name) {
     attrs_.set_op_name(name);
+    op_name_ = attrs_.op_name();
   }
 
   // Like TensorHandles, EagerOperations may be placed either on a virtual
@@ -242,14 +242,14 @@ class EagerOperation : public ImmediateExecutionOperation {
 
   EagerExecutor& Executor() { return *executor_; }
 
-  string DebugString() const;
+  std::string DebugString() const;
 
   const absl::optional<EagerFunctionParams>& eager_func_params() const {
     return eager_func_params_;
   }
 
   // Op name recorded for memory debugging purpose.
-  const char* op_name() const { return op_name_; }
+  absl::string_view op_name() const { return op_name_; }
 
   // For LLVM style RTTI.
   static bool classof(const AbstractOperation* ptr) {
@@ -277,7 +277,7 @@ class EagerOperation : public ImmediateExecutionOperation {
                                     const std::vector<DataType>& dtypes);
 
   tensorflow::EagerContext& ctx_;
-  const char* op_name_ = nullptr;
+  std::string op_name_;
   AttrBuilder attrs_;
   const AttrTypeMap* attr_types_;
 
@@ -289,12 +289,12 @@ class EagerOperation : public ImmediateExecutionOperation {
   // The last device name given to SetDeviceName.
   // This is used to avoid having to re-process the same device in repeated
   // calls to SetDeviceName.
-  string last_set_device_name_;
+  std::string last_set_device_name_;
 
   // The operation's device name.
   // This contains the named passed to SetDeviceName until device_ is set,
   // at which point it contains the device_ name.
-  string device_name_;
+  std::string device_name_;
 
   // The parsed device name.
   // This will always contain the result of

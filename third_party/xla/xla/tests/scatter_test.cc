@@ -21,6 +21,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "xla/tests/xla_test_backend_predicates.h"
 #include "absl/strings/string_view.h"
 #include "absl/strings/substitute.h"
 #include "absl/types/span.h"
@@ -35,7 +36,6 @@ limitations under the License.
 #include "xla/tests/hlo_pjrt_interpreter_reference_mixin.h"
 #include "xla/tests/hlo_pjrt_test_base.h"
 #include "xla/tests/literal_test_util.h"
-#include "xla/tests/test_macros.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/types.h"
 
@@ -59,7 +59,7 @@ class ScatterTest : public HloPjRtInterpreterReferenceMixin<HloPjRtTestBase> {
   }
 };
 
-XLA_TEST_F(ScatterTest, TensorFlowScatterV1_Update) {
+TEST_F(ScatterTest, TensorFlowScatterV1_Update) {
   const std::string hlo_text = R"(
 HloModule TensorFlowScatterV1
 
@@ -88,7 +88,47 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, TensorFlowScatterV1_WithFusedAdds) {
+TEST_F(ScatterTest, TensorFlowScatterV1_UpdateTwice) {
+  const std::string hlo_text = R"(
+HloModule TensorFlowScatterV1
+
+update_s32 (lhs: s32[], rhs: s32[]) -> s32[] {
+  lhs = s32[] parameter(0)
+  ROOT rhs = s32[] parameter(1)
+}
+
+ENTRY main {
+  operand = s32[3,3] parameter(0)
+  indices = s32[2] parameter(1)
+  updates = s32[2,3] parameter(2)
+  ROOT scatter = s32[3,3] scatter(operand, indices, updates),
+      to_apply=update_s32,
+      update_window_dims={1},
+      inserted_window_dims={0},
+      scatter_dims_to_operand_dims={0},
+      index_vector_dim=1
+}
+)";
+  Literal operand =
+      LiteralUtil::CreateR2<int32_t>({{1, 2, 3}, {4, 5, 6}, {7, 8, 9}});
+  Literal scatter_indices = LiteralUtil::CreateR1<int32_t>({0, 0});
+  Literal updates =
+      LiteralUtil::CreateR2<int32_t>({{10, 20, 30}, {70, 80, 90}});
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(hlo_text));
+  TF_ASSERT_OK_AND_ASSIGN(
+      Literal result,
+      Execute(std::move(module), {&operand, &scatter_indices, &updates}));
+  auto data = result.data<int32_t>();
+  // The first row is written twice, so it is not deterministic which of the two
+  // writes "wins".
+  EXPECT_TRUE(data[0] == 10 || data[0] == 70);
+  EXPECT_TRUE(data[1] == 20 || data[1] == 80);
+  EXPECT_TRUE(data[2] == 30 || data[2] == 90);
+  EXPECT_EQ(data.subspan(3), (std::vector<int32_t>{4, 5, 6, 7, 8, 9}));
+}
+
+TEST_F(ScatterTest, TensorFlowScatterV1_WithFusedAdds) {
   const std::string hlo_text = R"(
 HloModule TensorFlowScatterV1
 
@@ -120,7 +160,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, TensorFlowScatterV2_Update) {
+TEST_F(ScatterTest, TensorFlowScatterV2_Update) {
   const char* hlo_text = R"(
 HloModule TensorFlowScatterV2
 
@@ -149,7 +189,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, TensorFlowScatterV2_InversePermutation) {
+TEST_F(ScatterTest, TensorFlowScatterV2_InversePermutation) {
   const char* hlo_text = R"(
 HloModule TensorFlowScatterV2
 
@@ -179,13 +219,14 @@ ENTRY main {
   config.set_debug_options(GetDebugOptionsForTest());
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(hlo_text, config));
-  auto actual = ExecuteAndTransfer(std::move(module), {&permutation});
+  TF_ASSERT_OK_AND_ASSIGN(Literal actual,
+                          Execute(std::move(module), {&permutation}));
   Literal expected = LiteralUtil::CreateR2<int32_t>(
       {{3, 0, 2, 1}, {1, 3, 2, 0}, {3, 2, 0, 1}});
   EXPECT_TRUE(LiteralTestUtil::Equal(expected, actual));
 }
 
-XLA_TEST_F(ScatterTest, SimpleR4) {
+TEST_F(ScatterTest, SimpleR4) {
   const char* hlo_text = R"(
 HloModule SimpleR4
 
@@ -216,7 +257,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, TensorFlowScatter_Add) {
+TEST_F(ScatterTest, TensorFlowScatter_Add) {
   const std::string hlo_text = R"(
 HloModule TensorFlowScatter_Add
 
@@ -246,7 +287,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, TensorFlowScatter_Add_UniqueIndices) {
+TEST_F(ScatterTest, TensorFlowScatter_Add_UniqueIndices) {
   const std::string hlo_text = R"(
 HloModule TensorFlowScatter_Add
 
@@ -277,7 +318,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, TensorFlowScatter_Mul) {
+TEST_F(ScatterTest, TensorFlowScatter_Mul) {
   const std::string hlo_text = R"(
 HloModule TensorFlowScatter_Mul
 
@@ -307,7 +348,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, TensorFlowScatter_F32) {
+TEST_F(ScatterTest, TensorFlowScatter_F32) {
   const std::string hlo_text = R"(
 HloModule TensorFlowScatter_F32
 
@@ -337,7 +378,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, TensorFlowScatter_F16) {
+TEST_F(ScatterTest, TensorFlowScatter_F16) {
   const std::string hlo_text = R"(
 HloModule TensorFlowScatter_F16
 
@@ -370,7 +411,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, TensorFlowScatter_RepeatedIndices) {
+TEST_F(ScatterTest, TensorFlowScatter_RepeatedIndices) {
   const char* hlo_text = R"(
 HloModule TensorFlowScatter
 
@@ -400,7 +441,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, TensorFlowScatter_MultipleBatchDims) {
+TEST_F(ScatterTest, TensorFlowScatter_MultipleBatchDims) {
   const char* hlo_text = R"(
 HloModule TensorFlowScatterMultipleBatchDims
 
@@ -430,7 +471,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, TensorFlowScatterNd) {
+TEST_F(ScatterTest, TensorFlowScatterNd) {
   const char* hlo_text = R"(
 HloModule TensorFlowScatterNd
 
@@ -460,7 +501,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, TensorFlowScatterNdS64) {
+TEST_F(ScatterTest, TensorFlowScatterNdS64) {
   constexpr char hlo_text[] = R"(
 HloModule S64Scatter
 
@@ -491,7 +532,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, TensorFlowScatterNd_NonDefaultIndexVectorDim) {
+TEST_F(ScatterTest, TensorFlowScatterNd_NonDefaultIndexVectorDim) {
   const char* hlo_text = R"(
 HloModule TensorFlowScatterNdNonDefaultIndexVectorDim
 
@@ -521,7 +562,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, DynamicUpdateSlice) {
+TEST_F(ScatterTest, DynamicUpdateSlice) {
   const char* hlo_text = R"(
 HloModule DynamicUpdateSlice
 
@@ -549,7 +590,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, BatchDynamicUpdateSlice) {
+TEST_F(ScatterTest, BatchDynamicUpdateSlice) {
   const char* hlo_text = R"(
 HloModule BatchDynamicUpdateSlice
 
@@ -577,7 +618,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, ZeroDimBounds) {
+TEST_F(ScatterTest, ZeroDimBounds) {
   const char* hlo_text = R"(
 HloModule TensorFlowScatter_ZeroDimBounds
 
@@ -604,7 +645,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, NoUpdateWindowDims) {
+TEST_F(ScatterTest, NoUpdateWindowDims) {
   const std::string hlo_text = R"(
 HloModule Scatter_NoUpdateWindowDims
 
@@ -633,7 +674,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, OutOfBoundsIndex) {
+TEST_F(ScatterTest, OutOfBoundsIndex) {
   const std::string hlo_text = R"(
 HloModule BatchDynamicSlice
 
@@ -663,7 +704,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, OutOfBoundsUnsignedIndex) {
+TEST_F(ScatterTest, OutOfBoundsUnsignedIndex) {
   const std::string hlo_text = R"(
 HloModule BatchDynamicSlice
 
@@ -693,7 +734,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, U8Index) {
+TEST_F(ScatterTest, U8Index) {
   const std::string hlo_text = R"(
 HloModule BatchDynamicSlice
 
@@ -725,7 +766,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, NegativeIndex) {
+TEST_F(ScatterTest, NegativeIndex) {
   const std::string hlo_text = R"(
 HloModule BatchDynamicSlice
 
@@ -760,7 +801,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, OutOfBoundsUpdateWindow) {
+TEST_F(ScatterTest, OutOfBoundsUpdateWindow) {
   const char* hlo_text = R"(
 HloModule TensorFlowScatterNd_OobUpdateWindow
 
@@ -790,7 +831,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, OneScalarIndex) {
+TEST_F(ScatterTest, OneScalarIndex) {
   const char* hlo_text = R"(
 HloModule OneScalarIndex
 
@@ -819,7 +860,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, ScalarUpdate) {
+TEST_F(ScatterTest, ScalarUpdate) {
   const char* hlo_text = R"(
 HloModule ScalarUpdate
 
@@ -846,7 +887,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, EmptyIndices) {
+TEST_F(ScatterTest, EmptyIndices) {
   const std::string hlo_text = R"(
 HloModule EmptyIndices
 
@@ -873,7 +914,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-XLA_TEST_F(ScatterTest, ScatterIntoScalar) {
+TEST_F(ScatterTest, ScatterIntoScalar) {
   const char* hlo_text = R"(
 HloModule ScatterIntoScalar
 
@@ -900,8 +941,7 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
-// TODO(b/230137437): Enable this on GPU once mhlo allows variadic scatter.
-XLA_TEST_F(ScatterTest, DISABLED_ON_GPU(Multioutput)) {
+TEST_F(ScatterTest, Multioutput) {
   constexpr char hlo_text[] = R"(
 HloModule MultioutputScatter
 
@@ -942,7 +982,46 @@ ENTRY main {
           {&operand0, &operand1, &scatter_indices, &updates0, &updates1});
 }
 
-XLA_TEST_F(ScatterTest, TensorFlowScatter_Max_F32) {
+TEST_F(ScatterTest, MultioutputSameOperand) {
+  // TODO(b/435078848): Currently fails on XLA/CPU.
+  if (test::DeviceTypeIsOneOf({test::kCpu})) {
+    GTEST_SKIP();
+  }
+  constexpr char hlo_text[] = R"(
+HloModule MultioutputScatter
+
+update {
+  lhs0 = s32[] parameter(0)
+  lhs1 = s32[] parameter(1)
+  rhs0 = s32[] parameter(2)
+  rhs1 = s32[] parameter(3)
+  ROOT tuple = (s32[], s32[]) tuple(rhs0, rhs1)
+}
+
+ENTRY main {
+  operand = s32[3,3,2] parameter(0)
+  indices = s32[2,2] parameter(1)
+  updates0 = s32[2,2] parameter(2)
+  updates1 = s32[2,2] parameter(3)
+  ROOT scatter = (s32[3,3,2], s32[3,3,2]) scatter(operand, operand, indices, updates0, updates1),
+      to_apply=update,
+      update_window_dims={1},
+      inserted_window_dims={0,1},
+      scatter_dims_to_operand_dims={0,1},
+      index_vector_dim=1
+}
+)";
+  Literal operand =
+      LiteralUtil::CreateR3<int32_t>({{{-1, 1}, {-2, 2}, {-3, 3}},  //
+                                      {{-4, 4}, {-5, 5}, {-6, 6}},  //
+                                      {{-7, 7}, {-8, 8}, {-9, 9}}});
+  Literal scatter_indices = LiteralUtil::CreateR2<int32_t>({{0, 0}, {1, 0}});
+  Literal updates0 = LiteralUtil::CreateR2<int32_t>({{-10, 10}, {-40, 40}});
+  Literal updates1 = LiteralUtil::CreateR2<int32_t>({{-11, 11}, {-41, 41}});
+  RunTest(hlo_text, {&operand, &scatter_indices, &updates0, &updates1});
+}
+
+TEST_F(ScatterTest, TensorFlowScatter_Max_F32) {
   const std::string hlo_text = R"(
 HloModule TensorFlowScatter_Max_F32
 
@@ -972,12 +1051,44 @@ ENTRY main {
   RunTest(hlo_text, &operand, &scatter_indices, &updates);
 }
 
+TEST_F(ScatterTest, Scatter_Add_F32) {
+  const std::string hlo_text = R"(
+HloModule scatter_add
+
+region_0.1 {
+  scatter-add.2 = f32[] parameter(0)
+  scatter-add.3 = f32[] parameter(1)
+  ROOT add.2 = f32[] add(scatter-add.2, scatter-add.3)
+}
+
+ENTRY main.2 {
+  constant.4 = f32[] constant(0)
+  broadcast.4 = f32[2,2,4]{2,1,0} broadcast(constant.4), dimensions={}
+  channel_idxs.1 = s32[2,2]{1,0} constant({{0,3}, {1,2}})
+  constant.5 = s32[] constant(0)
+  broadcast.5 = s32[2,2]{1,0} broadcast(constant.5), dimensions={}
+  lt.1 = pred[2,2]{1,0} compare(channel_idxs.1, broadcast.5), direction=LT
+  constant.3 = s32[] constant(4)
+  broadcast.3 = s32[2,2]{1,0} broadcast(constant.3), dimensions={}
+  add.3 = s32[2,2]{1,0} add(channel_idxs.1, broadcast.3)
+  select_n.1 = s32[2,2]{1,0} select(lt.1, add.3, channel_idxs.1)
+  broadcast_in_dim.1 = s32[2,2,1]{2,1,0} reshape(select_n.1)
+  arr.1 = f32[2,2,2]{2,1,0} parameter(0)
+  ROOT scatter-add.5 = f32[2,2,4]{2,1,0} scatter(broadcast.4, broadcast_in_dim.1, arr.1), update_window_dims={1}, inserted_window_dims={2}, scatter_dims_to_operand_dims={2}, input_batching_dims={0}, scatter_indices_batching_dims={0}, index_vector_dim=2, to_apply=region_0.1
+}
+)";
+  Literal updates = LiteralUtil::CreateR3<float>(
+      {{{1.0, 1.1}, {2.0, 2.1}}, {{3.0, 3.1}, {4.0, 4.1}}});
+
+  RunTest(hlo_text, {&updates});
+}
+
 // Test min/max/add scatters with edge-case values.
 class ScatterEdgeCaseTestP
     : public ScatterTest,
       public ::testing::WithParamInterface<absl::string_view /*operator*/> {};
 
-XLA_TEST_P(ScatterEdgeCaseTestP, DoIt) {
+TEST_P(ScatterEdgeCaseTestP, DoIt) {
   using L = std::numeric_limits<float>;
   std::vector<float> edge_cases = {
       0.f,

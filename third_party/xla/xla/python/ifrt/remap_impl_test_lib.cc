@@ -15,13 +15,13 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
-#include <numeric>
 #include <optional>
 #include <utility>
 #include <vector>
 
 #include "absl/container/inlined_vector.h"
 #include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "llvm/Support/Casting.h"
@@ -39,7 +39,6 @@ limitations under the License.
 #include "xla/status_macros.h"
 #include "xla/tsl/concurrency/ref_count.h"
 #include "xla/tsl/lib/core/status_test_util.h"
-#include "xla/tsl/platform/status_matchers.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
 
@@ -51,7 +50,6 @@ using ::testing::ElementsAre;
 using ::testing::ElementsAreArray;
 using ::testing::HasSubstr;
 using ::testing::SizeIs;
-using ::tsl::testing::StatusIs;
 
 // Returns a shape for an array whose first dimension is fully sharded across
 // `num_shards` devices. For example, [2, 3] with num_shards=5 becomes [10, 3].
@@ -117,7 +115,7 @@ absl::StatusOr<ArrayRef> CreateArray(Client* client,
 
   for (int i = 0; i < base_values.size(); ++i) {
     std::vector<ValueType> data(shard_shape.num_elements());
-    std::iota(data.begin(), data.end(), base_values[i]);
+    absl::c_iota(data, base_values[i]);
 
     Device* device = client->addressable_devices().at(device_indices[i]);
     devices.push_back(device);
@@ -132,10 +130,12 @@ absl::StatusOr<ArrayRef> CreateArray(Client* client,
             /*on_done_with_host_buffer=*/{}));
   }
 
-  ShardingRef assembled_sharding = ConcreteEvenSharding::Create(
-      client->MakeDeviceList(devices), MemoryKind(),
-      /*shape=*/shape,
-      /*shard_shape=*/std::move(shard_shape));
+  TF_ASSIGN_OR_RETURN(DeviceListRef device_list,
+                      client->MakeDeviceList(devices));
+  ShardingRef assembled_sharding =
+      ConcreteEvenSharding::Create(std::move(device_list), MemoryKind(),
+                                   /*shape=*/shape,
+                                   /*shard_shape=*/std::move(shard_shape));
   absl::Span<ArrayRef> arrays = absl::MakeSpan(shards);
   return client->AssembleArrayFromSingleDeviceArrays(
       arrays.at(0)->dtype(), std::move(shape), std::move(assembled_sharding),
@@ -178,7 +178,7 @@ void AssertArrayContent(Client* client, Array* array,
                 ElementsAre(expected_device));
 
     std::vector<ValueType> expected_data(expected_shard_shape.num_elements());
-    std::iota(expected_data.begin(), expected_data.end(), base_values[i]);
+    absl::c_iota(expected_data, base_values[i]);
 
     std::vector<ValueType> actual_data(shards[i]->shape().num_elements());
     TF_ASSERT_OK(shards[i]
@@ -204,6 +204,7 @@ TEST(RemapImplTest, ExtractSingleShard) {
       RemapPlan::Mapping{/*in_array=*/0, /*out_array=*/0,
                          /*from=*/{RemapPlan::Interval{1, 2, 1}},
                          /*to=*/{RemapPlan::Interval{0, 1, 1}}});
+  TF_ASSERT_OK(plan.ComputeInputDevicesForOutputMap(client.get()));
   TF_ASSERT_OK(plan.Validate());
 
   std::vector<ArrayRef> arrays;
@@ -256,6 +257,7 @@ TEST(RemapImplTest, InterleaveArraysDonate) {
       RemapPlan::Mapping{/*in_array=*/1, /*out_array=*/0,
                          /*from=*/{RemapPlan::Interval{0, 2, 1}},
                          /*to=*/{RemapPlan::Interval{1, 4, 2}}});
+  TF_ASSERT_OK(plan.ComputeInputDevicesForOutputMap(client.get()));
   TF_ASSERT_OK(plan.Validate());
 
   std::vector<ArrayRef> arrays;
@@ -304,6 +306,7 @@ TEST(RemapImplTest, InterleaveArraysReuse) {
       RemapPlan::Mapping{/*in_array=*/1, /*out_array=*/0,
                          /*from=*/{RemapPlan::Interval{0, 2, 1}},
                          /*to=*/{RemapPlan::Interval{1, 4, 2}}});
+  TF_ASSERT_OK(plan.ComputeInputDevicesForOutputMap(client.get()));
   TF_ASSERT_OK(plan.Validate());
 
   std::vector<ArrayRef> arrays;
@@ -318,9 +321,10 @@ TEST(RemapImplTest, InterleaveArraysReuse) {
 
   EXPECT_THAT(client->RemapArrays(plan, absl::MakeSpan(arrays),
                                   ArrayCopySemantics::kReuseInput),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("kDonateInput is required if multiple inputs "
-                                 "are mapped to one output")));
+              absl_testing::StatusIs(
+                  absl::StatusCode::kInvalidArgument,
+                  HasSubstr("kDonateInput is required if multiple inputs "
+                            "are mapped to one output")));
 }
 
 TEST(RemapImplTest, DeinterleaveArrays) {
@@ -345,6 +349,7 @@ TEST(RemapImplTest, DeinterleaveArrays) {
       RemapPlan::Mapping{/*in_array=*/0, /*out_array=*/1,
                          /*from=*/{RemapPlan::Interval{1, 4, 2}},
                          /*to=*/{RemapPlan::Interval{0, 2, 1}}});
+  TF_ASSERT_OK(plan.ComputeInputDevicesForOutputMap(client.get()));
   TF_ASSERT_OK(plan.Validate());
 
   std::vector<ArrayRef> arrays;
@@ -419,6 +424,7 @@ TEST(RemapImplTest, BatchMappingIdentity) {
                          /*out_array=*/1,
                          /*from=*/{RemapPlan::Interval{0, 2, 1}},
                          /*to=*/{RemapPlan::Interval{0, 2, 1}}});
+  TF_ASSERT_OK(plan.ComputeInputDevicesForOutputMap(client.get()));
   TF_ASSERT_OK(plan.Validate());
 
   std::vector<ArrayRef> inputs;
@@ -504,6 +510,7 @@ TEST(RemapImplTest, BatchMappingDeinterleave) {
                          /*out_array=*/3,
                          /*from=*/{RemapPlan::Interval{1, 2, 1}},
                          /*to=*/{RemapPlan::Interval{0, 1, 1}}});
+  TF_ASSERT_OK(plan.ComputeInputDevicesForOutputMap(client.get()));
   TF_ASSERT_OK(plan.Validate());
 
   std::vector<ArrayRef> inputs;
@@ -550,6 +557,7 @@ TEST(RemapImplTest, DetectBadInput) {
       RemapPlan::Mapping{/*in_array=*/0, /*out_array=*/0,
                          /*from=*/{RemapPlan::Interval{0, 1, 1}},
                          /*to=*/{RemapPlan::Interval{0, 1, 1}}});
+  TF_ASSERT_OK(plan.ComputeInputDevicesForOutputMap(client.get()));
   TF_ASSERT_OK(plan.Validate());
 
   {
@@ -565,8 +573,9 @@ TEST(RemapImplTest, DetectBadInput) {
     EXPECT_THAT(
         client->RemapArrays(plan, absl::MakeSpan(arrays),
                             ArrayCopySemantics::kReuseInput),
-        StatusIs(absl::StatusCode::kInvalidArgument,
-                 HasSubstr("RemapArrays expects 1 input arrays, but got 2")));
+        absl_testing::StatusIs(
+            absl::StatusCode::kInvalidArgument,
+            HasSubstr("RemapArrays expects 1 input arrays, but got 2")));
   }
 
   {
@@ -575,11 +584,11 @@ TEST(RemapImplTest, DetectBadInput) {
         arrays.emplace_back(),
         CreateArray<float>(client.get(), /*base_values=*/{0},
                            /*device_indices=*/{0}));
-    EXPECT_THAT(
-        client->RemapArrays(plan, absl::MakeSpan(arrays),
-                            ArrayCopySemantics::kReuseInput),
-        StatusIs(absl::StatusCode::kInvalidArgument,
-                 HasSubstr("RemapArrays expects input #0 to have dtype")));
+    EXPECT_THAT(client->RemapArrays(plan, absl::MakeSpan(arrays),
+                                    ArrayCopySemantics::kReuseInput),
+                absl_testing::StatusIs(
+                    absl::StatusCode::kInvalidArgument,
+                    HasSubstr("RemapArrays expects input #0 to have dtype")));
   }
 
   {
@@ -589,11 +598,11 @@ TEST(RemapImplTest, DetectBadInput) {
         CreateArray<int32_t>(client.get(), /*base_values=*/{0},
                              /*device_indices=*/{0},
                              /*shard_shape=*/Shape({20, 30})));
-    EXPECT_THAT(
-        client->RemapArrays(plan, absl::MakeSpan(arrays),
-                            ArrayCopySemantics::kReuseInput),
-        StatusIs(absl::StatusCode::kInvalidArgument,
-                 HasSubstr("RemapArrays expects input #0 to have shape")));
+    EXPECT_THAT(client->RemapArrays(plan, absl::MakeSpan(arrays),
+                                    ArrayCopySemantics::kReuseInput),
+                absl_testing::StatusIs(
+                    absl::StatusCode::kInvalidArgument,
+                    HasSubstr("RemapArrays expects input #0 to have shape")));
   }
 
   {
@@ -604,8 +613,9 @@ TEST(RemapImplTest, DetectBadInput) {
                              /*device_indices=*/{1}));
     EXPECT_THAT(client->RemapArrays(plan, absl::MakeSpan(arrays),
                                     ArrayCopySemantics::kReuseInput),
-                StatusIs(absl::StatusCode::kInvalidArgument,
-                         HasSubstr("RemapArrays expects input #0 to be on")));
+                absl_testing::StatusIs(
+                    absl::StatusCode::kInvalidArgument,
+                    HasSubstr("RemapArrays expects input #0 to be on")));
   }
 }
 

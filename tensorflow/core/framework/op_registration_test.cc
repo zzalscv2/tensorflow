@@ -24,7 +24,7 @@ namespace tensorflow {
 
 namespace {
 
-void Register(const string& op_name, OpRegistry* registry) {
+void Register(const std::string& op_name, OpRegistry* registry) {
   registry->Register(
       [op_name](OpRegistrationData* op_reg_data) -> absl::Status {
         op_reg_data->op_def.set_name(op_name);
@@ -51,7 +51,7 @@ TEST(OpRegistrationTest, TestDuplicate) {
 
   TF_EXPECT_OK(registry->SetWatcher(
       [](const absl::Status& s, const OpDef& op_def) -> absl::Status {
-        EXPECT_TRUE(errors::IsAlreadyExists(s));
+        EXPECT_TRUE(absl::IsAlreadyExists(s));
         return absl::OkStatus();
       }));
   Register("Foo", registry.get());

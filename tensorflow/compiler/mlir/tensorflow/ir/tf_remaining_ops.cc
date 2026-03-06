@@ -15,16 +15,12 @@ limitations under the License.
 
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_remaining_ops.h"
 
-#include <algorithm>
 #include <cstdint>
-#include <functional>
-#include <limits>
-#include <numeric>
 #include <optional>
 #include <string>
-#include <tuple>
-#include <type_traits>
 
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -65,7 +61,7 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_structs.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_types.h"
 #include "tensorflow/compiler/mlir/tensorflow/transforms/rewrite_util.h"
-#include "tensorflow/compiler/mlir/tensorflow/utils/serialize_mlir_module_utils.h"
+#include "tensorflow/compiler/mlir/tensorflow/utils/deserialize_mlir_module_utils.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/util/tensor_format.h"
 
@@ -188,5 +184,6 @@ std::optional<std::string> _SendOp::GetResourceInstanceStr() {
 // TableGen'd op method definitions
 //===----------------------------------------------------------------------===//
 
+using namespace mlir;  // NOLINT
 #define GET_OP_CLASSES
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_remaining_ops.cc.inc"

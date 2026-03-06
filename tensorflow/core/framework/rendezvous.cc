@@ -21,9 +21,10 @@ limitations under the License.
 #include <vector>
 
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/notification.h"
+#include "absl/time/time.h"
 #include "tensorflow/core/framework/local_rendezvous.h"
 #include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/core/notification.h"
 #include "tensorflow/core/lib/gtl/flatmap.h"
 #include "tensorflow/core/lib/gtl/manual_constructor.h"
 #include "tensorflow/core/lib/hash/hash.h"
@@ -52,9 +53,11 @@ Rendezvous::ParsedKey& Rendezvous::ParsedKey::operator=(const ParsedKey& b) {
 }
 
 /*  static */
-string Rendezvous::CreateKey(const string& src_device, uint64 src_incarnation,
-                             const string& dst_device, const string& name,
-                             const FrameAndIter& frame_iter) {
+std::string Rendezvous::CreateKey(const std::string& src_device,
+                                  uint64_t src_incarnation,
+                                  const std::string& dst_device,
+                                  const std::string& name,
+                                  const FrameAndIter& frame_iter) {
   // NOTE: ';' is not used in the device name's job name.
   //
   // We include both sender and receiver in the key to facilitate
@@ -120,7 +123,7 @@ absl::Status RendezvousInterface::Recv(const ParsedKey& key,
                                        const Args& recv_args, Tensor* val,
                                        bool* is_dead, int64_t timeout_ms) {
   absl::Status ret;
-  Notification n;
+  absl::Notification n;
   RecvAsync(key, recv_args,
             [&ret, &n, val, is_dead](
                 const absl::Status& s, const Args& send_args,
@@ -131,8 +134,8 @@ absl::Status RendezvousInterface::Recv(const ParsedKey& key,
               n.Notify();
             });
   if (timeout_ms > 0) {
-    int64_t timeout_us = timeout_ms * 1000;
-    bool notified = WaitForNotificationWithTimeout(&n, timeout_us);
+    bool notified =
+        n.WaitForNotificationWithTimeout(absl::Milliseconds(timeout_ms));
     if (!notified) {
       return absl::Status(absl::StatusCode::kDeadlineExceeded,
                           "Timed out waiting for notification");

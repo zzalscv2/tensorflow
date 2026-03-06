@@ -41,7 +41,9 @@ limitations under the License.
 #include "xla/runtime/buffer_use.h"
 #include "xla/runtime/resource_use.h"
 #include "xla/service/buffer_assignment.h"
-#include "xla/stream_executor/device_memory.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
+#include "xla/stream_executor/device_address.h"
 #include "xla/tsl/concurrency/async_value_ref.h"
 #include "xla/tsl/platform/env.h"
 #include "xla/tsl/platform/errors.h"
@@ -66,34 +68,20 @@ using ::testing::ElementsAre;
 static int64_t shared_resource;
 
 // An adaptor from a lambda that runs tasks and a TaskRunner API.
-template <typename Runner, typename WorkerId>
+template <typename Runner>
 class TaskRunnerAdaptor : public Thunk::TaskRunner {
  public:
-  TaskRunnerAdaptor(Runner runner, WorkerId worker_id)
-      : runner_(std::move(runner)), worker_id_(std::move(worker_id)) {}
+  explicit TaskRunnerAdaptor(Runner runner) : runner_(std::move(runner)) {}
 
   void operator()(Thunk::Task task) final { runner_(std::move(task)); }
 
-  std::optional<int64_t> current_worker_id() const final {
-    return worker_id_();
-  }
-
  private:
   Runner runner_;
-  WorkerId worker_id_;
 };
 
 template <typename Runner>
 auto MakeTaskRunnerFrom(Runner&& runner) {
-  auto no_id = []() { return std::nullopt; };
-  return TaskRunnerAdaptor<Runner, decltype(no_id)>(
-      std::forward<Runner>(runner), no_id);
-}
-
-template <typename Runner, typename WorkerId>
-auto MakeTaskRunnerFrom(Runner&& runner, WorkerId&& worker_id) {
-  return TaskRunnerAdaptor<Runner, WorkerId>(std::forward<Runner>(runner),
-                                             std::forward<WorkerId>(worker_id));
+  return TaskRunnerAdaptor<Runner>(std::forward<Runner>(runner));
 }
 
 // A test-only thunk for verifying thunk executor implementation:
@@ -127,16 +115,26 @@ class AddI32Thunk final : public Thunk {
 
   tsl::AsyncValueRef<ExecuteEvent> Execute(const ExecuteParams&) final;
 
+  // Pretend that half of the thunks may block, to test that ThunkExecutor
+  // launches such thunks as separate tasks.
+  bool ExecuteMayBlock() const final { return id_ % 2 == 0; }
+
   BufferUses buffer_uses() const final;
   ResourceUses resource_uses() const final;
 
  private:
+  // Use global static counter to generate unique thunk ids.
+  static size_t counter_;
+
+  size_t id_;
   std::vector<BufferAllocation::Slice> srcs_;
   std::vector<BufferAllocation::Slice> dsts_;
   std::vector<std::string>* trace_;
   std::optional<Resource::Kind> shared_resource_;
   bool inject_error_;
 };
+
+size_t AddI32Thunk::counter_ = 0;
 
 std::unique_ptr<Thunk> AddI32Thunk::Create(
     std::string name, std::vector<BufferAllocation::Slice> srcs,
@@ -154,6 +152,7 @@ AddI32Thunk::AddI32Thunk(std::string name,
                          std::optional<Resource::Kind> shared_resource,
                          bool inject_error)
     : Thunk(Kind::kKernel, Info{name}),
+      id_(counter_++),
       srcs_(std::move(srcs)),
       dsts_(std::move(dsts)),
       trace_(trace),
@@ -163,10 +162,10 @@ AddI32Thunk::AddI32Thunk(std::string name,
 absl::Status AddI32Thunk::Execute(const BufferAllocations* allocations,
                                   BufferAllocation::Slice src_slice,
                                   BufferAllocation::Slice dst_slice) {
-  TF_ASSIGN_OR_RETURN(se::DeviceMemoryBase src,
+  TF_ASSIGN_OR_RETURN(se::DeviceAddressBase src,
                       allocations->GetDeviceAddress(src_slice));
 
-  TF_ASSIGN_OR_RETURN(se::DeviceMemoryBase dst,
+  TF_ASSIGN_OR_RETURN(se::DeviceAddressBase dst,
                       allocations->GetDeviceAddress(dst_slice));
 
   CHECK_EQ(src.size() % sizeof(int32_t), 0);
@@ -245,10 +244,14 @@ tsl::AsyncValueRef<Thunk::ExecuteEvent> AddI32Thunk::Execute(
 AddI32Thunk::BufferUses AddI32Thunk::buffer_uses() const {
   BufferUses buffer_uses;
   for (const auto& src : srcs_) {
-    buffer_uses.push_back(BufferUse::Read(src));
+    buffer_uses.push_back(BufferUse::Read(
+        src, ShapeUtil::MakeShape(
+                 S32, {src.size() / ShapeUtil::ByteSizeOfPrimitiveType(S32)})));
   }
   for (const auto& dst : dsts_) {
-    buffer_uses.push_back(BufferUse::Write(dst));
+    buffer_uses.push_back(BufferUse::Write(
+        dst, ShapeUtil::MakeShape(
+                 S32, {dst.size() / ShapeUtil::ByteSizeOfPrimitiveType(S32)})));
   }
   return buffer_uses;
 }
@@ -475,13 +478,10 @@ TEST(ThunkExecutorTest, Execute) {
   auto data = LiteralUtil::CreateFull({20}, int32_t{1});
   BufferAllocations allocations = CreateBufferAllocations(data);
 
-  auto task_runner = MakeTaskRunnerFrom(
-      [&](Thunk::Task task) {
-        trace.push_back("<TaskRunner>");
-        task();
-      },
-      // Always return current worker id as 0.
-      [] { return 0; });
+  auto task_runner = MakeTaskRunnerFrom([&](Thunk::Task task) {
+    trace.push_back("<TaskRunner>");
+    task();
+  });
 
   Thunk::ExecuteParams params = {nullptr, &allocations};
   params.task_runner = &task_runner;
@@ -511,12 +511,15 @@ TEST(ThunkExecutorTest, Execute) {
 // execution on a non blocking IO callbacks thread pool.
 class NoOpAsyncThunk : public Thunk {
  public:
-  NoOpAsyncThunk(std::string name, BufferAllocation::Slice slice)
-      : Thunk(Kind::kKernel, Info{std::move(name)}), slice_(slice) {}
+  NoOpAsyncThunk(std::string name, BufferAllocation::Slice slice, Shape shape)
+      : Thunk(Kind::kKernel, Info{std::move(name)}),
+        slice_(slice),
+        shape_(shape) {}
 
   static std::unique_ptr<NoOpAsyncThunk> Create(std::string name,
-                                                BufferAllocation::Slice slice) {
-    return std::make_unique<NoOpAsyncThunk>(std::move(name), slice);
+                                                BufferAllocation::Slice slice,
+                                                Shape shape) {
+    return std::make_unique<NoOpAsyncThunk>(std::move(name), slice, shape);
   }
 
   tsl::AsyncValueRef<ExecuteEvent> Execute(const ExecuteParams&) final {
@@ -529,8 +532,10 @@ class NoOpAsyncThunk : public Thunk {
   }
 
   BufferUses buffer_uses() const override {
-    return BufferUses{BufferUse::Write(slice_)};
+    return BufferUses{BufferUse::Write(slice_, shape_)};
   }
+
+  bool ExecutesOnExternalThreadPool() const override { return true; }
 
  private:
   static tsl::thread::ThreadPool* ThreadPool() {
@@ -540,11 +545,13 @@ class NoOpAsyncThunk : public Thunk {
   }
 
   BufferAllocation::Slice slice_;
+  Shape shape_;
 };
 
 TEST(ThunkExecutorTest, ExecuteOnCorrectThreadPool) {
   BufferAllocation alloc(/*index=*/0, /*size=*/60, /*color=*/0);
 
+  Shape shape = ShapeUtil::MakeShape(S32, {5});
   BufferAllocation::Slice slice0(&alloc, /*offset=*/0, /*size=*/20);
   BufferAllocation::Slice slice1(&alloc, /*offset=*/20, /*size=*/20);
   BufferAllocation::Slice slice2(&alloc, /*offset=*/40, /*size=*/20);
@@ -553,7 +560,8 @@ TEST(ThunkExecutorTest, ExecuteOnCorrectThreadPool) {
 
   ThunkSequence sequence;
   for (int i = 0; i < 100; ++i) {
-    sequence.push_back(NoOpAsyncThunk::Create(absl::StrCat(i), slices[i % 3]));
+    sequence.push_back(
+        NoOpAsyncThunk::Create(absl::StrCat(i), slices[i % 3], shape));
   }
 
   TF_ASSERT_OK_AND_ASSIGN(

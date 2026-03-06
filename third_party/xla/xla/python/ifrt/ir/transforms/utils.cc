@@ -15,10 +15,13 @@ limitations under the License.
 
 #include "xla/python/ifrt/ir/transforms/utils.h"
 
+#include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/strings/numbers.h"
@@ -27,24 +30,34 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
+#include "mlir/Bytecode/BytecodeWriter.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Location.h"
+#include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OperationSupport.h"
+#include "mlir/IR/OwningOpRef.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Support/LLVM.h"
 #include "xla/mlir/utils/type_util.h"
+#include "xla/pjrt/pjrt_executable.h"
+#include "xla/python/ifrt/compiler.h"
 #include "xla/python/ifrt/dtype.h"
+#include "xla/python/ifrt/ir/constants.h"
 #include "xla/python/ifrt/ir/ifrt_dialect.h"
 #include "xla/python/ifrt/ir/ifrt_ops.h"
+#include "xla/python/ifrt/support/module_parsing.h"
 #include "xla/python/pjrt_ifrt/pjrt_dtype.h"
+#include "xla/python/pjrt_ifrt/xla_compiler.h"
+#include "xla/status_macros.h"
 #include "xla/xla_data.pb.h"
+#include "tsl/platform/fingerprint.h"
 
 namespace xla {
 namespace ifrt {
@@ -53,8 +66,9 @@ namespace {
 
 // Finds a nested call site location in the given location.
 std::optional<mlir::CallSiteLoc> GetCallSiteLoc(mlir::Location loc) {
-  if (mlir::dyn_cast<mlir::NameLoc>(loc))
+  if (mlir::dyn_cast<mlir::NameLoc>(loc)) {
     return GetCallSiteLoc(mlir::cast<mlir::NameLoc>(loc).getChildLoc());
+  }
   if (auto callLoc = mlir::dyn_cast<mlir::CallSiteLoc>(loc)) {
     return callLoc;
   }
@@ -228,18 +242,12 @@ std::string OperationToString(mlir::Operation* op,
   return out;
 }
 
-mlir::ModuleOp CloneModuleUsingBuilder(mlir::ModuleOp module,
-                                       mlir::OpBuilder& builder) {
-  // Create a stub for the new module.
-  mlir::ModuleOp cloned_module =
-      builder.create<mlir::ModuleOp>(module.getLoc(), module.getName());
-  cloned_module->setAttrs(module->getAttrs());
-  mlir::IRMapping mapper;
-  // Clone each operation in the body of the module into the new module.
-  for (mlir::Operation& op : module.getBody()->getOperations()) {
-    cloned_module.getBody()->push_back(op.clone(mapper));
-  }
-  return cloned_module;
+absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> CloneModuleIntoContext(
+    mlir::ModuleOp module, mlir::MLIRContext& context) {
+  std::string bytecode;
+  llvm::raw_string_ostream os(bytecode);
+  TF_RET_CHECK(mlir::succeeded(mlir::writeBytecodeToFile(module, os)));
+  return support::ParseMlirModuleString(bytecode, context);
 }
 
 absl::StatusOr<std::vector<std::string>> ExpandPlatformNames(
@@ -267,6 +275,41 @@ absl::StatusOr<std::vector<std::string>> ExpandPlatformNames(
     }
   }
   return expanded_platform_names;
+}
+
+uint64_t MlirModuleFingerprint(mlir::ModuleOp module) {
+  std::string s;
+  llvm::raw_string_ostream os(s);
+  mlir::OpPrintingFlags flags;
+  flags.enableDebugInfo(false);
+  module.print(os, flags);
+  return tsl::Fingerprint64(os.str());
+}
+
+absl::StatusOr<std::optional<xla::CompileOptions>> GetModuleXlaCompileOverrides(
+    mlir::StringAttr compile_options_key,
+    std::shared_ptr<
+        absl::flat_hash_map<std::string, std::unique_ptr<CompileOptions>>>
+        compile_options_overrides) {
+  std::optional<xla::CompileOptions> compile_options = std::nullopt;
+  if (compile_options_overrides != nullptr && compile_options_key != nullptr) {
+    if (auto option_override =
+            compile_options_overrides->find(compile_options_key.str());
+        option_override != compile_options_overrides->end()) {
+      if (auto xla_options = llvm::dyn_cast<XlaCompileOptions>(
+              option_override->second.get())) {
+        compile_options = xla_options->compile_options;
+      } else {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "The `", kIfrtCompileOptionsKey.str(), "` compile options key `",
+            compile_options_key.str(),
+            "` has an entry that is not of type `XlaCompileOptions`, but the "
+            "atom program is an XLA program."));
+      }
+    }
+  }
+
+  return compile_options;
 }
 
 }  // namespace ifrt

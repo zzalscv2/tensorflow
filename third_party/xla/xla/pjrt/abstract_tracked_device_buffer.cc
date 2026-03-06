@@ -17,19 +17,29 @@ limitations under the License.
 
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "absl/base/thread_annotations.h"
+#include "absl/functional/any_invocable.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
+#include "xla/pjrt/device_event.h"
+#include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/raw_buffer.h"
+#include "xla/tsl/concurrency/async_value.h"
+#include "xla/tsl/concurrency/ref_count.h"
+#include "xla/tsl/platform/statusor.h"
+#include "xla/util.h"
 #include "tsl/profiler/lib/traceme.h"
 
 namespace xla {
 
 CommonPjRtBuffer::CommonPjRtBuffer(
-    std::unique_ptr<AbstractTrackedDeviceBuffer> device_buffer)
-    : device_buffer_(std::move(device_buffer)) {
+    std::unique_ptr<AbstractTrackedDeviceBuffer> device_buffer,
+    PjRtMemorySpace* memory_space)
+    : memory_space_(memory_space), device_buffer_(std::move(device_buffer)) {
   for (int i = 0; i < ScopedHold::Type::kMaxValue; ++i) {
     holds_[i] = 0;
   }
@@ -102,7 +112,7 @@ void CommonPjRtBuffer::AcquireHoldLocked(ScopedHold* hold) {
 
 void CommonPjRtBuffer::DropUsageOrExternalHold(
     ScopedHold::Type type, AbstractTrackedDeviceBuffer* buffer) {
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   CHECK(device_buffer_.get() == buffer || device_buffer_ == nullptr);
   CHECK_GT(holds_[type], 0);
   --holds_[type];
@@ -110,7 +120,7 @@ void CommonPjRtBuffer::DropUsageOrExternalHold(
 
 void CommonPjRtBuffer::DropDonationHold(
     std::unique_ptr<AbstractTrackedDeviceBuffer> buffer) {
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   CHECK_EQ(device_buffer_.get(), nullptr);
   device_buffer_ = std::move(buffer);
   CHECK_GT(holds_[ScopedHold::kDonation], 0);
@@ -208,7 +218,7 @@ void CommonPjRtBuffer::ScopedHold::ConfirmDonation() {
 
 void CommonPjRtBuffer::ConfirmDonation(
     AbstractTrackedDeviceBuffer* device_buffer) {
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   CHECK_EQ(holds_[ScopedHold::kUsage], 0);
   CHECK_EQ(holds_[ScopedHold::kExternalReference], 0);
   CHECK_EQ(holds_[ScopedHold::kDonation], 1);
@@ -216,8 +226,22 @@ void CommonPjRtBuffer::ConfirmDonation(
   device_buffer->ConfirmDonation();
 }
 
+void CommonPjRtBuffer::ScopedHold::ConvertUsageHold(
+    tsl::RCReference<PjRtDeviceEvent> event) {
+  CHECK(ok());
+  CHECK_EQ(type(), kUsage);
+  {
+    absl::MutexLock lock(parent()->mu_);
+    CHECK(parent()->device_buffer() == buffer() ||
+          parent()->device_buffer() == nullptr);
+    buffer()->AddUsageEvent(std::move(event));
+    parent()->DecrementUsage();
+  }
+  SetState(kConverted);
+}
+
 std::unique_ptr<AbstractTrackedDeviceBuffer> CommonPjRtBuffer::ReleaseBuffer() {
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   {
     tsl::profiler::TraceMe t1("Wait for donation holds");
     // We first wait for a donation hold to complete if there is one in
@@ -239,9 +263,46 @@ std::unique_ptr<AbstractTrackedDeviceBuffer> CommonPjRtBuffer::ReleaseBuffer() {
   return buffer;
 }
 
-bool CommonPjRtBuffer::IsDeleted() {
-  absl::MutexLock lock(&mu_);
+bool CommonPjRtBuffer::IsDeleted() const {
+  absl::MutexLock lock(mu_);
   return device_buffer_ == nullptr;
+}
+
+absl::Status CommonPjRtBuffer::AcquireScopedRawBuffer(
+    absl::AnyInvocable<absl::StatusOr<tsl::RCReference<PjRtDeviceEvent>>(
+                           tsl::RCReference<CommonPjRtRawBuffer> raw_buffer,
+                           std::vector<tsl::RCReference<tsl::AsyncValue>>
+                               definition_events) &&>
+        scoped_acquire,
+    const char* caller_name) {
+  ScopedHold device_buffer(this, ScopedHold::kUsage);
+  {
+    absl::MutexLock lock(mu_);
+    // Ensure that at most one donation hold can be in progress at a time.
+    WaitForOutstandingDonationHold();
+    AcquireHoldLocked(&device_buffer);
+  }
+  if (!device_buffer.ok()) {
+    return InvalidArgument("%s called on deleted or donated buffer: %s",
+                           caller_name, device_buffer.status().ToString());
+  }
+  TF_ASSIGN_OR_RETURN(
+      auto device_event,
+      std::move(scoped_acquire)(
+          device_buffer.buffer()->raw_buffer(),
+          device_buffer.buffer()->GetAsyncValueDefinitionEvents()));
+  device_buffer.ConvertUsageHold(std::move(device_event));
+  return absl::OkStatus();
+}
+
+CommonPjRtBuffer::ScopedHold CommonPjRtBuffer::GetBufferWithHold(
+    ScopedHold::Type type) {
+  absl::MutexLock lock(mu_);
+  // Ensure that at most one donation hold can be in progress at a time.
+  WaitForOutstandingDonationHold();
+  ScopedHold hold(this, type);
+  AcquireHoldLocked(&hold);
+  return hold;
 }
 
 }  // namespace xla

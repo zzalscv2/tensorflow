@@ -31,6 +31,17 @@ message SymbolProto {
   string name = 2;
 }
 
+message ObjFileProto {
+  bytes contents = 1;
+  string name = 2;
+}
+
+message TargetMachineOptionsProto {
+  string triple = 1;
+  string cpu = 2;
+  string features = 3;
+}
+
 message CompilationResultProto {
   enum ObjFileKind {
     UNKNOWN = 0;
@@ -48,8 +59,10 @@ message CompilationResultProto {
   HloModuleProtoWithConfig hlo_module = 1;
   BufferAssignmentProto buffer_assignment = 2;
   string entry_function_name = 3;
-  repeated bytes obj_files = 4;
+  reserved 4;  // was obj_files without metadata
   ObjFileKind obj_files_kind = 5;
   ThunkSequenceProto thunk_sequence = 6;
   repeated SymbolProto compiled_symbols = 7;
+  repeated ObjFileProto object_files = 8;
+  TargetMachineOptionsProto target_machine_options = 9;
 }

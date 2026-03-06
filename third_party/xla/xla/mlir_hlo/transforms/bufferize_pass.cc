@@ -33,6 +33,7 @@ limitations under the License.
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/Bufferization/IR/BufferizationTypeInterfaces.h"
 #include "mlir/Dialect/Bufferization/Transforms/Bufferize.h"
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/Transforms/OneShotAnalysis.h"
@@ -92,7 +93,7 @@ static Value materializeToTensor(OpBuilder& builder, TensorType type,
                                  ValueRange inputs, Location loc) {
   assert(inputs.size() == 1);
   assert(mlir::isa<BaseMemRefType>(inputs[0].getType()));
-  return builder.create<bufferization::ToTensorOp>(loc, type, inputs[0]);
+  return bufferization::ToTensorOp::create(builder, loc, type, inputs[0]);
 }
 
 // TODO(pifon): Remove as soon as https://reviews.llvm.org/D93126 is landed.
@@ -128,7 +129,7 @@ class CustomBufferizeTypeConverter : public mlir::TypeConverter {
       }
       if (isa<TensorType>(inputs[0].getType())) {
         // Tensor to MemRef cast.
-        return builder.create<bufferization::ToBufferOp>(loc, type, inputs[0]);
+        return bufferization::ToBufferOp::create(builder, loc, type, inputs[0]);
       }
       llvm_unreachable("only tensor/memref input types supported");
     });
@@ -145,7 +146,7 @@ class CustomBufferizeTypeConverter : public mlir::TypeConverter {
         return inputs[0];
       }
       assert(mlir::isa<TensorType>(inputs[0].getType()));
-      return builder.create<bufferization::ToBufferOp>(loc, type, inputs[0]);
+      return bufferization::ToBufferOp::create(builder, loc, type, inputs[0]);
     });
   }
 };
@@ -155,10 +156,10 @@ static bufferization::BufferizationOptions getPartialBufferizationOptions() {
   options.allowUnknownOps = true;
   options.copyBeforeWrite = true;
   options.unknownTypeConverterFn =
-      [](Value value, Attribute memorySpace,
+      [](TensorType type, Attribute memorySpace,
          const bufferization::BufferizationOptions& options) {
         return bufferization::getMemRefTypeWithStaticIdentityLayout(
-            cast<TensorType>(value.getType()), memorySpace);
+            type, memorySpace);
       };
   options.opFilter.allowDialect<bufferization::BufferizationDialect>();
   return options;
@@ -190,8 +191,9 @@ struct ComputeOpAndFuncBufferizePass
     options.opFilter.allowDialect<bufferization::BufferizationDialect,
                                   linalg::LinalgDialect, mhlo::MhloDialect,
                                   shape::ShapeDialect, vector::VectorDialect>();
-
-    if (failed(bufferization::bufferizeOp(getOperation(), options))) {
+    bufferization::BufferizationState bufferizationState;
+    if (failed(bufferization::bufferizeOp(getOperation(), options,
+                                          bufferizationState))) {
       signalPassFailure();
       return;
     }
@@ -243,7 +245,19 @@ struct ComputeOpAndFuncBufferizePass
         .addDynamicallyLegalOp<vector::TransferWriteOp, vector::TransferReadOp>(
             isLegalOp);
 
-    return applyPartialConversion(getOperation(), target, std::move(patterns));
+    if (failed(applyPartialConversion(getOperation(), target,
+                                      std::move(patterns))))
+      return failure();
+
+    // All to_buffer ops on constants can be safely marked as read only since
+    // constants are immutable. This fix is for
+    // https://github.com/llvm/llvm-project/pull/172595.
+    getOperation()->walk([](bufferization::ToBufferOp toBuffer) {
+      if (toBuffer.getTensor().getDefiningOp<arith::ConstantOp>()) {
+        toBuffer.setReadOnly(true);
+      }
+    });
+    return success();
   }
 };
 
@@ -270,23 +284,36 @@ struct OneShotBufferizePass
     opts.allowReturnAllocsFromLoops = true;
     opts.bufferizeFunctionBoundaries = true;
     opts.functionArgTypeConverterFn =
-        [=](TensorType tensorType, Attribute memorySpace,
+        [=](bufferization::TensorLikeType type, Attribute memorySpace,
             FunctionOpInterface funcOp,
             const bufferization::BufferizationOptions& /*options*/) {
-          // Functions created by fusion outlining should have fully dynamic
-          // layout. All other functions (for now only "main") gets static
-          // layout.
-          if (funcOp->hasAttr(kFusionFunctionLabel))
-            return bufferization::getMemRefTypeWithFullyDynamicLayout(
-                tensorType, memorySpace);
-          return bufferization::getMemRefTypeWithStaticIdentityLayout(
-              tensorType, memorySpace);
+          if (auto tensorType = mlir::dyn_cast<TensorType>(type)) {
+            // Functions created by fusion outlining should have fully dynamic
+            // layout. All other functions (for now only "main") gets static
+            // layout.
+            if (funcOp->hasAttr(kFusionFunctionLabel)) {
+              return cast<bufferization::BufferLikeType>(
+                  bufferization::getMemRefTypeWithFullyDynamicLayout(
+                      tensorType, memorySpace));
+            }
+            return cast<bufferization::BufferLikeType>(
+                bufferization::getMemRefTypeWithStaticIdentityLayout(
+                    tensorType, memorySpace));
+          }
+          // If not builtin, fallback to TensorLikeType::getBufferType()
+          auto bufferType =
+              type.getBufferType(opts, [&]() { return funcOp->emitError(); });
+          assert(succeeded(bufferType) &&
+                 "a valid buffer is always expected at function boundary");
+          return *bufferType;
         };
     opts.inferFunctionResultLayout = false;
     opts.bufferAlignment = 64;
 
     ModuleOp module = getOperation();
-    if (failed(bufferization::runOneShotModuleBufferize(module, opts))) {
+    bufferization::BufferizationState bufferizationState;
+    if (failed(bufferization::runOneShotModuleBufferize(module, opts,
+                                                        bufferizationState))) {
       signalPassFailure();
     }
   }
@@ -302,7 +329,7 @@ class BufferizeToTensorOp
   LogicalResult matchAndRewrite(
       bufferization::ToTensorOp op, OpAdaptor adaptor,
       ConversionPatternRewriter& rewriter) const override {
-    rewriter.replaceOp(op, adaptor.getMemref());
+    rewriter.replaceOp(op, adaptor.getBuffer());
     return success();
   }
 };
@@ -365,7 +392,9 @@ struct FinalBufferizePass
         arith::ArithDialect, bufferization::BufferizationDialect,
         linalg::LinalgDialect, func::FuncDialect, shape::ShapeDialect,
         tensor::TensorDialect, vector::VectorDialect>();
-    if (failed(bufferization::bufferizeOp(getOperation(), options))) {
+    bufferization::BufferizationState bufferizationState;
+    if (failed(bufferization::bufferizeOp(getOperation(), options,
+                                          bufferizationState))) {
       signalPassFailure();
       return;
     }

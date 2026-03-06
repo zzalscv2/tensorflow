@@ -13,26 +13,56 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <vector>
 
-#include "tensorflow/compiler/aot/tests/test_graph_tfadd.h"
-#include "tensorflow/compiler/aot/tests/test_graph_tfadd_with_ckpt.h"
-#include "tensorflow/compiler/aot/tests/test_graph_tfadd_with_ckpt_saver.h"
-#include "tensorflow/compiler/aot/tests/test_graph_tfassert_eq.h"
-#include "tensorflow/compiler/aot/tests/test_graph_tfcond.h"
-#include "tensorflow/compiler/aot/tests/test_graph_tffunction.h"
-#include "tensorflow/compiler/aot/tests/test_graph_tfgather.h"
-#include "tensorflow/compiler/aot/tests/test_graph_tfmatmul.h"
-#include "tensorflow/compiler/aot/tests/test_graph_tfmatmulandadd.h"
-#include "tensorflow/compiler/aot/tests/test_graph_tfsplits.h"
-#include "tensorflow/compiler/aot/tests/test_graph_tftop_k.h"
-#include "tensorflow/compiler/aot/tests/test_graph_tfvariable.h"
-#include "tensorflow/compiler/aot/tests/test_graph_tfvariable_readonly.h"
-#include "tensorflow/compiler/aot/tests/test_graph_tfvariable_sequential_updates.h"
+#if defined(ENABLE_XLA_THUNK_TEST)
+#include "tensorflow/compiler/aot/tests/test_graph_tfadd_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfadd_with_ckpt_saver_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfadd_with_ckpt_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfassert_eq_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfcond_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tffunction_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfgather_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfmatmul_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfmatmul_with_constant_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfmatmulandadd_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfrandom_uniform_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfscatter_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfsplits_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tftop_k_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfvariable_readonly_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfvariable_sequential_updates_thunks.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfvariable_thunks.h"
+
+#elif defined(ENABLE_XLA_NANORT_TEST)
+
+#include "tensorflow/compiler/aot/tests/test_graph_tfadd_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfadd_with_ckpt_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfadd_with_ckpt_saver_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfassert_eq_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfcond_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tffunction_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfgather_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfmatmul_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfmatmul_with_constant_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfmatmulandadd_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfrandom_uniform_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfscatter_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfsplits_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tftop_k_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfvariable_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfvariable_readonly_nanort.h"
+#include "tensorflow/compiler/aot/tests/test_graph_tfvariable_sequential_updates_nanort.h"
+
+#endif
+
 #include "tensorflow/compiler/tf2xla/xla_compiled_cpu_function.h"
 #include "xla/hlo/testlib/test.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/threadpool.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/platform/types.h"
@@ -85,8 +115,8 @@ TEST(TFCompileTest, Add_SetArg) {
   AddComp add(
       XlaCompiledCpuFunction::AllocMode::RESULTS_PROFILES_AND_TEMPS_ONLY);
 
-  alignas(32) int32 arg_x = 10;
-  alignas(32) int32 arg_y = 32;
+  alignas(32) int32_t arg_x = 10;
+  alignas(32) int32_t arg_y = 32;
   add.set_arg0_data(&arg_x);
   add.set_arg1_data(&arg_y);
   EXPECT_EQ(add.arg0_data(), add.arg_data(0));
@@ -164,7 +194,7 @@ TEST(TFCompileTest, Cond) {
   cond.arg2() = 20;
   {
     cond.arg0() = true;
-    const int32 expected_result = cond.arg1();
+    const int32_t expected_result = cond.arg1();
     EXPECT_TRUE(cond.Run());
     EXPECT_EQ(cond.error_msg(), "");
     EXPECT_EQ(cond.result0(), expected_result);
@@ -173,7 +203,7 @@ TEST(TFCompileTest, Cond) {
   }
   {
     cond.arg0() = false;
-    const int32 expected_result = cond.arg2();
+    const int32_t expected_result = cond.arg2();
     EXPECT_TRUE(cond.Run());
     EXPECT_EQ(cond.error_msg(), "");
     EXPECT_EQ(cond.result0(), expected_result);
@@ -191,7 +221,7 @@ TEST(TFCompileTest, Gather) {
   {
     const float params[4] = {1, 2, 3, 4};
     std::copy(params + 0, params + 4, gather.arg0_data());
-    const int32 indices[2] = {1, 3};
+    const int32_t indices[2] = {1, 3};
     std::copy(indices + 0, indices + 2, gather.arg1_data());
     EXPECT_TRUE(gather.Run());
     EXPECT_EQ(gather.error_msg(), "");
@@ -470,8 +500,8 @@ TEST(TFCompileTest, TopK) {
 
   EXPECT_TRUE(fn.Run());
   EXPECT_EQ(fn.error_msg(), "");
-  const int32 expected_values[] = {4, 4};
-  const int32 expected_indices[] = {0, 2};
+  const int32_t expected_values[] = {4, 4};
+  const int32_t expected_indices[] = {0, 2};
   EXPECT_EQ(expected_values[0], fn.result0(0));
   EXPECT_EQ(expected_values[1], fn.result0(1));
   EXPECT_EQ(expected_indices[0], fn.result1(0));
@@ -576,6 +606,80 @@ TEST(TFCompileTest, VariableSequentialUpdatesNoAlloc) {
   EXPECT_NEAR(x, 0.594322f, 1e-6);
 }
 
+TEST(TFCompileTest, MatMulWithConstants) {
+  Eigen::ThreadPool tp(2);
+  Eigen::ThreadPoolDevice device(&tp, tp.NumThreads());
+
+  foo::bar::MatMulWithConstantComp matmul;
+  matmul.set_thread_pool(&device);
+  EXPECT_EQ(matmul.arg0_data(), matmul.arg_data(0));
+
+  // Test using the argN() methods.
+  {
+    for (int i = 0; i < 512; ++i) {
+      for (int j = 0; j < 1024; ++j) {
+        matmul.arg0(i, j) = 1;
+      }
+    }
+
+    EXPECT_TRUE(matmul.Run());
+    EXPECT_EQ(matmul.error_msg(), "");
+    std::vector<float> results(512 * 256, 1024);
+    for (int i = 0; i < results.size(); ++i) {
+      ASSERT_EQ(matmul.result0(i / 512, i % 256), results[i]);
+      ASSERT_EQ(matmul.result0_data()[i], results[i]);
+    }
+    EXPECT_EQ(matmul.result0_data(), matmul.result_data(0));
+  }
+}
+
+TEST(TFCompileTest, RandomUniform) {
+  RandomUniformComp random_uniform;
+  EXPECT_TRUE(random_uniform.Run());
+  EXPECT_EQ(random_uniform.error_msg(), "");
+  EXPECT_LE(random_uniform.result0(), 5.0);
+  EXPECT_GE(random_uniform.result0(), 0.0);
+}
+TEST(TFCompileTest, Scatter) {
+  ScatterComp scatter;
+
+  const std::vector<int32_t> indices0 = {4, 3, 1, 7};
+  const std::vector<float> updates0 = {9.0, 10.0, 11.0, 12.0};
+
+  const std::vector<int32_t> indices1 = {2, 5, 3, 6};
+  const std::vector<float> updates1 = {17.0, 2.0, 5.0, -1.0};
+
+  std::memcpy(scatter.arg0_data(), indices0.data(),
+              indices0.size() * sizeof(int32_t));
+  std::memcpy(scatter.arg1_data(), updates0.data(),
+              updates0.size() * sizeof(float));
+
+  std::memcpy(scatter.arg2_data(), indices1.data(),
+              indices1.size() * sizeof(int32_t));
+  std::memcpy(scatter.arg3_data(), updates1.data(),
+              updates1.size() * sizeof(float));
+
+  EXPECT_TRUE(scatter.Run());
+  EXPECT_EQ(scatter.error_msg(), "");
+
+  const std::vector<float> expected0 = {0, 11, 0, 10, 9, 0, 0, 12};
+  const std::vector<float> expected1 = {0, 0, 17, 5, 0, 2, -1, 0};
+
+  // NOTE(basioli): Shape is hardcoded to 8 in tensorflow config.
+  EXPECT_EQ(scatter.result0_count(), expected0.size());
+
+  for (int i = 0; i < scatter.result0_count(); ++i) {
+    EXPECT_EQ(scatter.result0(i), expected0[i]);
+  }
+
+  // NOTE(basioli): Shape is hardcoded to 8 in tensorflow config.
+  EXPECT_EQ(scatter.result1_count(), expected1.size());
+
+  for (int i = 0; i < scatter.result1_count(); ++i) {
+    EXPECT_EQ(scatter.result1(i), expected1[i]) << "i: " << i;
+  }
+}
+
 TEST(TFCompileTest, AssertEqAndReturnDiff) {
   // Assert is converted into a no-op in XLA, so there is no failure even if
   // the two args are different.
@@ -585,7 +689,7 @@ TEST(TFCompileTest, AssertEqAndReturnDiff) {
 
   assert.arg0() = 2;
   assert.arg1() = 1;
-  const int32 expected_result = assert.arg0() - assert.arg1();
+  const int32_t expected_result = assert.arg0() - assert.arg1();
   EXPECT_TRUE(assert.Run());
   EXPECT_EQ(assert.error_msg(), "");
   EXPECT_EQ(assert.result0(), expected_result);
@@ -632,12 +736,15 @@ TEST(TFCompileTest, ProgramShape) {
   const xla::ProgramShapeProto* muladd_shape = muladd.ProgramShape();
   ASSERT_TRUE(muladd_shape != nullptr);
   ASSERT_EQ(muladd_shape->parameters_size(), 2);
-  EXPECT_TRUE(
-      ShapeUtil::Compatible(xla::Shape(muladd_shape->parameters(0)), f32_2x2));
-  EXPECT_TRUE(
-      ShapeUtil::Compatible(xla::Shape(muladd_shape->parameters(1)), f32_2x2));
+  TF_ASSERT_OK_AND_ASSIGN(xla::Shape muladd_arg0,
+                          xla::Shape::FromProto(muladd_shape->parameters(0)));
+  TF_ASSERT_OK_AND_ASSIGN(xla::Shape muladd_arg1,
+                          xla::Shape::FromProto(muladd_shape->parameters(1)));
+  EXPECT_TRUE(ShapeUtil::Compatible(muladd_arg0, f32_2x2));
+  EXPECT_TRUE(ShapeUtil::Compatible(muladd_arg1, f32_2x2));
 
-  const xla::Shape muladd_result(muladd_shape->result());
+  TF_ASSERT_OK_AND_ASSIGN(xla::Shape muladd_result,
+                          xla::Shape::FromProto(muladd_shape->result()));
   ASSERT_EQ(muladd_result.element_type(), xla::TUPLE);
   ASSERT_EQ(ShapeUtil::TupleElementCount(muladd_result), 2);
   const xla::Shape& muladd_result0 =

@@ -22,6 +22,7 @@ limitations under the License.
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/LogicalResult.h"
@@ -81,8 +82,9 @@ absl::StatusOr<std::unique_ptr<TFRDecomposeContext>> TFRDecomposeContext::Get(
   std::string tfr_lib_dir;
   TF_RETURN_IF_ERROR(ReadStringFromEnvVar(
       kTFRLibEnv, "tensorflow/compiler/mlir/tfr/resources", &tfr_lib_dir));
-  string composite_mlir_dir = io::JoinPath(env->GetRunfilesDir(), tfr_lib_dir);
-  std::vector<string> files;
+  std::string composite_mlir_dir =
+      io::JoinPath(env->GetRunfilesDir(), tfr_lib_dir);
+  std::vector<std::string> files;
   TF_RETURN_IF_ERROR(env->GetChildren(composite_mlir_dir, &files));
   if (files.empty()) {
     return errors::Internal(absl::StrCat(
@@ -90,7 +92,7 @@ absl::StatusOr<std::unique_ptr<TFRDecomposeContext>> TFRDecomposeContext::Get(
   }
   std::string tfr_raw_text;
   for (const auto& file : files) {
-    string fullpath = io::JoinPath(composite_mlir_dir, file);
+    std::string fullpath = io::JoinPath(composite_mlir_dir, file);
     if (env->MatchPath(fullpath, io::JoinPath(composite_mlir_dir, "*.mlir"))) {
       std::string text;
       TF_RETURN_IF_ERROR(ReadFileToString(env, fullpath, &text));
@@ -186,7 +188,7 @@ absl::StatusOr<FunctionDef> TFRDecomposeContext::ExpandNode(
   op_state.addTypes(output_tys);
   op_state.addAttributes(attrs);
   mlir::Operation* tf_op = op_builder.create(op_state);
-  op_builder.create<mlir::func::ReturnOp>(loc, tf_op->getResults());
+  mlir::func::ReturnOp::create(op_builder, loc, tf_op->getResults());
 
   // Run the decompose passes on the module
   TF_RETURN_IF_ERROR(DecomposeGraph(module));

@@ -1,3 +1,5 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//tensorflow:strict.default.bzl", "py_strict_library", "py_strict_test")
 load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable", "pybind_extension", "replace_with_portable_tf_lib_when_required")
 
@@ -6,7 +8,7 @@ load("//tensorflow/lite:build_def.bzl", "tflite_copts")
 load("//tensorflow/lite:special_rules.bzl", "tflite_portable_test_suite")
 
 package(
-    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = [
         "//visibility:public",
     ],
@@ -19,6 +21,10 @@ cc_library(
     hdrs = ["signature_def_util.h"],
     compatible_with = get_compatible_with_portable(),
     copts = tflite_copts(),
+    features = select({
+        "//tensorflow:android": ["-layering_check"],
+        "//conditions:default": [],
+    }),
     deps = replace_with_portable_tf_lib_when_required([
         "//tensorflow/core:lib_proto_parsing",
         "//tensorflow/core:protos_all_cc",
@@ -34,7 +40,7 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_protobuf//:protobuf",
         "@flatbuffers",
-        "@local_tsl//tsl/platform:status",
+        "@tsl//tsl/platform:status",
     ],
 )
 
@@ -63,7 +69,7 @@ cc_test(
         "@com_google_absl//absl/status",
         "@com_google_googletest//:gtest_main",
         "@flatbuffers//:runtime_cc",
-        "@local_tsl//tsl/platform:status",
+        "@tsl//tsl/platform:status",
     ],
 )
 

@@ -24,6 +24,7 @@ limitations under the License.
 #include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/Dialect/Quant/IR/QuantTypes.h"  // from @llvm-project
 #include "mlir/IR/Attributes.h"  // from @llvm-project
+#include "mlir/IR/BuiltinAttributeInterfaces.h"  // from @llvm-project
 #include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
 #include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
 #include "mlir/IR/Matchers.h"  // from @llvm-project
@@ -41,18 +42,28 @@ namespace mlir {
 namespace TFL {
 namespace {
 
-// Checks whether the producer of `value` is TFL_DequantizeOp. This function
-// iteratively finds the defining op if the direct defining op is TFL_SplitOp.
-bool NotFromDequant(mlir::Value value) {
-  auto dequant_op = value.getDefiningOp<DequantizeOp>();
-  if (dequant_op) {
-    return false;
+// Checks whether the producer of `value` is part of a chain that can be folded
+// into a constant. This includes DequantizeOp, or chains involving ReshapeOp
+// and SplitOp originating from a DequantizeOp.
+bool NotFromFoldableChain(mlir::Value value) {
+  mlir::Operation* defining_op = value.getDefiningOp();
+
+  while (defining_op) {
+    if (mlir::isa<DequantizeOp>(defining_op)) {
+      return false;
+    }
+
+    // Look through ops that don't change the constant nature.
+    if (auto reshape_op = mlir::dyn_cast<ReshapeOp>(defining_op)) {
+      defining_op = reshape_op.getInput().getDefiningOp();
+    } else if (auto split_op = mlir::dyn_cast<SplitOp>(defining_op)) {
+      defining_op = split_op.getValue().getDefiningOp();
+    } else {
+      // Stop if the op is not Dequantize, Reshape, or Split.
+      break;
+    }
   }
-  auto split_op = value.getDefiningOp<SplitOp>();
-  if (!split_op) {
-    return true;
-  }
-  return !split_op.getValue().getDefiningOp<DequantizeOp>();
+  return true;
 }
 
 // Converts batch_matmul operation to fully_connected if rhs is a
@@ -73,25 +84,30 @@ struct ConvertBatchMatMulOp2FullyConnectedOp_Rank2ConstantRhs
       }
     }
 
-    bool is_rank_2_constant = true;
-    DenseElementsAttr constant;
-    if (auto rhs = bmm_op.getY(); !matchPattern(rhs, m_Constant(&constant))) {
-      // The constant may be preceded by QDQs in models with QDQ format, so we
-      // should set it to the real constant.
-      auto dq = dyn_cast_or_null<DequantizeOp>(rhs.getDefiningOp());
-      if (!dq) {
-        is_rank_2_constant = false;
-      } else {
-        auto q = dyn_cast_or_null<QuantizeOp>(dq.getInput().getDefiningOp());
-        if (!q || !matchPattern(q.getInput(), m_Constant(&constant))) {
-          is_rank_2_constant = false;
+    ElementsAttr constant = nullptr;
+    Value rhs = bmm_op.getY();
+    // If there is a reshape, look through it.
+    if (auto reshape = rhs.getDefiningOp<ReshapeOp>()) {
+      rhs = reshape.getInput();
+    }
+
+    DenseElementsAttr dense_constant;
+    if (matchPattern(rhs, m_Constant(&dense_constant))) {
+      constant = dense_constant;
+    } else if (auto dq = rhs.getDefiningOp<DequantizeOp>()) {
+      Value q_input = dq.getInput();
+      if (auto q = q_input.getDefiningOp<QuantizeOp>()) {
+        if (matchPattern(q.getInput(), m_Constant(&dense_constant))) {
+          constant = dense_constant;
         }
+      } else if (auto pseudo_q = q_input.getDefiningOp<TFL::QConstOp>()) {
+        constant = pseudo_q.getValue();
       }
     }
 
-    // Input rhs must be a constant with rank 2.
-    if (!constant || constant.getType().getRank() != 2)
-      is_rank_2_constant = false;
+    const bool is_rank_2_constant =
+        constant &&
+        mlir::cast<ShapedType>(bmm_op.getY().getType()).getRank() == 2;
 
     if (!is_rank_2_constant && !is_int_quantized_rank_2_value) {
       return rewriter.notifyMatchFailure(
@@ -119,8 +135,8 @@ struct ConvertBatchMatMulOp2FullyConnectedOp_Rank2ConstantRhs
       // mapped to X and Z dimension.
       std::iter_swap(permute.begin() + input_rank - 1,
                      permute.begin() + input_rank - 2);
-      auto permutation_tensor_op = rewriter.create<arith::ConstantOp>(
-          bmm_op->getLoc(), permuation_tensor_type,
+      auto permutation_tensor_op = arith::ConstantOp::create(
+          rewriter, bmm_op->getLoc(), permuation_tensor_type,
           DenseElementsAttr::get(permuation_tensor_type, permute));
 
       auto input_shape = input_type.getShape();
@@ -165,9 +181,8 @@ struct ConvertBatchMatMulOp2FullyConnectedOp_Rank2ConstantRhs
             RankedTensorType::get(permuted_shape, input_type.getElementType());
       }
 
-      return rewriter.create<TFL::TransposeOp>(
-          bmm_op->getLoc(), output_type, input,
-          permutation_tensor_op.getResult());
+      return TFL::TransposeOp::create(rewriter, bmm_op->getLoc(), output_type,
+                                      input, permutation_tensor_op.getResult());
     };
 
     Value input_lhs = bmm_op.getX();
@@ -182,10 +197,11 @@ struct ConvertBatchMatMulOp2FullyConnectedOp_Rank2ConstantRhs
         !bmm_op.getAdjY() ? create_z_x_transpose_op(input_rhs) : input_rhs;
 
     Type output_type = bmm_op.getResult().getType();
-    auto no_input = rewriter.create<TFL::NoValueOp>(
-        bmm_op->getLoc(), rewriter.getNoneType(), rewriter.getUnitAttr());
-    auto fc_op = rewriter.create<TFL::FullyConnectedOp>(
-        bmm_op->getLoc(), ArrayRef<Type>{output_type},
+    auto no_input =
+        TFL::NoValueOp::create(rewriter, bmm_op->getLoc(),
+                               rewriter.getNoneType(), rewriter.getUnitAttr());
+    auto fc_op = TFL::FullyConnectedOp::create(
+        rewriter, bmm_op->getLoc(), ArrayRef<Type>{output_type},
         /*input=*/output_lhs, /*filter=*/output_rhs, /*bias=*/no_input,
         /*fused_activation_function=*/rewriter.getStringAttr("NONE"),
         /*weights_format=*/rewriter.getStringAttr("DEFAULT"),
@@ -241,13 +257,14 @@ struct ConvertBatchMatMulOpToReduceSum
       cY = rhs_shape.size() - 1;
     }
 
-    auto reduce_dim_op = rewriter.create<TFL::ConstOp>(
-        bmm_op->getLoc(),
+    auto reduce_dim_op = TFL::ConstOp::create(
+        rewriter, bmm_op->getLoc(),
         DenseIntElementsAttr::get(
             RankedTensorType::get({1}, rewriter.getI32Type()), {cY}));
-    auto sum_op = rewriter.create<TFL::SumOp>(
-        bmm_op->getLoc(), bmm_op.getType(), bmm_op.getY(), reduce_dim_op,
-        /*keep_dims=*/rewriter.getBoolAttr(true));
+    auto sum_op =
+        TFL::SumOp::create(rewriter, bmm_op->getLoc(), bmm_op.getType(),
+                           bmm_op.getY(), reduce_dim_op,
+                           /*keep_dims=*/rewriter.getBoolAttr(true));
     rewriter.replaceOp(bmm_op, sum_op);
     return success();
   };
@@ -352,19 +369,21 @@ struct FuseRhsTransposeIntoBatchMatMulOp
     new_reshape_input_shape.push_back(
         rhs_contracting_dimensions.SizesArray().front());
 
-    Value new_reshape_shape_value = rewriter.create<arith::ConstantOp>(
-        bmm_op->getLoc(),
+    Value new_reshape_shape_value = arith::ConstantOp::create(
+        rewriter, bmm_op->getLoc(),
         GetI32ElementsAttr(new_reshape_input_shape, &rewriter));
-    auto new_reshape_value = rewriter.create<TFL::ReshapeOp>(
-        bmm_op->getLoc(), transpose_op.getInput(), new_reshape_shape_value);
+    auto new_reshape_value = TFL::ReshapeOp::create(rewriter, bmm_op->getLoc(),
+                                                    transpose_op.getInput(),
+                                                    new_reshape_shape_value);
 
     // Replace the BatchMatMulOp with a FullyConnectedOp, if the RHS of BMM has
     // no broadcasting dimensions. I.e. RHS of BMM is of Rank 2.
     if (rhs_dimensions_info.batch_dimensions().AxesArray().empty()) {
-      auto no_input = rewriter.create<TFL::NoValueOp>(
-          bmm_op->getLoc(), rewriter.getNoneType(), rewriter.getUnitAttr());
-      auto fc_op = rewriter.create<TFL::FullyConnectedOp>(
-          bmm_op->getLoc(), ArrayRef<Type>{bmm_op.getType()},
+      auto no_input = TFL::NoValueOp::create(rewriter, bmm_op->getLoc(),
+                                             rewriter.getNoneType(),
+                                             rewriter.getUnitAttr());
+      auto fc_op = TFL::FullyConnectedOp::create(
+          rewriter, bmm_op->getLoc(), ArrayRef<Type>{bmm_op.getType()},
           /*input=*/bmm_op.getX(), /*filter=*/new_reshape_value,
           /*bias=*/no_input,
           /*fused_activation_function=*/rewriter.getStringAttr("NONE"),
@@ -375,9 +394,10 @@ struct FuseRhsTransposeIntoBatchMatMulOp
     } else {
       // Replace the BatchMatMulOp with a BatchMatMulOp with adj_y = true and
       // transpose fused into RHS.
-      auto bmm_op_with_adj_y = rewriter.create<TFL::BatchMatMulOp>(
-          bmm_op->getLoc(), bmm_op.getType(), bmm_op.getX(), new_reshape_value,
-          bmm_op.getAdjX(), /*adj_y=*/true, mlir::BoolAttr());
+      auto bmm_op_with_adj_y = TFL::BatchMatMulOp::create(
+          rewriter, bmm_op->getLoc(), bmm_op.getType(), bmm_op.getX(),
+          new_reshape_value, bmm_op.getAdjX(), /*adj_y=*/true,
+          mlir::BoolAttr());
       rewriter.replaceOp(bmm_op, {bmm_op_with_adj_y.getResult()});
     }
 

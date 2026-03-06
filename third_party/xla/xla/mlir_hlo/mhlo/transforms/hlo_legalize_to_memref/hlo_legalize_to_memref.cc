@@ -15,7 +15,7 @@ limitations under the License.
 
 // This file implements logic for bufferizing HLO dialect to memref dialect.
 
-#include <memory>
+#include <cstdint>
 #include <optional>
 #include <utility>
 
@@ -66,8 +66,10 @@ struct ReshapeOpInterface
     return {{op->getResult(0), BufferRelation::Equivalent}};
   }
 
-  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
-                          const BufferizationOptions &options) const {
+  LogicalResult bufferize(
+      Operation *op, RewriterBase &rewriter,
+      const BufferizationOptions &options,
+      const bufferization::BufferizationState &state) const {
     auto reshapeOp = cast<mhlo::ReshapeOp>(op);
     auto unrankedOperandType =
         mlir::dyn_cast<UnrankedTensorType>(reshapeOp.getOperand().getType());
@@ -75,7 +77,7 @@ struct ReshapeOpInterface
 
     // The buffer still has the old (pre-reshape) type.
     FailureOr<Value> operandBuffer =
-        getBuffer(rewriter, reshapeOp.getOperand(), options);
+        getBuffer(rewriter, reshapeOp.getOperand(), options, state);
     if (failed(operandBuffer)) return failure();
 
     auto resultType = mlir::cast<RankedTensorType>(reshapeOp.getType());
@@ -105,15 +107,17 @@ struct DynamicReshapeOpInterface
     return {{op->getResult(0), BufferRelation::Equivalent}};
   }
 
-  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
-                          const BufferizationOptions &options) const {
+  LogicalResult bufferize(
+      Operation *op, RewriterBase &rewriter,
+      const BufferizationOptions &options,
+      const bufferization::BufferizationState &state) const {
     auto reshapeOp = cast<mhlo::DynamicReshapeOp>(op);
 
     // The buffer still has the old (pre-reshape) type.
     FailureOr<Value> operandBuffer =
-        getBuffer(rewriter, reshapeOp.getOperand(), options);
+        getBuffer(rewriter, reshapeOp.getOperand(), options, state);
     FailureOr<Value> outputShapeBuffer =
-        getBuffer(rewriter, reshapeOp.getOutputShape(), options);
+        getBuffer(rewriter, reshapeOp.getOutputShape(), options, state);
     if (failed(operandBuffer) || failed(outputShapeBuffer)) return failure();
 
     ShapedType resultType;
@@ -132,13 +136,13 @@ struct DynamicReshapeOpInterface
       // TODO(springerm): Create alloc_tensor ops during TensorCopyInsertion.
       AnalysisState analysisState(options);
       FailureOr<Value> tensorAlloc =
-          bufferization::allocateTensorForShapedValue(rewriter, op->getLoc(),
-                                                      *operandBuffer, options);
+          bufferization::allocateTensorForShapedValue(
+              rewriter, op->getLoc(), *operandBuffer, options, state);
       if (failed(tensorAlloc)) return failure();
       auto memrefType =
           MemRefType::get(bufferType.getShape(), bufferType.getElementType());
-      operand = rewriter.create<bufferization::ToBufferOp>(
-          op->getLoc(), memrefType, *tensorAlloc);
+      operand = bufferization::ToBufferOp::create(rewriter, op->getLoc(),
+                                                  memrefType, *tensorAlloc);
     }
     bufferization::replaceOpWithNewBufferizedOp<memref::ReshapeOp>(
         rewriter, op, resultType, operand, *outputShapeBuffer);
@@ -151,7 +155,8 @@ struct DynamicReshapeOpInterface
 // necessary.
 FailureOr<Value> insertDynamicMemrefCastOp(
     mhlo::DynamicBroadcastInDimOp op, Value operand, RewriterBase &rewriter,
-    const BufferizationOptions &options) {
+    const BufferizationOptions &options,
+    const bufferization::BufferizationState &state) {
   auto loc = op.getLoc();
   auto operandType = mlir::cast<MemRefType>(operand.getType());
   auto operandShape = operandType.getShape();
@@ -160,8 +165,8 @@ FailureOr<Value> insertDynamicMemrefCastOp(
   auto resultType = mlir::cast<RankedTensorType>(op.getType());
   auto resultRank = resultType.getRank();
 
-  Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-  Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
 
   // Compute a reversed scan product. Compute the stride for the dimensions so
   // far, working from minor to major dimensions. Additionally, save the
@@ -172,15 +177,15 @@ FailureOr<Value> insertDynamicMemrefCastOp(
   for (int i = operandRank - 1; i >= 0; --i) {
     Value operandDimSize =
         ShapedType::isDynamic(operandShape[i])
-            ? rewriter.create<memref::DimOp>(loc, operand, i).getResult()
-            : rewriter.create<arith::ConstantIndexOp>(loc, operandShape[i])
+            ? memref::DimOp::create(rewriter, loc, operand, i).getResult()
+            : arith::ConstantIndexOp::create(rewriter, loc, operandShape[i])
                   .getResult();
     operandSizes[i] = operandDimSize;
 
     operandStrides[i] = strideSoFar;
     if (i > 0) {
       strideSoFar =
-          rewriter.create<arith::MulIOp>(loc, strideSoFar, operandDimSize);
+          arith::MulIOp::create(rewriter, loc, strideSoFar, operandDimSize);
     }
   }
 
@@ -193,15 +198,15 @@ FailureOr<Value> insertDynamicMemrefCastOp(
     outputToInputDim[dim.value().getSExtValue()] = dim.index();
   }
   for (int i = 0; i < resultRank; ++i) {
-    Value iVal = rewriter.create<arith::ConstantIndexOp>(loc, i);
+    Value iVal = arith::ConstantIndexOp::create(rewriter, loc, i);
     FailureOr<Value> outputDimsBuffer =
-        getBuffer(rewriter, op.getOutputDimensions(), options);
+        getBuffer(rewriter, op.getOutputDimensions(), options, state);
     if (failed(outputDimsBuffer)) return failure();
     Value resultDimSize =
-        rewriter.create<memref::LoadOp>(loc, *outputDimsBuffer, iVal);
+        memref::LoadOp::create(rewriter, loc, *outputDimsBuffer, iVal);
     if (!resultDimSize.getType().isIndex()) {
-      resultDimSize = rewriter.create<arith::IndexCastOp>(
-          loc, rewriter.getIndexType(), resultDimSize);
+      resultDimSize = arith::IndexCastOp::create(
+          rewriter, loc, rewriter.getIndexType(), resultDimSize);
     }
     if (resultType.isDynamicDim(i)) {
       sizes.push_back(resultDimSize);
@@ -224,10 +229,11 @@ FailureOr<Value> insertDynamicMemrefCastOp(
     //    => stride flattened buffer stride
     // 2) Operand dim < result dim => expansion is needed => stride := 0.
     int dim = it->second;
-    Value isExpansion = rewriter.create<arith::CmpIOp>(
-        loc, arith::CmpIPredicate::slt, operandSizes[dim], resultDimSize);
-    Value select = rewriter.create<mlir::arith::SelectOp>(
-        loc, isExpansion, zero, operandStrides[dim]);
+    Value isExpansion =
+        arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::slt,
+                              operandSizes[dim], resultDimSize);
+    Value select = mlir::arith::SelectOp::create(rewriter, loc, isExpansion,
+                                                 zero, operandStrides[dim]);
     strides.push_back(select);
   }
 
@@ -238,8 +244,8 @@ FailureOr<Value> insertDynamicMemrefCastOp(
       makeStridedLinearLayoutMap(dynamicLayout,
                                  /*offset=*/0, rewriter.getContext()));
 
-  auto transformedOperand = rewriter.create<memref::ReinterpretCastOp>(
-      loc, typeErasedMemrefType, operand,
+  auto transformedOperand = memref::ReinterpretCastOp::create(
+      rewriter, loc, typeErasedMemrefType, operand,
       /*offset=*/rewriter.getI64IntegerAttr(0), sizes, strides);
   return transformedOperand.getResult();
 }
@@ -262,8 +268,10 @@ struct DynamicBroadcastInDimOpInterface
     return {{op->getResult(0), BufferRelation::Unknown}};
   }
 
-  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
-                          const BufferizationOptions &options) const {
+  LogicalResult bufferize(
+      Operation *op, RewriterBase &rewriter,
+      const BufferizationOptions &options,
+      const bufferization::BufferizationState &state) const {
     auto broadcastInDimOp = cast<mhlo::DynamicBroadcastInDimOp>(op);
     auto resultType =
         mlir::dyn_cast<RankedTensorType>(broadcastInDimOp.getType());
@@ -271,10 +279,10 @@ struct DynamicBroadcastInDimOpInterface
 
     // The buffer still has the old (pre-reshape) type.
     FailureOr<Value> operandBuffer =
-        getBuffer(rewriter, broadcastInDimOp.getOperand(), options);
+        getBuffer(rewriter, broadcastInDimOp.getOperand(), options, state);
     if (failed(operandBuffer)) return failure();
     FailureOr<Value> result = insertDynamicMemrefCastOp(
-        broadcastInDimOp, *operandBuffer, rewriter, options);
+        broadcastInDimOp, *operandBuffer, rewriter, options, state);
     if (failed(result)) return failure();
     bufferization::replaceOpWithBufferizedValues(rewriter, op, *result);
     return success();

@@ -1,4 +1,4 @@
-load("@local_xla//xla/tsl/platform:build_config_root.bzl", "if_pywrap")
+load("@xla//xla/tsl/platform:build_config_root.bzl", "if_pywrap")
 load("//tensorflow:strict.default.bzl", "py_strict_library")
 load("//tensorflow:tensorflow.default.bzl", "tf_python_pybind_extension")
 load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
@@ -6,7 +6,7 @@ load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 licenses(["notice"])
 
 package(
-    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = [
         ":friends",
         "//tensorflow:__pkg__",
@@ -21,6 +21,7 @@ package_group(
         "//tensorflow/lite/python/...",
         "//tensorflow/lite/python/converter/...",
         "//tensorflow/lite/toco/...",
+        "//third_party/odml/litert/litert/...",
     ],
 )
 
@@ -128,9 +129,9 @@ cc_library(
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Support",
-        "@local_xla//xla/hlo/parser:hlo_parser",
-        "@local_xla//xla/hlo/translate:stablehlo",
-        "@local_xla//xla/service:hlo_proto_cc",
+        "@xla//xla/hlo/parser:hlo_parser",
+        "@xla//xla/hlo/translate:stablehlo",
+        "@xla//xla/service:hlo_proto_cc",
     ],
 )
 
@@ -163,7 +164,16 @@ py_strict_library(
         ":_pywrap_converter_api",
         "//tensorflow/compiler/mlir/quantization/tensorflow/python:py_function_lib_py",
         "//tensorflow/python:pywrap_tensorflow",
-    ],
+    ] + if_pywrap(
+        if_true = [] + select({
+            "//conditions:default": [],
+            # This reqirement is for LiteRT only as tensorflow/compiler/mlirt/lite is
+            # duplicated in LiteRT/tflite/converter.
+            "//tensorflow:disable_tf_lite_py": [
+                "//tensorflow/lite/python:pywrap_tflite",
+            ],
+        }),
+    ),
 )
 
 config_setting(
@@ -186,7 +196,7 @@ cc_library(
     hdrs = ["converter_python_api.h"],
     features = ["-parse_headers"],
     visibility = [
-        "//tensorflow/python:__subpackages__",
+        "//visibility:public",
     ],
     deps = [
         ":flatbuffer_to_mlir",
@@ -217,8 +227,8 @@ cc_library(
         "@com_google_protobuf//:protobuf",
         "@com_google_protobuf//:protobuf_headers",
         "@flatbuffers//:runtime_cc",
-        "@local_xla//third_party/python_runtime:headers",  # build_cleaner: keep; DNR: b/35864863
-        "@local_xla//xla/tsl/platform:status",
+        "@xla//third_party/python_runtime:headers",  # build_cleaner: keep; DNR: b/35864863
+        "@xla//xla/tsl/platform:status",
     ] + select({
         # This is required when running `tflite_convert` from `bazel`.
         # It requires to link with TensorFlow Ops to get the op definitions.
@@ -240,13 +250,11 @@ tf_python_pybind_extension(
     pytype_srcs = [
         "_pywrap_converter_api.pyi",
     ],
-    visibility = [
-        "//tensorflow/python:__pkg__",
-    ],
+    visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/compiler/mlir/quantization/tensorflow/python:py_function_lib",
         "//tensorflow/python/lib/core:pybind11_lib",
-        "@local_xla//third_party/python_runtime:headers",
         "@pybind11",
+        "@xla//third_party/python_runtime:headers",
     ] + if_pywrap([":converter_python_api"]),
 )

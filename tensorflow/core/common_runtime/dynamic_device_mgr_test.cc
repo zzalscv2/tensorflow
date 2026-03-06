@@ -17,6 +17,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/memory/memory.h"
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/framework/device_attributes.pb.h"
 #include "tensorflow/core/lib/core/status.h"
@@ -30,7 +31,7 @@ namespace {
 
 // Return a fake device with the specified type and name.
 static Device* CreateDevice(const char* type, const char* name,
-                            Notification* n = nullptr) {
+                            absl::Notification* n = nullptr) {
   class FakeDevice : public Device {
    public:
     explicit FakeDevice(const DeviceAttributes& attr) : Device(nullptr, attr) {}
@@ -41,12 +42,12 @@ static Device* CreateDevice(const char* type, const char* name,
   class FakeDeviceWithDestructorNotification : public FakeDevice {
    public:
     FakeDeviceWithDestructorNotification(const DeviceAttributes& attr,
-                                         Notification* n)
+                                         absl::Notification* n)
         : FakeDevice(attr), n_(n) {}
     ~FakeDeviceWithDestructorNotification() override { n_->Notify(); }
 
    private:
-    Notification* n_;
+    absl::Notification* n_;
   };
 
   DeviceAttributes attr;
@@ -105,7 +106,7 @@ TEST(DynamicDeviceMgrTest, RemoveDeviceFromMgr) {
 
 TEST(DynamicDeviceMgrTest, RemoveDeviceFromMgrBuffer) {
   // Create a device whose destructor will send a notification.
-  Notification n;
+  absl::Notification n;
   std::unique_ptr<Device> d0(CreateDevice("CPU", "/device:CPU:0", &n));
   Device* d0_ptr = d0.get();
   std::vector<std::unique_ptr<Device>> added_devices;
@@ -133,7 +134,7 @@ TEST(DynamicDeviceMgrTest, RemoveDeviceFromMgrBuffer) {
 TEST(DynamicDeviceMgrTest, RemoveDeviceByNameFromMgr) {
   std::unique_ptr<Device> d0(CreateDevice("CPU", "/device:CPU:0"));
   std::unique_ptr<Device> d1(CreateDevice("CPU", "/device:CPU:1"));
-  string d1_name = "/device:CPU:1";
+  std::string d1_name = "/device:CPU:1";
 
   auto dm = std::make_unique<DynamicDeviceMgr>();
   std::vector<std::unique_ptr<Device>> devices;
@@ -142,7 +143,7 @@ TEST(DynamicDeviceMgrTest, RemoveDeviceByNameFromMgr) {
   TF_CHECK_OK(dm->AddDevices(std::move(devices)));
   EXPECT_EQ(dm->ListDevices().size(), 2);
 
-  std::vector<string> removed_devices{d1_name};
+  std::vector<std::string> removed_devices{d1_name};
   TF_CHECK_OK(dm->RemoveDevicesByName(removed_devices));
   EXPECT_EQ(dm->ListDevices().size(), 1);
 }
@@ -184,8 +185,8 @@ TEST(DynamicDeviceMgrTest, RemoveNonExistingDeviceFromMgr) {
 
 TEST(DynamicDeviceMgrTest, RemoveNonExistingDeviceByNameFromMgr) {
   std::unique_ptr<Device> d0(CreateDevice("GPU", "/device:GPU:0"));
-  string d0_name = "/device:GPU:0";
-  string d1_name = "/device:CPU:0";
+  std::string d0_name = "/device:GPU:0";
+  std::string d1_name = "/device:CPU:0";
 
   auto dm = std::make_unique<DynamicDeviceMgr>();
   std::vector<std::unique_ptr<Device>> devices;
@@ -193,7 +194,7 @@ TEST(DynamicDeviceMgrTest, RemoveNonExistingDeviceByNameFromMgr) {
   TF_CHECK_OK(dm->AddDevices(std::move(devices)));
   EXPECT_EQ(dm->ListDevices().size(), 1);
 
-  std::vector<string> removed_devices{d0_name, d1_name};
+  std::vector<std::string> removed_devices{d0_name, d1_name};
   absl::Status s = dm->RemoveDevicesByName(removed_devices);
   EXPECT_TRUE(absl::StrContains(s.message(), "unknown device"));
   EXPECT_EQ(dm->ListDevices().size(), 1);  // d0 *not* removed

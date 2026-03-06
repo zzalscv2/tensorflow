@@ -237,7 +237,7 @@ tstring* GetStringBackingBuffer(const Tensor& val) {
 
 absl::Status ParseEntryProto(absl::string_view key, absl::string_view value,
                              protobuf::MessageLite* out) {
-  if (!out->ParseFromArray(value.data(), value.size())) {
+  if (!out->ParseFromString(value)) {
     return errors::DataLoss("Entry for key ", key, " not parseable.");
   }
   return absl::OkStatus();
@@ -439,13 +439,13 @@ BundleWriter::BundleWriter(Env* env, absl::string_view prefix,
   data_path_ = DataFilename(prefix_, 0, 1);
   metadata_path_ = MetaFilename(prefix_);
   if (use_temp_file_) {
-    data_path_ = strings::StrCat(data_path_, ".tempstate", random::New64());
+    data_path_ = absl::StrCat(data_path_, ".tempstate", random::New64());
     metadata_path_ =
-        strings::StrCat(metadata_path_, ".tempstate", random::New64());
+        absl::StrCat(metadata_path_, ".tempstate", random::New64());
   }
 
   status_ = env_->CreateDir(string(io::Dirname(prefix_)));
-  if (!status_.ok() && !errors::IsAlreadyExists(status_)) {
+  if (!status_.ok() && !absl::IsAlreadyExists(status_)) {
     return;
   }
 
@@ -719,7 +719,7 @@ absl::Status MergeBundles(Env* env, absl::Span<const tstring> prefixes,
   // TODO(zhifengc): KeyValue sorter if it becomes too big.
   MergeState merge;
   absl::Status status = env->CreateDir(string(io::Dirname(merged_prefix)));
-  if (!status.ok() && !errors::IsAlreadyExists(status)) return status;
+  if (!status.ok() && !absl::IsAlreadyExists(status)) return status;
   bool atleast_one_file_exists = false;
   for (auto& prefix : prefixes) {
     if (!env->FileExists(MetaFilename(prefix)).ok()) {
@@ -935,7 +935,7 @@ absl::Status BundleReader::GetValue(const BundleEntryProto& entry,
       if (!enable_multi_threading_for_testing_ &&
           entry.size() < kLargeTensorThreshold) {
         TF_RETURN_IF_ERROR(buffered_file->file()->Read(
-            entry.offset(), entry.size(), &sp, backing_buffer));
+            entry.offset(), sp, absl::MakeSpan(backing_buffer, entry.size())));
         if (sp.data() != backing_buffer) {
           memmove(backing_buffer, sp.data(), entry.size());
         }
@@ -970,8 +970,9 @@ absl::Status BundleReader::GetValue(const BundleEntryProto& entry,
             }
 
             auto backing_buffer_current_pos = backing_buffer + offset;
-            auto status = section_reader->Read(entry.offset() + offset, size,
-                                               &sp, backing_buffer_current_pos);
+            auto status = section_reader->Read(
+                entry.offset() + offset, sp,
+                absl::MakeSpan(backing_buffer_current_pos, size));
             if (sp.data() != backing_buffer_current_pos) {
               memmove(backing_buffer_current_pos, sp.data(), size);
             }
@@ -1224,12 +1225,12 @@ string BundleReader::DebugString() {
   BundleEntryProto entry;
   Seek(kHeaderEntryKey);
   for (Next(); Valid(); Next()) {
-    CHECK(entry.ParseFromArray(value().data(), value().size()));
+    CHECK(entry.ParseFromString(value()));
     if (entry.slices_size() > 0) continue;  // Slice of some partitioned var.
 
     strings::StrAppend(&shape_str, key(), " (", DataType_Name(entry.dtype()),
                        ") ", TensorShape(entry.shape()).DebugString());
-    strings::StrAppend(&shape_str, "\n");
+    absl::StrAppend(&shape_str, "\n");
   }
   return shape_str;
 }

@@ -29,9 +29,10 @@ limitations under the License.
 #include "absl/strings/substitute.h"
 #include "absl/synchronization/notification.h"
 #include "absl/types/span.h"
+#include "tensorflow/compiler/mlir/tfrt/transforms/ifrt/ifrt_types.h"
 #include "xla/python/ifrt/client.h"
-#include "xla/python/ifrt/future.h"
 #include "xla/python/ifrt/test_util.h"
+#include "xla/tsl/concurrency/future.h"
 #include "xla/tsl/framework/test_util/mock_serving_device_selector.h"
 #include "xla/tsl/lib/core/status_test_util.h"
 #include "tensorflow/core/framework/resource_var.h"
@@ -504,14 +505,14 @@ TEST_P(KernelTest, IfrtLoadVariableOp) {
   tensorflow::Tensor input_tensor;
   TF_CHECK_OK(tensorflow::Tensor::BuildTensor(DT_INT32, {}, &input_tensor));
   input_tensor.scalar<int32_t>()() = 1234;
-  auto input_tensor_promise =
-      xla::ifrt::Future<tensorflow::Tensor>::CreatePromise();
-  auto input_tensor_future =
-      xla::ifrt::Future<tensorflow::Tensor>(input_tensor_promise);
+  auto [input_tensor_promise, input_tensor_future] =
+      tsl::MakePromise<tensorflow::Tensor>();
   ifrt_serving::IfrtRestoreTensorRegistry::RestoredTensorInfo
-      restore_tensor_info{.dtype_and_shape = {.dtype = input_tensor.dtype(),
-                                              .shape = input_tensor.shape()},
-                          .tensor_future = input_tensor_future};
+      restore_tensor_info{
+          .dtype_and_shape = tsl::Future<ifrt_serving::DtypeAndShape>(
+              ifrt_serving::DtypeAndShape{.dtype = input_tensor.dtype(),
+                                          .shape = input_tensor.shape()}),
+          .tensor_future = input_tensor_future};
   input_tensor_promise.Set(input_tensor);
   TF_ASSERT_OK(ifrt_model_context_->GetRestoreTensorRegistry().TryRegister(
       kVariableRuntimeName, restore_tensor_info));
@@ -556,14 +557,14 @@ TEST_P(KernelTest, DuplicateIfrtLoadVariableOpShallSucceed) {
   tensorflow::Tensor input_tensor;
   TF_CHECK_OK(tensorflow::Tensor::BuildTensor(DT_INT32, {}, &input_tensor));
   input_tensor.scalar<int32_t>()() = 1234;
-  auto input_tensor_promise =
-      xla::ifrt::Future<tensorflow::Tensor>::CreatePromise();
-  auto input_tensor_future =
-      xla::ifrt::Future<tensorflow::Tensor>(input_tensor_promise);
+  auto [input_tensor_promise, input_tensor_future] =
+      tsl::MakePromise<tensorflow::Tensor>();
   ifrt_serving::IfrtRestoreTensorRegistry::RestoredTensorInfo
-      restore_tensor_info{.dtype_and_shape = {.dtype = input_tensor.dtype(),
-                                              .shape = input_tensor.shape()},
-                          .tensor_future = input_tensor_future};
+      restore_tensor_info{
+          .dtype_and_shape = tsl::Future<ifrt_serving::DtypeAndShape>(
+              ifrt_serving::DtypeAndShape{.dtype = input_tensor.dtype(),
+                                          .shape = input_tensor.shape()}),
+          .tensor_future = input_tensor_future};
   input_tensor_promise.Set(input_tensor);
   TF_ASSERT_OK(ifrt_model_context_->GetRestoreTensorRegistry().TryRegister(
       kVariableRuntimeName, restore_tensor_info));
@@ -613,12 +614,12 @@ TEST_P(KernelTest, IfrtRestoreVariableOp) {
 
   execution_context.AddUserContext(std::move(tf_context_));
 
-  xla::ifrt::Future<tensorflow::Tensor> uninitialized_entry =
+  tsl::Future<tensorflow::Tensor> uninitialized_entry =
       ifrt_model_context_->GetRestoreTensorRegistry().GetRestoredTensor(
           kVariableRuntimeName);
   ASSERT_TRUE(uninitialized_entry.IsReady());
   EXPECT_THAT(uninitialized_entry.Await().status(),
-              ::tsl::testing::StatusIs(absl::StatusCode::kNotFound));
+              absl_testing::StatusIs(absl::StatusCode::kNotFound));
 
   std::vector<mlrt::Value> args;
   args.resize(3);
@@ -649,7 +650,7 @@ TEST_P(KernelTest, IfrtRestoreVariableOp) {
 
   TF_ASSERT_OK(execution_context.status());
 
-  xla::ifrt::Future<tensorflow::Tensor> restored_future =
+  tsl::Future<tensorflow::Tensor> restored_future =
       ifrt_model_context_->GetRestoreTensorRegistry().GetRestoredTensor(
           absl::StrCat(kVariableRuntimeName, 0));
   absl::StatusOr<tensorflow::Tensor> restored_tensor = restored_future.Await();
@@ -676,12 +677,12 @@ TEST_P(KernelTest, IfrtRestoreVariableOp4Variables) {
 
   execution_context.AddUserContext(std::move(tf_context_));
 
-  xla::ifrt::Future<tensorflow::Tensor> uninitialized_entry =
+  tsl::Future<tensorflow::Tensor> uninitialized_entry =
       ifrt_model_context_->GetRestoreTensorRegistry().GetRestoredTensor(
           kVariableRuntimeName);
   ASSERT_TRUE(uninitialized_entry.IsReady());
   EXPECT_THAT(uninitialized_entry.Await().status(),
-              ::tsl::testing::StatusIs(absl::StatusCode::kNotFound));
+              absl_testing::StatusIs(absl::StatusCode::kNotFound));
 
   std::vector<mlrt::Value> args;
   args.resize(3);
@@ -716,14 +717,14 @@ TEST_P(KernelTest, IfrtRestoreVariableOp4Variables) {
 
   TF_ASSERT_OK(execution_context.status());
 
-  xla::ifrt::Future<tensorflow::Tensor> restored_future =
+  tsl::Future<tensorflow::Tensor> restored_future =
       ifrt_model_context_->GetRestoreTensorRegistry().GetRestoredTensor(
           absl::StrCat(kVariableRuntimeName, 0));
   absl::StatusOr<tensorflow::Tensor> restored_tensor = restored_future.Await();
   TF_ASSERT_OK(restored_tensor.status());
   EXPECT_THAT(*restored_tensor, TensorEq(AsTensor<int16_t>({1, 2, 3}, {3})));
 
-  xla::ifrt::Future<tensorflow::Tensor> restored_future1 =
+  tsl::Future<tensorflow::Tensor> restored_future1 =
       ifrt_model_context_->GetRestoreTensorRegistry().GetRestoredTensor(
           absl::StrCat(kVariableRuntimeName, 1));
   absl::StatusOr<tensorflow::Tensor> restored_tensor1 =
@@ -731,7 +732,7 @@ TEST_P(KernelTest, IfrtRestoreVariableOp4Variables) {
   TF_ASSERT_OK(restored_tensor1.status());
   EXPECT_THAT(*restored_tensor1, TensorEq(AsTensor<int16_t>({4, 5, 6}, {3})));
 
-  xla::ifrt::Future<tensorflow::Tensor> restored_future2 =
+  tsl::Future<tensorflow::Tensor> restored_future2 =
       ifrt_model_context_->GetRestoreTensorRegistry().GetRestoredTensor(
           absl::StrCat(kVariableRuntimeName, 2));
   absl::StatusOr<tensorflow::Tensor> restored_tensor2 =
@@ -739,7 +740,7 @@ TEST_P(KernelTest, IfrtRestoreVariableOp4Variables) {
   TF_ASSERT_OK(restored_tensor2.status());
   EXPECT_THAT(*restored_tensor2, TensorEq(AsTensor<int16_t>({7, 8, 9}, {3})));
 
-  xla::ifrt::Future<tensorflow::Tensor> restored_future3 =
+  tsl::Future<tensorflow::Tensor> restored_future3 =
       ifrt_model_context_->GetRestoreTensorRegistry().GetRestoredTensor(
           absl::StrCat(kVariableRuntimeName, 3));
   absl::StatusOr<tensorflow::Tensor> restored_tensor3 =
@@ -768,12 +769,12 @@ TEST_P(KernelTest, IfrtRestoreVariableOpInValidInput) {
 
   execution_context.AddUserContext(std::move(tf_context_));
 
-  xla::ifrt::Future<tensorflow::Tensor> uninitialized_entry =
+  tsl::Future<tensorflow::Tensor> uninitialized_entry =
       ifrt_model_context_->GetRestoreTensorRegistry().GetRestoredTensor(
           kVariableRuntimeName);
   ASSERT_TRUE(uninitialized_entry.IsReady());
   EXPECT_THAT(uninitialized_entry.Await().status(),
-              ::tsl::testing::StatusIs(absl::StatusCode::kNotFound));
+              absl_testing::StatusIs(absl::StatusCode::kNotFound));
 
   std::vector<mlrt::Value> args;
   args.resize(3);
@@ -808,7 +809,7 @@ TEST_P(KernelTest, IfrtRestoreVariableOpInValidInput) {
   notification.WaitForNotification();
 
   EXPECT_THAT(execution_context.status(),
-              ::tsl::testing::StatusIs(absl::StatusCode::kInvalidArgument));
+              absl_testing::StatusIs(absl::StatusCode::kInvalidArgument));
 }
 
 INSTANTIATE_TEST_SUITE_P(KernelTest, KernelTest, ::testing::Bool());

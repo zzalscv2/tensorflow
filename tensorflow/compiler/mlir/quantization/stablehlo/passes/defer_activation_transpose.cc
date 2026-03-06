@@ -17,7 +17,6 @@ limitations under the License.
 #include <utility>
 
 #include "absl/base/nullability.h"
-#include "llvm/Support/LogicalResult.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
 #include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
@@ -59,8 +58,8 @@ LogicalResult IsTransposeOpWithPermuation(Operation* absl_nullable op,
 // The Location is set as `input`'s loc.
 TransposeOp CreateTransposeOp(Value input, const ArrayRef<int64_t> permutation,
                               PatternRewriter& rewriter) {
-  return rewriter.create<TransposeOp>(
-      input.getLoc(), input, rewriter.getDenseI64ArrayAttr(permutation));
+  return TransposeOp::create(rewriter, input.getLoc(), input,
+                             rewriter.getDenseI64ArrayAttr(permutation));
 }
 
 // Defers the transpose of the left-hand side (LHS) to the right-hand side and
@@ -78,7 +77,7 @@ void DeferRhsTransposeForBinaryOp(OpT op, PatternRewriter& rewriter) {
       /*input=*/rhs, kNchwToNhwcPermutation, rewriter);
 
   auto new_binary_op =
-      rewriter.create<OpT>(op.getLoc(), lhs_pre_transpose, rhs_transpose_op);
+      OpT::create(rewriter, op.getLoc(), lhs_pre_transpose, rhs_transpose_op);
 
   // NHWC -> NCHW for the output, to match the shapes of `op`'s users.
   TransposeOp output_transpose_op = CreateTransposeOp(
@@ -160,30 +159,29 @@ class DeferActivationTransposeForMaxPoolReduceWindowOp
 
     const auto result_type = mlir::cast<TensorType>(op.getResult(0).getType());
     const SmallVector<int64_t> new_result_shape =
-        Permute<int64_t>(result_type.getShape(), kNchwToNhwcPermutation);
+        quant::Permute<int64_t>(result_type.getShape(), kNchwToNhwcPermutation);
 
     const TensorType new_result_type =
         result_type.cloneWith(new_result_shape, result_type.getElementType());
 
     // Create a new `stablehlo.reduce_window` with all relevant attributes
     // permutated to match the new operand & result type.
-    auto new_reduce_window_op =
-        rewriter.create<mlir::stablehlo::ReduceWindowOp>(
-            op.getLoc(), new_result_type, transpose_op.getOperand(),
-            /*init_value=*/op.getOperand(1),
-            /*window_dimensions=*/
-            PermuteI64ArrayAttr(rewriter, op.getWindowDimensions(),
-                                kNchwToNhwcPermutation),
-            /*window_strides=*/
-            PermuteI64ArrayAttr(rewriter, op.getWindowStrides(),
-                                kNchwToNhwcPermutation),
-            /*base_dilations=*/
-            PermuteI64ArrayAttr(rewriter, op.getBaseDilations(),
-                                kNchwToNhwcPermutation),
-            /*window_dilations=*/
-            PermuteI64ArrayAttr(rewriter, op.getWindowDilations(),
-                                kNchwToNhwcPermutation),
-            /*padding=*/DenseIntElementsAttr(nullptr));
+    auto new_reduce_window_op = mlir::stablehlo::ReduceWindowOp::create(
+        rewriter, op.getLoc(), new_result_type, transpose_op.getOperand(),
+        /*init_value=*/op.getOperand(1),
+        /*window_dimensions=*/
+        PermuteI64ArrayAttr(rewriter, op.getWindowDimensions(),
+                            kNchwToNhwcPermutation),
+        /*window_strides=*/
+        PermuteI64ArrayAttr(rewriter, op.getWindowStrides(),
+                            kNchwToNhwcPermutation),
+        /*base_dilations=*/
+        PermuteI64ArrayAttr(rewriter, op.getBaseDilations(),
+                            kNchwToNhwcPermutation),
+        /*window_dilations=*/
+        PermuteI64ArrayAttr(rewriter, op.getWindowDilations(),
+                            kNchwToNhwcPermutation),
+        /*padding=*/DenseIntElementsAttr(nullptr));
 
     // Clone the reduce body. It is not affected by the permutation.
     IRMapping mapping;
@@ -209,7 +207,7 @@ class DeferActivationTransposeForMaxPoolReduceWindowOp
     if (!array_attr.has_value()) return DenseI64ArrayAttr(nullptr);
 
     return rewriter.getDenseI64ArrayAttr(
-        Permute<int64_t>(array_attr.value(), permutation));
+        quant::Permute<int64_t>(array_attr.value(), permutation));
   }
 
   LogicalResult MatchMaxPoolReduceWindowOp(

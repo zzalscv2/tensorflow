@@ -18,12 +18,14 @@ limitations under the License.
 #include <cstdint>
 #include <list>
 #include <memory>
+#include <string>
 #include <utility>
 
 #include "absl/flags/flag.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/notification.h"
 #include "tensorflow/compiler/jit/pjrt_device_context.h"
 #include "tensorflow/core/common_runtime/dma_helper.h"
 #include "tensorflow/core/common_runtime/next_pluggable_device/next_pluggable_device_allocator.h"
@@ -43,7 +45,8 @@ namespace tensorflow {
 // TODO(chuanhao): implement an API to query device memory, and make
 // memory_limit a parameter instead of hard coding.
 static DeviceAttributes BuildNextPluggableDeviceAttributes(
-    const string& name_prefix, const string& device_name, int device_ordinal) {
+    const std::string& name_prefix, const std::string& device_name,
+    int device_ordinal) {
   return Device::BuildDeviceAttributes(
       absl::StrCat(name_prefix, "/device:", device_name, ":", device_ordinal),
       DeviceType(device_name), Bytes(16ULL << 30), DeviceLocality(),
@@ -154,13 +157,13 @@ absl::Status NextPluggableDevice::MakeTensorFromProto(
   Tensor copy(cpu_allocator(), DT_VARIANT, parsed.shape());
   Variant* copy_variant = copy.flat<Variant>().data();
 
-  std::list<Notification> notifications;
+  std::list<absl::Notification> notifications;
   auto copier = [this, &alloc_attrs, &notifications, &status](
                     const Tensor& from, Tensor* to) {
     // Copier isn't run in a multithreaded environment, so we don't
     // have to worry about the notifications list being modified in parallel.
     notifications.emplace_back();
-    Notification& n = *notifications.rbegin();
+    absl::Notification& n = *notifications.rbegin();
 
     StatusCallback done = [&n, &status](const absl::Status& s) {
       if (status.ok()) {

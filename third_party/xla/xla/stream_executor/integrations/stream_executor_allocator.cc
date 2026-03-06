@@ -20,6 +20,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/log/log.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "xla/stream_executor/memory_allocation.h"
 #include "xla/stream_executor/memory_allocator.h"
@@ -30,13 +31,29 @@ limitations under the License.
 namespace stream_executor {
 
 StreamExecutorAllocator::StreamExecutorAllocator(
-    std::unique_ptr<MemoryAllocator> memory_allocator, MemoryType memory_type,
+    std::unique_ptr<MemoryAllocator> memory_allocator, MemorySpace memory_type,
     int index, const std::vector<Visitor>& alloc_visitors,
     const std::vector<Visitor>& free_visitors)
     : tsl::SubAllocator(alloc_visitors, free_visitors),
       memory_allocator_(std::move(memory_allocator)),
       memory_type_(memory_type),
       index_(index) {}
+
+// Converts MemorySpace to a human-readable string for allocation error messages
+static absl::string_view MemorySpaceToString(MemorySpace type) {
+  switch (type) {
+    case MemorySpace::kDevice:
+      return "device";
+    case MemorySpace::kUnified:
+      return "unified";
+    case MemorySpace::kHost:
+      return "pinned host";
+    case MemorySpace::kCollective:
+      return "collective";
+    default:
+      return "unknown";
+  }
+}
 
 void* StreamExecutorAllocator::Alloc(size_t alignment, size_t num_bytes,
                                      size_t* bytes_received) {
@@ -47,16 +64,17 @@ void* StreamExecutorAllocator::Alloc(size_t alignment, size_t num_bytes,
   if (num_bytes > 0) {
     auto allocation = memory_allocator_->Allocate(num_bytes);
     if (!allocation.ok()) {
-      LOG(WARNING) << "could not allocate pinned host memory of size: "
-                   << num_bytes;
+      LOG(WARNING) << "could not allocate " << MemorySpaceToString(memory_type_)
+                   << " of size: " << num_bytes << " (" << allocation.status()
+                   << ')';
       *bytes_received = 0;
       return nullptr;
     }
 
-    ptr = (*allocation)->opaque();
+    ptr = (*allocation)->address().opaque();
     VisitAlloc(ptr, index_, num_bytes);
 
-    absl::MutexLock lock(&mutex_);
+    absl::MutexLock lock(mutex_);
     allocations_[ptr] = std::move(*allocation);
   }
 
@@ -70,7 +88,7 @@ void StreamExecutorAllocator::Free(void* ptr, size_t num_bytes) {
 
   if (ptr != nullptr) {
     VisitFree(ptr, index_, num_bytes);
-    absl::MutexLock lock(&mutex_);
+    absl::MutexLock lock(mutex_);
     allocations_.erase(ptr);
   }
 }
@@ -78,11 +96,10 @@ void StreamExecutorAllocator::Free(void* ptr, size_t num_bytes) {
 bool StreamExecutorAllocator::SupportsCoalescing() const { return false; }
 
 tsl::AllocatorMemoryType StreamExecutorAllocator::GetMemoryType() const {
-  if (memory_type_ == MemoryType::kHost) {
+  if (memory_type_ == MemorySpace::kHost) {
     return tsl::AllocatorMemoryType::kHostPinned;
-  } else {
-    return tsl::AllocatorMemoryType::kDevice;
   }
+  return tsl::AllocatorMemoryType::kDevice;
 }
 
 }  // namespace stream_executor

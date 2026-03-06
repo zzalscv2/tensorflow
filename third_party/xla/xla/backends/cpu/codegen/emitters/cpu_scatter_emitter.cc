@@ -16,7 +16,6 @@ limitations under the License.
 #include "xla/backends/cpu/codegen/emitters/cpu_scatter_emitter.h"
 
 #include <cstdint>
-#include <memory>
 #include <numeric>
 #include <optional>
 #include <string>
@@ -45,16 +44,19 @@ limitations under the License.
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/IR/Location.h"
+#include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/ValueRange.h"
 #include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "xla/backends/cpu/codegen/emitters/cpu_fusion_emitter.h"
 #include "xla/backends/cpu/codegen/fusion_compiler.h"
+#include "xla/backends/cpu/codegen/kernel_api_ir_builder.h"
 #include "xla/codegen/emitters/computation_partitioner.h"
 #include "xla/codegen/emitters/elemental_hlo_to_mlir.h"
 #include "xla/codegen/emitters/ir/xla_attrs.h.inc"
 #include "xla/codegen/emitters/ir/xla_ops.h"
+#include "xla/codegen/emitters/kernel_api_builder.h"
 #include "xla/codegen/kernel_definition.h"
 #include "xla/codegen/kernel_spec.h"
 #include "xla/codegen/mlir_kernel_source.h"
@@ -65,13 +67,13 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/primitive_util.h"
+#include "xla/runtime/work_group.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/cpu/backend_config.pb.h"
-#include "xla/service/llvm_ir/llvm_util.h"
 #include "xla/service/scatter_simplifier.h"
+#include "xla/service/shaped_slice.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/stream_executor/launch_dim.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
@@ -82,6 +84,7 @@ namespace cpu {
 
 using llvm::SmallVector;
 using mlir::ImplicitLocOpBuilder;
+using mlir::MLIRContext;
 using mlir::Value;
 using mlir::ValueRange;
 
@@ -89,7 +92,7 @@ namespace ma = ::mlir::arith;
 namespace scf = ::mlir::scf;
 
 std::vector<emitters::EpilogueSpecification> CpuScatterFusion::GetEpilogues(
-    const HloFusionInstruction& fusion, mlir::MLIRContext* mlir_context) const {
+    const HloFusionInstruction& fusion, MLIRContext* mlir_context) const {
   const auto* scatter = fusion_->fused_expression_root();
   // We don't actually support epilogues for scatter, but this is how we tell
   // the base class that we don't want it to generate code for the scatter.
@@ -98,13 +101,12 @@ std::vector<emitters::EpilogueSpecification> CpuScatterFusion::GetEpilogues(
 }
 
 std::optional<IndexingMap> CpuScatterFusion::ComputeThreadIdToOutputIndexing(
-    int64_t root_index, mlir::MLIRContext* ctx) const {
+    int64_t root_index, MLIRContext* ctx) const {
   return std::nullopt;
 }
 
 std::optional<IndexingMap> CpuScatterFusion::ComputeThreadIdToInputIndexing(
-    int64_t root_index, int64_t hero_operand_index,
-    mlir::MLIRContext* ctx) const {
+    int64_t root_index, int64_t hero_operand_index, MLIRContext* ctx) const {
   const auto* scatter =
       DynCast<HloScatterInstruction>(fusion_->fused_expression_root());
   CHECK(ScatterSimplifier::IsSimplifiedScatter(scatter))
@@ -163,25 +165,28 @@ SmallVector<Value> EmitScatterComputation(
     ret.reserve(reduced_values.size());
     for (const auto& [reduced_value, output_tensor] :
          llvm::zip(reduced_values, output_tensors)) {
-      ret.push_back(b.create<mlir::tensor::InsertOp>(reduced_value,
-                                                     output_tensor, indices));
+      ret.push_back(mlir::tensor::InsertOp::create(b, reduced_value,
+                                                   output_tensor, indices));
     }
     return ret;
   }
   Value output_tensor = output_tensors.front();
   Value update_elem = update_elems.front();
-  auto atomic_rmw = b.create<AtomicRMWOp>(output_tensor, indices);
+  auto atomic_rmw = AtomicRMWOp::create(b, output_tensor, indices);
   mlir::OpBuilder body_builder = atomic_rmw.getBodyBuilder();
   auto reduced_val =
       emitters::InlineBlock(body_builder, reducer.getBody().front(),
                             {atomic_rmw.getCurrentValue(), update_elem})[0];
-  body_builder.create<xla::YieldOp>(reducer->getLoc(), reduced_val);
+  xla::YieldOp::create(body_builder, reducer->getLoc(), reduced_val);
   return {atomic_rmw->getResult(0)};
 }
 
 CpuScatterFusion::CpuScatterFusion(const BufferAssignment& buffer_assignment,
-                                   const HloFusionInstruction* fusion)
-    : buffer_assignment_(buffer_assignment), fusion_(fusion) {
+                                   const HloFusionInstruction* fusion,
+                                   MLIRContext* mlir_context)
+    : buffer_assignment_(buffer_assignment),
+      fusion_(fusion),
+      mlir_context_(mlir_context) {
   const auto* scatter = Cast<HloScatterInstruction>(
       fusion->fused_instructions_computation()->root_instruction());
   auto update_shape = scatter->scatter_updates().front()->shape();
@@ -204,14 +209,14 @@ CpuScatterFusion::CpuScatterFusion(const BufferAssignment& buffer_assignment,
 }
 IndexingMap GetScatterIndexingMap(
     absl::Span<const int64_t> updates_operand_shape, int64_t num_threads,
-    int64_t vector_size, mlir::MLIRContext* mlir_context) {
+    int64_t vector_size, mlir::MLIRContext* context) {
   using mlir::AffineExpr;
 
   // Delinearize thread_expr w.r.t. number of thread tiles per dimension.
-  auto thread_expr = mlir::getAffineDimExpr(0, mlir_context);
-  auto index_id = mlir::getAffineSymbolExpr(0, mlir_context);
-  auto slice_linear_index = mlir::getAffineSymbolExpr(1, mlir_context);
-  auto vector_element_id = mlir::getAffineSymbolExpr(2, mlir_context);
+  auto thread_expr = mlir::getAffineDimExpr(0, context);
+  auto index_id = mlir::getAffineSymbolExpr(0, context);
+  auto slice_linear_index = mlir::getAffineSymbolExpr(1, context);
+  auto vector_element_id = mlir::getAffineSymbolExpr(2, context);
 
   int64_t num_updates = updates_operand_shape.front();
   int64_t num_updates_per_thread = CeilOfRatio(num_updates, num_threads);
@@ -233,8 +238,8 @@ IndexingMap GetScatterIndexingMap(
       {updates_id_expr, {0, num_updates}},
       {slice_linear_index_expr, {0, num_slice_elements - 1}}};
 
-  auto affine_map = mlir::AffineMap::get(/*num_dims=*/1, /*num_symbols=*/3,
-                                         result, mlir_context);
+  auto affine_map =
+      mlir::AffineMap::get(/*num_dims=*/1, /*num_symbols=*/3, result, context);
   return IndexingMap(
       affine_map, {IndexingMap::Variable({0, num_threads - 1, "thread_id"})},
       {IndexingMap::Variable({0, num_updates_per_thread - 1, "index_id"}),
@@ -243,15 +248,14 @@ IndexingMap GetScatterIndexingMap(
       {}, constraints);
 }
 
-absl::StatusOr<KernelDefinition> CpuScatterFusion::EmitKernelDefinition() {
-  std::unique_ptr<mlir::MLIRContext> context = FusionCompiler::CreateContext();
-
-  mlir::OpBuilder builder(context.get());
+absl::StatusOr<CpuScatterFusion::KernelDefinition>
+CpuScatterFusion::EmitKernelDefinition() {
+  mlir::OpBuilder builder(mlir_context_);
   TF_ASSIGN_OR_RETURN(mlir::OwningOpRef<mlir::ModuleOp> mlir_module,
                       CreateNamedMlirModuleOp(*fusion_, builder));
 
   absl::string_view module_name(mlir_module->getName().value());
-  SetDataLayoutAttribute(mlir_module.get(), *fusion_);
+  emitters::SetIndexDataLayout(mlir_module.get(), *fusion_);
 
   mlir::StringAttr disable_loop_unrolling_attr =
       builder.getStringAttr("xla_cpu_disable_loop_unrolling");
@@ -260,15 +264,19 @@ absl::StatusOr<KernelDefinition> CpuScatterFusion::EmitKernelDefinition() {
       builder.getAttr<xla::ExtraBackendOptionsAttr>(
           llvm::ArrayRef{disable_loop_unrolling_attr}));
 
-  TF_ASSIGN_OR_RETURN(mlir::func::FuncOp entry_func,
-                      EmitFusionKernelApi(mlir_module.get(), *fusion_,
-                                          std::string(module_name) + "_entry",
-                                          buffer_assignment_));
+  mlir_module->getOperation()->setAttr(
+      xla::CpuMemoryRegionNameAttr::name,
+      builder.getStringAttr(BuildModuleMemoryRegionName(name(), fusion_)));
+
+  TF_ASSIGN_OR_RETURN(
+      mlir::func::FuncOp entry_func,
+      EmitEntryFunctionApi(mlir_module.get(), *fusion_,
+                           std::string(module_name), buffer_assignment_));
 
   std::vector<emitters::EpilogueSpecification> epilogues =
-      GetEpilogues(*fusion_, context.get());
+      GetEpilogues(*fusion_, mlir_context_);
   emitters::PartitionedComputations computations(
-      fusion_->fused_instructions_computation(), context.get(), epilogues);
+      fusion_->fused_instructions_computation(), mlir_context_, epilogues);
   TF_ASSIGN_OR_RETURN(
       emitters::CallTargetProvider call_targets,
       EmitCallTargets(mlir_module.get(), *fusion_, computations, epilogues));
@@ -284,7 +292,7 @@ absl::StatusOr<KernelDefinition> CpuScatterFusion::EmitKernelDefinition() {
     TF_ASSIGN_OR_RETURN(
         BufferAllocation::Slice slice,
         buffer_assignment_.GetUniqueSlice(fusion_, indexed.index));
-    result_buffers.push_back(std::move(slice));
+    result_buffers.push_back({slice, indexed.shape});
   }
 
   // TODO(willfroom): Move this to common method that can be shared across
@@ -298,25 +306,25 @@ absl::StatusOr<KernelDefinition> CpuScatterFusion::EmitKernelDefinition() {
           buffer_assignment_.GetUniqueSlice(operand, indexed.index));
 
       bool invariant = absl::c_none_of(
-          result_buffers,
-          [&slice](const BufferAllocation::Slice& result_slice) {
-            return result_slice.OverlapsWith(slice);
+          result_buffers, [&slice](const ShapedSlice& result_slice) {
+            return result_slice.slice.OverlapsWith(slice);
           });
       if (invariant) {
         invariant_arguments.insert(operand_index);
       }
 
-      argument_buffers.push_back(std::move(slice));
+      argument_buffers.push_back({slice, indexed.shape});
       ++operand_index;
     }
   }
 
-  KernelSpec kernel_spec(module_name, se::ThreadDim(num_threads_),
+  KernelSpec kernel_spec(module_name,
+                         NumWorkGroups{static_cast<uint64_t>(num_threads_)},
                          std::move(argument_buffers), std::move(result_buffers),
                          std::move(invariant_arguments));
+
   return KernelDefinition(std::move(kernel_spec),
-                          std::make_unique<MlirKernelSource>(
-                              std::move(context), std::move(mlir_module)));
+                          MlirKernelSource(std::move(mlir_module)));
 }
 
 absl::Status CpuScatterFusion::EmitEntryFunction(
@@ -336,7 +344,7 @@ absl::Status CpuScatterFusion::EmitEntryFunction(
   absl::Span<HloInstruction* const> scatter_updates =
       scatter->scatter_updates();
 
-  mlir::MLIRContext* mlir_context = entry_function.getContext();
+  mlir::MLIRContext* context = entry_function.getContext();
   ImplicitLocOpBuilder b(entry_function.getLoc(), entry_function);
   b.setInsertionPointToStart(entry_function.addEntryBlock());
   // %arg1 and %arg4 do alias -- they point to the same address!
@@ -345,7 +353,7 @@ absl::Status CpuScatterFusion::EmitEntryFunction(
   SmallVector<Value> output_tensors;
   output_tensors.reserve(scatter_operands.size());
   for (int i = 0; i < scatter_operands.size(); ++i) {
-    output_tensors.push_back(entry_function.getArgument(1 + i));
+    output_tensors.push_back(entry_function.getArgument(i));
   }
 
   const auto& root_computation = computations.FindPartitionedComputation(
@@ -353,17 +361,14 @@ absl::Status CpuScatterFusion::EmitEntryFunction(
   CHECK(ScatterSimplifier::IsSimplifiedScatter(scatter))
       << "Non-simplified HLO Scatter is not supported.";
 
-  // For now, thread_id is hardcoded to 0.
-  entry_function.setArgAttr(0, "xla.range", b.getIndexArrayAttr({0, 0}));
-
   const Shape& update_shape = scatter_updates.front()->shape();
 
-  Value thread_id = entry_function.getArgument(0);
-  // Set range for the func thread id arg.
-  entry_function.setArgAttr(0, "xla.range",
-                            b.getIndexArrayAttr({0, num_threads_ - 1}));
-  IndexingMap map = GetScatterIndexingMap(
-      update_shape.dimensions(), num_threads_, vector_size_, mlir_context);
+  WorkGroupIdOp workgroup_id = b.create<WorkGroupIdOp>(WorkGroupDimension::x);
+  workgroup_id->setAttr("xla.range",
+                        b.getIndexArrayAttr({0, num_threads_ - 1}));
+
+  IndexingMap map = GetScatterIndexingMap(update_shape.dimensions(),
+                                          num_threads_, vector_size_, context);
   map.Simplify();
 
   const ScatterDimensionNumbers& scatter_dims =
@@ -371,14 +376,14 @@ absl::Status CpuScatterFusion::EmitEntryFunction(
   int64_t index_vector_dim = scatter_dims.index_vector_dim();
 
   auto results = emitters::EmitXlaLoopOp(
-      b, {thread_id}, output_tensors, map,
+      b, {workgroup_id}, output_tensors, map,
       [&](ImplicitLocOpBuilder nested_b, ValueRange iv,
           ValueRange update_indices,
           ValueRange output_tensors) -> SmallVector<Value> {
         Value update_id = update_indices.front();
 
         Value c0 = nested_b.create<mlir::arith::ConstantIndexOp>(0);
-        Value in_bounds = nested_b.create<ma::ConstantIntOp>(1, b.getI1Type());
+        Value in_bounds = nested_b.create<ma::ConstantIntOp>(b.getI1Type(), 1);
 
         SmallVector<Value, 4> update_offsets(
             scatter_operands.front()->shape().dimensions().size(), c0);
@@ -438,7 +443,7 @@ absl::Status CpuScatterFusion::EmitEntryFunction(
                           updated_outputs);
                     },
                     [&](mlir::OpBuilder& else_b, mlir::Location else_loc) {
-                      else_b.create<scf::YieldOp>(else_loc, output_tensors);
+                      scf::YieldOp::create(else_b, else_loc, output_tensors);
                     })
                 .getResults();
         return predicated_updates;

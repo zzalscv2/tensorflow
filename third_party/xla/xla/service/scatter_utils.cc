@@ -16,6 +16,7 @@ limitations under the License.
 #include "xla/service/scatter_utils.h"
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "absl/algorithm/container.h"
@@ -27,25 +28,27 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/ir/hlo_original_value.h"
 #include "xla/service/call_inliner.h"
 #include "xla/service/hlo_creation_utils.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/statusor.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
 
 namespace xla {
 
 absl::StatusOr<HloInstruction*> TransposeIndexVectorDimToLast(
     HloInstruction* scatter_indices, int64_t index_vector_dim) {
   const Shape& scatter_indices_shape = scatter_indices->shape();
-  if (index_vector_dim >= (scatter_indices_shape.dimensions_size() - 1)) {
+  if (index_vector_dim + 1 >=
+      static_cast<int64_t>(scatter_indices_shape.dimensions().size())) {
     return scatter_indices;
   }
 
   std::vector<int64_t> permutation;
-  permutation.reserve(scatter_indices_shape.dimensions_size());
-  for (int64_t i = 0; i < scatter_indices_shape.dimensions_size(); i++) {
+  permutation.reserve(scatter_indices_shape.dimensions().size());
+  for (int64_t i = 0; i < scatter_indices_shape.dimensions().size(); i++) {
     if (i != index_vector_dim) {
       permutation.push_back(i);
     }
@@ -57,7 +60,7 @@ absl::StatusOr<HloInstruction*> TransposeIndexVectorDimToLast(
 absl::StatusOr<HloInstruction*> PermuteScatterAndWindowDims(
     HloInstruction* updates, absl::Span<const int64_t> update_window_dims) {
   std::vector<int64_t> permutation;
-  const int64_t updates_rank = updates->shape().dimensions_size();
+  const int64_t updates_rank = updates->shape().dimensions().size();
   permutation.reserve(updates_rank);
 
   for (int64_t i = 0; i < updates_rank; ++i) {
@@ -77,8 +80,8 @@ absl::StatusOr<HloInstruction*> PermuteScatterAndWindowDims(
 absl::StatusOr<HloInstruction*> AdjustScatterDims(
     const Shape& scatter_indices_shape, HloInstruction* updates,
     int64_t index_vector_dim) {
-  int64_t num_scatter_dims = scatter_indices_shape.dimensions_size();
-  if (index_vector_dim < scatter_indices_shape.dimensions_size()) {
+  int64_t num_scatter_dims = scatter_indices_shape.dimensions().size();
+  if (index_vector_dim < num_scatter_dims) {
     --num_scatter_dims;
   }
   if (num_scatter_dims == 0) {
@@ -96,7 +99,7 @@ absl::StatusOr<HloInstruction*> CanonicalizeScatterIndices(
   TF_ASSIGN_OR_RETURN(
       HloInstruction * transposed_scatter_indices,
       TransposeIndexVectorDimToLast(scatter_indices, index_vector_dim));
-  if (scatter_indices->shape().dimensions_size() - 1 == index_vector_dim &&
+  if (scatter_indices->shape().dimensions().size() == index_vector_dim + 1 &&
       scatter_indices->shape().dimensions(index_vector_dim) == 1) {
     auto new_shape =
         ShapeUtil::DeleteDimension(index_vector_dim, scatter_indices->shape());
@@ -104,7 +107,7 @@ absl::StatusOr<HloInstruction*> CanonicalizeScatterIndices(
                         MakeReshapeHlo(new_shape, scatter_indices));
   }
   bool indices_are_scalar =
-      index_vector_dim == scatter_indices->shape().dimensions_size();
+      index_vector_dim == scatter_indices->shape().dimensions().size();
 
   // The number of dimensions in scatter_indices that are index dimensions.
   const int64_t index_dims_in_scatter_indices = indices_are_scalar ? 0 : 1;
@@ -114,14 +117,14 @@ absl::StatusOr<HloInstruction*> CanonicalizeScatterIndices(
   // dimension for uniformity.  Otherwise create a "collapsed" leading dimension
   // that subsumes all of the non-index-vector dimensions.
   const Shape& shape = transposed_scatter_indices->shape();
-  if (shape.dimensions_size() == index_dims_in_scatter_indices) {
+  if (shape.dimensions().size() == index_dims_in_scatter_indices) {
     return PrependDegenerateDims(transposed_scatter_indices, 1);
   }
   // Collapse all but the dimensions (0 or 1) in scatter_indices containing
   // the index vectors.
   return CollapseFirstNDims(
       transposed_scatter_indices,
-      shape.dimensions_size() - index_dims_in_scatter_indices);
+      shape.dimensions().size() - index_dims_in_scatter_indices);
 }
 
 absl::StatusOr<HloComputation*> CallAndGetOutput(HloComputation* original,
@@ -143,6 +146,8 @@ absl::StatusOr<HloComputation*> CallAndGetOutput(HloComputation* original,
   HloInstruction* call_original = new_comp->AddInstruction(
       HloInstruction::CreateCall(original_root->shape(),
                                  new_comp->parameter_instructions(), original));
+  call_original->set_original_value(
+      std::make_shared<OriginalValue>(OriginalValue::SyntheticCall()));
   new_comp->set_root_instruction(
       new_comp->AddInstruction(
           HloInstruction::CreateGetTupleElement(call_original, output_index)),
@@ -158,7 +163,7 @@ absl::StatusOr<HloComputation*> CallComputationAndGetIthOutputWithBinaryParams(
     return original;
   }
   int64_t num_params = original->num_parameters();
-  int64_t num_outputs = original_root->shape().tuple_shapes_size();
+  int64_t num_outputs = original_root->shape().tuple_shapes().size();
 
   CHECK_EQ(num_params / 2, num_outputs);
   HloComputation* new_comp = [&] {
@@ -185,6 +190,8 @@ absl::StatusOr<HloComputation*> CallComputationAndGetIthOutputWithBinaryParams(
 
   HloInstruction* call_original = new_comp->AddInstruction(
       HloInstruction::CreateCall(original_root->shape(), operands, original));
+  call_original->set_original_value(
+      std::make_shared<OriginalValue>(OriginalValue::SyntheticCall()));
   new_comp->set_root_instruction(
       new_comp->AddInstruction(
           HloInstruction::CreateGetTupleElement(call_original, output_index)),
@@ -200,7 +207,8 @@ int64_t ScatterIndicesCount(const HloScatterInstruction* scatter) {
   const ScatterDimensionNumbers& dim_numbers =
       scatter->scatter_dimension_numbers();
   int64_t scatter_loop_trip_count = 1;
-  for (int64_t i = 0, e = scatter_indices_shape.dimensions_size(); i < e; i++) {
+  for (int64_t i = 0, e = scatter_indices_shape.dimensions().size(); i < e;
+       i++) {
     if (i != dim_numbers.index_vector_dim()) {
       scatter_loop_trip_count *= scatter_indices_shape.dimensions(i);
     }

@@ -32,8 +32,8 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/tests/client_library_test_runner_mixin.h"
-#include "xla/tests/hlo_test_base.h"
-#include "xla/tests/test_macros.h"
+#include "xla/tests/hlo_pjrt_interpreter_reference_mixin.h"
+#include "xla/tests/hlo_pjrt_test_base.h"
 #include "xla/tsl/platform/test.h"
 
 namespace xla {
@@ -102,7 +102,8 @@ float ApplyOpToFloats(HloOpcode op, float lhs, float rhs) {
   }
 }
 
-using BroadcastSimpleTest = ClientLibraryTestRunnerMixin<HloTestBase>;
+using BroadcastSimpleTest = ClientLibraryTestRunnerMixin<
+    HloPjRtInterpreterReferenceMixin<HloPjRtTestBase>>;
 
 TEST_F(BroadcastSimpleTest, ScalarNoOpBroadcast) {
   XlaBuilder b(TestName());
@@ -321,7 +322,7 @@ class BroadcastR3ImplicitTest
     : public BroadcastSimpleTest,
       public ::testing::WithParamInterface<R3ImplicitBroadcastSpec> {};
 
-XLA_TEST_P(BroadcastR3ImplicitTest, Doit) {
+TEST_P(BroadcastR3ImplicitTest, Doit) {
   const R3ImplicitBroadcastSpec& spec = GetParam();
   XlaBuilder builder(TestName());
 
@@ -564,7 +565,7 @@ class BroadcastR2ImplicitTest
 // Test r2 op1 r2_implicit_1 op2 r2_implicit_2
 // where R2 is a rank-2 operand, and r2_implicit_2 are two
 // rank-2 operands with degenerate dimensions:
-XLA_TEST_P(BroadcastR2ImplicitTest, Doit) {
+TEST_P(BroadcastR2ImplicitTest, Doit) {
   const R2ImplicitBroadcastSpec& spec = GetParam();
 
   XlaBuilder builder(TestName());

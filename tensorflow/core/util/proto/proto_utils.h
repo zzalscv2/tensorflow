@@ -44,25 +44,26 @@ class StringErrorCollector : public protobuf::io::ErrorCollector {
  public:
   // String error_text is unowned and must remain valid during the use of
   // StringErrorCollector.
-  explicit StringErrorCollector(string* error_text);
+  explicit StringErrorCollector(std::string* error_text);
   // If one_indexing is set to true, all line and column numbers will be
   // increased by one for cases when provided indices are 0-indexed and
   // 1-indexed error messages are desired
-  StringErrorCollector(string* error_text, bool one_indexing);
+  StringErrorCollector(std::string* error_text, bool one_indexing);
   StringErrorCollector(const StringErrorCollector&) = delete;
   StringErrorCollector& operator=(const StringErrorCollector&) = delete;
 
-  // Implementation of protobuf::io::ErrorCollector::AddError.
-  void AddError(int line, int column, const string& message) override;
+  // Implementation of protobuf::io::ErrorCollector::RecordError.
+  void RecordError(int line, protobuf::io::ColumnNumber column,
+                   absl::string_view message) override;
 
-  // Implementation of protobuf::io::ErrorCollector::AddWarning.
-  void AddWarning(int line, int column, const string& message) override;
+  // Implementation of protobuf::io::ErrorCollector::RecordWarning.
+  void RecordWarning(int line, protobuf::io::ColumnNumber column,
+                     absl::string_view message) override;
 
  private:
-  string* const error_text_;
+  std::string* const error_text_;
   const int index_offset_;
 };
-
 
 }  // namespace proto_utils
 }  // namespace tensorflow

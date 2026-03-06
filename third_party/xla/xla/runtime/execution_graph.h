@@ -23,6 +23,7 @@ limitations under the License.
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "absl/algorithm/container.h"
@@ -81,8 +82,23 @@ class ExecutionGraph {
     virtual int64_t op_type_id() const { return 0; };
     virtual absl::Span<const BufferUse> BufferUses() const = 0;
     virtual absl::Span<const ResourceUse> ResourceUses() const = 0;
+    virtual std::string ToString() const {
+      return absl::StrFormat("Operation {name: %s}", name());
+    }
+
+    const std::vector<
+        std::pair<std::string, std::vector<std::unique_ptr<Operation>>>>&
+    named_nested_operations() const {
+      return named_nested_operations_;
+    }
 
    protected:
+    std::vector<
+        std::pair<std::string, std::vector<std::unique_ptr<Operation>>>>&
+    named_nested_operations() {
+      return named_nested_operations_;
+    }
+
     Operation() = default;
 
     Operation(const Operation&) = default;
@@ -90,6 +106,10 @@ class ExecutionGraph {
 
     Operation(Operation&&) = default;
     Operation& operator=(Operation&&) = default;
+
+   private:
+    std::vector<std::pair<std::string, std::vector<std::unique_ptr<Operation>>>>
+        named_nested_operations_;
   };
 
   // An edge between two nodes created for the execution graph operations.
@@ -231,6 +251,9 @@ class ExecutionGraph {
   }
 
   bool is_sequential() const { return is_sequential_; }
+
+  // Returns a string representation of the execution graph.
+  std::string ToString() const;
 
  private:
   // We store all `in_edges` and `out_edges` referenced by the `NodeDef` inside

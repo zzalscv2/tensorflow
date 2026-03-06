@@ -16,29 +16,46 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_module.h"
 
 #include <cstddef>
+#include <cstdint>
+#include <iterator>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/container/btree_map.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/hash/hash.h"
+#include "absl/log/check.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_replace.h"
 #include "absl/strings/string_view.h"
+#include "google/protobuf/text_format.h"
+#include "xla/hlo/analysis/alias_info.h"
+#include "xla/hlo/analysis/hlo_ordering.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_print_options.h"
 #include "xla/hlo/ir/hlo_schedule.h"
+#include "xla/hlo/ir/stack_frames.h"
 #include "xla/hlo/parser/hlo_parser.h"
 #include "xla/hlo/testlib/filecheck.h"
 #include "xla/hlo/utils/hlo_query.h"
+#include "xla/service/buffer_assignment.h"
+#include "xla/service/buffer_value.h"
+#include "xla/service/compilation_environments.h"
 #include "xla/service/hlo_module_config.h"
+#include "xla/service/hlo_proto_util.h"
+#include "xla/service/logical_buffer.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/tsl/platform/status.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
+#include "xla/tsl/util/proto/proto_matchers.h"
 #include "xla/util.h"
 #include "xla/xla.pb.h"
 #include "xla/xla_data.pb.h"
@@ -47,8 +64,18 @@ namespace xla {
 namespace {
 
 using ::testing::ElementsAre;
+using ::testing::Eq;
 using ::testing::IsEmpty;
+using ::testing::Pointwise;
+using ::testing::Property;
 using ::testing::UnorderedElementsAre;
+
+// Adapts the internal equals proto to work with PointWise
+MATCHER(EqualsProto, "") {
+  const auto& a = ::testing::get<0>(arg);
+  const auto& b = ::testing::get<1>(arg);
+  return ::testing::Matches(tsl::proto_testing::EqualsProto(b))(a);
+}
 
 TEST(HloModuleTest, AbslHashValue) {
   HloModule module1("temp_module", HloModuleConfig());
@@ -71,12 +98,17 @@ TEST(HloModuleTest, AbslHashValue) {
 }
 
 TEST(HloModuleTest, ToFingerprint) {
-  auto fp = [](const HloModule& module) {
-    return module.ToFingerprint(HloPrintOptions::ModuleFingerprint());
+  auto fp = [](const HloModule& module,
+               std::optional<absl::btree_map<std::string, NumericOrString>>
+                   custom_fields) {
+    return custom_fields.has_value()
+               ? module.ToFingerprint(HloPrintOptions::ModuleFingerprint(),
+                                      *custom_fields)
+               : module.ToFingerprint(HloPrintOptions::ModuleFingerprint());
   };
   HloModule module1("m1", HloModuleConfig());
   HloModule module2("m2", HloModuleConfig());
-  EXPECT_EQ(fp(module1), fp(module2));
+  EXPECT_EQ(fp(module1, std::nullopt), fp(module2, std::nullopt));
 
   absl::string_view hlo = R"(
       HloModule m3
@@ -89,8 +121,25 @@ TEST(HloModuleTest, ToFingerprint) {
                           ParseAndReturnUnverifiedModule(hlo));
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module4,
                           ParseAndReturnUnverifiedModule(hlo));
-  EXPECT_EQ(fp(*module3), fp(*module4));
-  EXPECT_NE(fp(module1), fp(*module4));
+  EXPECT_EQ(fp(*module3, std::nullopt), fp(*module4, std::nullopt));
+  EXPECT_NE(fp(module1, std::nullopt), fp(*module4, std::nullopt));
+
+  const absl::btree_map<std::string, NumericOrString> custom_fields = {
+      {"parameter_0", int64_t{50}},
+      {"parameter_1", "string_value"},
+      {"parameter_2", 10.594},
+  };
+
+  EXPECT_NE(fp(*module3, custom_fields), fp(*module3, std::nullopt));
+  EXPECT_NE(fp(module1, custom_fields), fp(*module4, custom_fields));
+
+  EXPECT_EQ(fp(*module3, custom_fields), fp(*module4, custom_fields));
+  EXPECT_EQ(fp(*module4, custom_fields), fp(*module4, custom_fields));
+
+  const absl::btree_map<std::string, NumericOrString> custom_fields2 = {
+      {"parameter_0", int64_t{1}},
+  };
+  EXPECT_NE(fp(*module3, custom_fields), fp(*module3, custom_fields2));
 }
 
 TEST(HloModuleTest, MutableAndReadOnlyConfigEquals) {
@@ -175,10 +224,57 @@ TEST(HloModuleTest, CloneGeneral) {
   CreateComputation(m1, "TestComputation1", true, schedule);
   CreateComputation(m1, "TestComputation3", false, schedule);
   CreateComputation(m1, "TestComputation2", false, schedule);
-  TF_CHECK_OK(m1.set_schedule(schedule));
+  m1.metadata()->set_module_group_name("test");
+  CHECK_OK(m1.set_schedule(schedule));
   m1.AddCrossProgramPrefetch(7, ShapeIndex({8}), 100);
 
   std::unique_ptr<HloModule> m2 = m1.Clone(kCloneSuffix);
+
+  EXPECT_EQ(&m1.config(), &m2->config());
+  EXPECT_EQ(GetCloneName(m1.entry_computation()->name()),
+            m2->entry_computation()->name());
+
+  EXPECT_EQ(m1.schedule()
+                .sequence(m1.entry_computation())
+                .instructions()
+                .front()
+                ->name(),
+            m2->schedule()
+                .sequence(m2->entry_computation())
+                .instructions()
+                .front()
+                ->name());
+  EXPECT_EQ(m1.metadata()->proto().module_group_name(), "test");
+  EXPECT_EQ(m2->metadata()->proto().module_group_name(), "test");
+  EXPECT_EQ(m1.metadata()->proto().canonical_module_id(), m1.unique_id());
+  EXPECT_EQ(m2->metadata()->proto().canonical_module_id(), m2->unique_id());
+
+  EXPECT_EQ(m1.CrossProgramPrefetches().front().alt_memory_offset,
+            m2->CrossProgramPrefetches().front().alt_memory_offset);
+
+  EXPECT_EQ(m1.computation_count(), m2->computation_count());
+  size_t i = 0;
+  auto m1_computations = m1.computations();
+  auto m2_computations = m2->computations();
+  for (auto it1 = m1_computations.begin(), it2 = m2_computations.begin();
+       it1 != m1_computations.end() && it2 != m2_computations.end();
+       ++it1, ++it2) {
+    const HloComputation *c1 = *it1, *c2 = *it2;
+    EXPECT_EQ(GetCloneName(c1->name()), c2->name())
+        << "Computation sequence mismatch at " << i;
+  }
+}
+
+TEST(HloModuleTest, CloneWithContextGeneral) {
+  HloModule m1("temp_module", HloModuleConfig());
+  HloSchedule schedule(&m1);
+  CreateComputation(m1, "TestComputation1", true, schedule);
+  CreateComputation(m1, "TestComputation3", false, schedule);
+  CreateComputation(m1, "TestComputation2", false, schedule);
+  CHECK_OK(m1.set_schedule(schedule));
+  m1.AddCrossProgramPrefetch(7, ShapeIndex({8}), 100);
+
+  auto [m2, clone_context] = m1.CloneWithContext(kCloneSuffix);
 
   EXPECT_EQ(&m1.config(), &m2->config());
   EXPECT_EQ(GetCloneName(m1.entry_computation()->name()),
@@ -200,15 +296,15 @@ TEST(HloModuleTest, CloneGeneral) {
 
   EXPECT_EQ(m1.computation_count(), m2->computation_count());
   size_t i = 0;
-  for (auto it1 = m1.computations().begin(), it2 = m2->computations().begin();
-       it1 != m1.computations().end() && it2 != m2->computations().end();
+  auto m1_computations = m1.computations();
+  auto m2_computations = m2->computations();
+  for (auto it1 = m1_computations.begin(), it2 = m2_computations.begin();
+       it1 != m1_computations.end() && it2 != m2_computations.end();
        ++it1, ++it2) {
     const HloComputation *c1 = *it1, *c2 = *it2;
     EXPECT_EQ(GetCloneName(c1->name()), c2->name())
         << "Computation sequence mismatch at " << i;
-    EXPECT_EQ(GetCloneName(m1.mutable_computation(i)->name()),
-              m2->mutable_computation(i)->name())
-        << "Indexing computation sequence mismatch at " << i;
+    EXPECT_EQ(clone_context->FindComputation(c1), c2);
   }
 }
 
@@ -236,6 +332,62 @@ TEST(HloModuleTest, CloneWithNewConfig) {
   EXPECT_EQ(pm2->config().device_type(), m1.config().device_type());
   EXPECT_NE(pm2->config().device_memory_size(),
             m1.config().device_memory_size());
+}
+
+TEST(HloModuleTest, ClonePreservesStackFrameIndex) {
+  HloModule m1("temp_module", HloModuleConfig());
+  HloSchedule schedule(&m1);
+  CreateComputation(m1, "TestComputation1", true, schedule);
+  CHECK_OK(m1.set_schedule(schedule));
+
+  StackFrameIndexProto stack_frame_index;
+  stack_frame_index.add_file_names("file1.cc");
+  stack_frame_index.add_function_names("func1");
+  auto* file_location = stack_frame_index.add_file_locations();
+  file_location->set_file_name_id(1);
+  file_location->set_function_name_id(1);
+  file_location->set_line(10);
+  file_location->set_column(5);
+  auto* stack_frame = stack_frame_index.add_stack_frames();
+  stack_frame->set_file_location_id(1);
+  stack_frame->set_parent_frame_id(0);
+  m1.set_stack_frames(StackFrames::FromProto(stack_frame_index).value());
+
+  std::unique_ptr<HloModule> m2 = m1.Clone(kCloneSuffix);
+
+  EXPECT_FALSE(m2->stack_frames().empty());
+  EXPECT_THAT(m2->stack_frames().proto(),
+              tsl::proto_testing::EqualsProto(stack_frame_index));
+}
+
+TEST(HloModuleTest, UniqueIdProvidesComputationPrefix) {
+  HloModule m1("temp_module", HloModuleConfig());
+  HloSchedule schedule(&m1);
+  CreateComputation(m1, "TestComputation1", true, schedule);
+  CreateComputation(m1, "TestComputation2", false, schedule);
+  CreateComputation(m1, "TestComputation3", false, schedule);
+  TF_EXPECT_OK(m1.set_schedule(schedule));
+
+  EXPECT_EQ(m1.GetComputationWithName("TestComputation1")
+                ->GetInstructionWithName("p0")
+                ->unique_id(),
+            0);
+  EXPECT_EQ(m1.GetComputationWithName("TestComputation2")
+                ->GetInstructionWithName("p0.1")
+                ->unique_id(),
+            (static_cast<int64_t>(1) << 32) + 0);
+  EXPECT_EQ(m1.GetComputationWithName("TestComputation1")
+                ->GetInstructionWithName("call")
+                ->unique_id(),
+            1);
+  EXPECT_EQ(m1.GetComputationWithName("TestComputation3")
+                ->GetInstructionWithName("p0.2")
+                ->unique_id(),
+            (static_cast<int64_t>(2) << 32) + 0);
+  EXPECT_EQ(m1.GetComputationWithName("TestComputation1")
+                ->GetInstructionWithName("call.1")
+                ->unique_id(),
+            2);
 }
 
 TEST(HloModuleTest, ClonePreservesUniqueId) {
@@ -640,6 +792,604 @@ TEST(HloModuleTest, MultipleCallsFromOneInstruction) {
 
   EXPECT_THAT(f->caller_instructions(), ElementsAre(conditional));
   EXPECT_THAT(g->caller_instructions(), ElementsAre(conditional));
+}
+
+TEST(HloModuleTest, TestUniqueIdIs64Bits) {
+  const char* hlo = R"(
+    f {
+      ROOT tparam = f32[4] parameter(0)
+    }
+
+    g {
+      ROOT fparam = f32[4] parameter(0)
+    }
+
+    ENTRY main {
+      p0 = f32[4] parameter(0)
+      b0 = f32[4] parameter(1)
+      call.f.0 = f32[4] call(p0), to_apply=f
+      call.g.0 = f32[4] call(b0), to_apply=g
+      ROOT sum = f32[4] add(call.f.0, call.g.0)
+    })";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  HloComputation* f = module->GetComputationWithName("f");
+  HloInstruction* tparam = f->GetInstructionWithName("tparam");
+  HloComputation* g = module->GetComputationWithName("g");
+  HloInstruction* fparam = g->GetInstructionWithName("fparam");
+
+  // Upper 32 bits should make them different
+  EXPECT_NE(tparam->unique_id(), fparam->unique_id());
+  // Lower 32 bits should be preserved and therefore the same
+  EXPECT_EQ(tparam->unique_id() & 0xFFFFFFFF, fparam->unique_id() & 0xFFFFFFFF);
+  TF_EXPECT_OK(module->CheckUniqueNamesAndIdsForComputationsAndInstructions());
+}
+
+TEST(HloModuleTest, TestRemapInstructionIdsResolvesOperands) {
+  HloModuleProto hlo_module_proto;
+  ASSERT_TRUE(tsl::protobuf::TextFormat::ParseFromString(R"(
+  name: "hlo_module_proto"
+  entry_computation_id: 1
+computations {
+  name: "basic_computation"
+  id: 2
+  root_id: 1
+  instructions {
+    name: "parameter.0"
+    opcode: "parameter"
+    id: 1
+  }
+  instructions {
+    name: "parameter.1"
+    opcode: "parameter"
+    id: 2
+  }
+  instructions {
+    name: "add.0"
+    opcode: "add"
+    id: 3
+    operand_ids: 1
+    operand_ids: 2
+  }
+  instructions {
+    name: "add.1"
+    opcode: "add"
+    id: 4
+    operand_ids: 1
+    operand_ids: 3
+  }
+  instructions {
+    name: "add.2"
+    opcode: "add"
+    id: 5
+    operand_ids: 2
+    operand_ids: 3
+  }
+}
+
+computations {
+  name: "entry_computation"
+  id: 1
+  root_id: 12884901895
+  instructions {
+    name: "Arg_0.1"
+    opcode: "parameter"
+    id: 12884901889
+  }
+  instructions {
+    name: "slice.2"
+    opcode: "slice"
+    id: 12884901890
+    operand_ids: 1
+  }
+  instructions {
+    name: "squeeze.2"
+    opcode: "reshape"
+    id: 12884901891
+    operand_ids: 2
+  }
+  instructions {
+    name: "add.39"
+    opcode: "broadcast"
+    id: 12884901892
+    operand_ids: 3
+  }
+  instructions {
+    name: "iota_2x32_shape.1"
+    opcode: "iota"
+    id: 12884901893
+  }
+  instructions {
+    name: "slice.3"
+    opcode: "slice"
+    id: 12884901894
+    operand_ids: 1
+  }
+  instructions {
+    name: "squeeze.3"
+    opcode: "reshape"
+    id: 7
+    operand_ids: 6
+  }
+}
+
+)",
+                                                         &hlo_module_proto));
+
+  TF_ASSERT_OK_AND_ASSIGN(HloModuleProto remapped_hlo_module_proto,
+                          HloModule::RemapInstructionIds(hlo_module_proto));
+
+  HloInstructionProto squeeze_3_instr =
+      remapped_hlo_module_proto.computations(1).instructions(6);
+
+  // Instruction squeeze.3's operand is slice.3, which should be remapped to
+  // id 5.
+  EXPECT_THAT(
+      remapped_hlo_module_proto.computations(1).instructions(6).operand_ids(),
+      ElementsAre(5));
+  // squeeze.3 is the root because its local id matches the local part of the
+  // root id specified in the proto.
+  EXPECT_THAT(remapped_hlo_module_proto.computations(1).instructions(6).id(),
+              Eq(remapped_hlo_module_proto.computations(1).root_id()));
+}
+
+TEST(HloModuleTest, LoadAndFixNonConsecutiveInstructionIds) {
+  xla::HloModuleProto hlo_module_proto;
+  ASSERT_TRUE(tsl::protobuf::TextFormat::ParseFromString(
+      R"pb(
+        name: "some_module"
+        entry_computation_name: "entry_computation"
+        computations {
+          name: "comp2"
+          instructions {
+            name: "arg0.comp2"
+            opcode: "parameter"
+            shape {
+              element_type: S32
+              layout { tail_padding_alignment_in_elements: 1 }
+            }
+            id: 21474836499
+          }
+          instructions {
+            name: "arg1.comp2"
+            opcode: "parameter"
+            shape {
+              element_type: S32
+              layout { tail_padding_alignment_in_elements: 1 }
+            }
+            parameter_number: 1
+            id: 21474836480
+          }
+          instructions {
+            name: "add.comp2"
+            opcode: "tuple"
+            shape {
+              element_type: TUPLE
+              tuple_shapes {
+                element_type: S32
+                layout { tail_padding_alignment_in_elements: 1 }
+              }
+            }
+            id: 21474836488
+            operand_ids: 0
+            operand_ids: 19
+          }
+          instructions {
+            name: "XLA_Retvals.comp2"
+            opcode: "tuple"
+            shape {
+              element_type: TUPLE
+              tuple_shapes {
+                element_type: S32
+                layout { tail_padding_alignment_in_elements: 1 }
+              }
+            }
+            id: 21474836487
+            operand_ids: 0
+          }
+          id: 21
+          root_id: 21474836487
+        }
+        computations {
+          name: "entry_computation"
+          instructions {
+            name: "arg0.1"
+            opcode: "parameter"
+            shape {
+              element_type: S32
+              layout { tail_padding_alignment_in_elements: 1 }
+            }
+            id: 4294967297
+          }
+          instructions {
+            name: "arg1.1"
+            opcode: "parameter"
+            shape {
+              element_type: S32
+              layout { tail_padding_alignment_in_elements: 1 }
+            }
+            parameter_number: 1
+            id: 4294967298
+          }
+          instructions {
+            name: "XLA_Retvals.1"
+            opcode: "tuple"
+            shape {
+              element_type: TUPLE
+              tuple_shapes {
+                element_type: S32
+                layout { tail_padding_alignment_in_elements: 1 }
+              }
+            }
+            id: 4294967303
+            operand_ids: 1
+          }
+          id: 1
+          root_id: 4294967303
+        }
+        host_program_shape {
+          parameters {
+            element_type: S32
+            layout { tail_padding_alignment_in_elements: 1 }
+          }
+          parameters {
+            element_type: S32
+            layout { tail_padding_alignment_in_elements: 1 }
+          }
+          result {
+            element_type: TUPLE
+            tuple_shapes {
+              element_type: S32
+              layout { tail_padding_alignment_in_elements: 1 }
+            }
+          }
+          parameter_names: "arg0"
+          parameter_names: "arg1"
+        }
+        id: 1
+        entry_computation_id: 1
+        schedule {
+          sequences {
+            key: 1
+            value {
+              instruction_ids: 4294967297
+              instruction_ids: 4294967298
+              instruction_ids: 4294967303
+            }
+          }
+          sequences {
+            key: 21
+            value {
+              instruction_ids: 21474836499
+              instruction_ids: 21474836480
+              instruction_ids: 21474836488
+              instruction_ids: 21474836487
+            }
+          }
+        }
+      )pb",
+      &hlo_module_proto));
+
+  TF_ASSERT_OK_AND_ASSIGN(HloModuleConfig config,
+                          xla::HloModule::CreateModuleConfigFromProto(
+                              hlo_module_proto, xla::DebugOptions()));
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<HloModule> module,
+      xla::HloModule::CreateFromProto(hlo_module_proto, config,
+                                      /* prohibit_empty_literal= */ true,
+                                      /* comp_envs= */ nullptr,
+                                      /* preserve_instruction_ids= */ false));
+
+  EXPECT_EQ(module->computation_count(), 2);
+  HloComputation* entry_computation = module->entry_computation();
+  HloComputation* computation_2 = *std::next(module->computations().begin());
+  EXPECT_EQ(entry_computation->instruction_count(), 3);
+
+  EXPECT_EQ(computation_2->instruction_count(), 4);
+  // Check that ids are consecutive
+  EXPECT_THAT(entry_computation->instructions(),
+              ElementsAre(Property(&xla::HloInstruction::local_id, 0),
+                          Property(&xla::HloInstruction::local_id, 1),
+                          Property(&xla::HloInstruction::local_id, 2)));
+  // Check correct operand translation for entry computation
+  EXPECT_EQ(entry_computation->parameter_instruction(0)->name(), "arg0.1");
+  EXPECT_EQ(entry_computation->parameter_instruction(0)->local_id(), 0);
+  EXPECT_THAT(entry_computation->root_instruction()->operands(),
+              ElementsAre(entry_computation->parameter_instruction(0)));
+  // Check correct operand translation for computation 2
+  EXPECT_THAT(computation_2->parameter_instructions(),
+              ElementsAre(Property(&xla::HloInstruction::local_id, 0),
+                          Property(&xla::HloInstruction::local_id, 1)));
+  EXPECT_THAT(computation_2->parameter_instructions(),
+              ElementsAre(Property(&xla::HloInstruction::name, "arg0.comp2"),
+                          Property(&xla::HloInstruction::name, "arg1.comp2")));
+  // Retvals has operand with local id 0, which in the proto was arg1.comp2
+  EXPECT_THAT(computation_2->root_instruction()->operands(),
+              ElementsAre(computation_2->parameter_instruction(1)));
+  // Check operands for add.comp2
+  EXPECT_THAT(computation_2->GetInstructionWithName("add.comp2")->operands(),
+              ElementsAre(computation_2->parameter_instruction(1),
+                          computation_2->parameter_instruction(0)));
+  // Check Hlo Schedule
+  EXPECT_THAT(
+      module->schedule().GetOrCreateSequence(entry_computation).instructions(),
+      ElementsAre(Property(&xla::HloInstruction::local_id, 0),
+                  Property(&xla::HloInstruction::local_id, 1),
+                  Property(&xla::HloInstruction::local_id, 2)));
+  EXPECT_THAT(
+      module->schedule().GetOrCreateSequence(computation_2).instructions(),
+      ElementsAre(Property(&xla::HloInstruction::local_id, 0),
+                  Property(&xla::HloInstruction::local_id, 1),
+                  Property(&xla::HloInstruction::local_id, 2),
+                  Property(&xla::HloInstruction::local_id, 3)));
+}
+
+TEST(HloModuleTest, TestHloModuleToFromProtoInvarianceInComputation) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnUnverifiedModule(R"(
+  HloModule test_module, is_scheduled=true, entry_computation_layout={(f32[]{:T(256)}, f32[100]{0:T(256)}, f32[100]{0:T(256)})->f32[100]{0:T(256)}}
+
+  %fused_computation (param_0.1: f32[100], param_1.3: f32[100], param_2.1: f32[]) -> f32[100] {
+    %param_2.1 = f32[]{:T(256)S(6)} parameter(2)
+    %broadcast.1 = f32[100]{0:T(256)} broadcast(%param_2.1), dimensions={}
+    %param_0.1 = f32[100]{0:T(256)} parameter(0)
+    %param_1.3 = f32[100]{0:T(256)} parameter(1)
+    %multiply.1 = f32[100]{0:T(256)} multiply(%broadcast.1, %param_1.3)
+    %add.1 = f32[100]{0:T(256)} add(%multiply.1, %param_0.1)
+    ROOT %subtract.1 = f32[100]{0:T(256)} subtract(%add.1, %param_0.1)
+  }
+
+  ENTRY %EntryComputation (p: f32[], p1: f32[100], p2: f32[100]) -> f32[100] {
+    %p = f32[]{:T(256)} parameter(0)
+    %copy = f32[]{:T(256)S(6)} copy(%p)
+    %p2 = f32[100]{0:T(256)} parameter(2)
+    %p1 = f32[100]{0:T(256)} parameter(1)
+    ROOT %add_subtract_fusion = f32[100]{0:T(256)} fusion(%p2, %p1, %copy), kind=kLoop, calls=%fused_computation
+                            })"));
+  HloModuleProto module_proto = module->ToProto();
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<HloModule> module_from_proto,
+      HloModule::CreateFromProto(module_proto, module->config(),
+                                 /*buffer_assignment_proto=*/nullptr,
+                                 /*preserve_instruction_ids=*/true));
+
+  EXPECT_THAT(
+      module_proto.computations(),
+      Pointwise(EqualsProto(), module_from_proto->ToProto().computations()));
+}
+
+TEST(HloModuleTest, TestCreateFromProtoUpdatesBufferAssignment) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnUnverifiedModule(R"(
+  HloModule test_module, is_scheduled=true, entry_computation_layout={(f32[]{:T(256)}, f32[100]{0:T(256)}, f32[100]{0:T(256)})->f32[100]{0:T(256)}}
+
+  %fused_computation (param_0.1: f32[100], param_1.3: f32[100], param_2.1: f32[]) -> f32[100] {
+    %param_2.1 = f32[]{:T(256)S(6)} parameter(2)
+    %broadcast.1 = f32[100]{0:T(256)} broadcast(%param_2.1), dimensions={}
+    %param_0.1 = f32[100]{0:T(256)} parameter(0)
+    %param_1.3 = f32[100]{0:T(256)} parameter(1)
+    %multiply.1 = f32[100]{0:T(256)} multiply(%broadcast.1, %param_1.3)
+    %add.1 = f32[100]{0:T(256)} add(%multiply.1, %param_0.1)
+    ROOT %subtract.1 = f32[100]{0:T(256)} subtract(%add.1, %param_0.1)
+  }
+
+  ENTRY %EntryComputation (p: f32[], p1: f32[100], p2: f32[100]) -> f32[100] {
+    %p = f32[]{:T(256)} parameter(0)
+    %copy = f32[]{:T(256)S(6)} copy(%p)
+    %p2 = f32[100]{0:T(256)} parameter(2)
+    %p1 = f32[100]{0:T(256)} parameter(1)
+    ROOT %add_subtract_fusion = f32[100]{0:T(256)} fusion(%p2, %p1, %copy), kind=kLoop, calls=%fused_computation
+                            })"));
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      HloModuleConfig config,
+      HloModule::CreateModuleConfigFromShape(
+          module->entry_computation()->ComputeProgramShape(), DebugOptions()));
+
+  module->set_config(std::move(config));
+
+  // Create and save the HLO proto and the buffer assignment proto for the HLO
+  // module.
+  HloProto opt_hlo_module_proto = MakeHloProto(*module);
+
+  AliasInfo alias_info;
+  BufferValue::SizeFunction buffer_size_func =
+      [](const BufferValue& buffer) -> int64_t {
+    return ShapeUtil::ByteSizeOf(buffer.shape(), sizeof(void*));
+  };
+
+  BufferAssigner::Options opts;
+  opts.allocate_buffers_for_constants = true;
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto buffer_assignment,
+      BufferAssigner::Run(
+          /*module=*/module.get(),
+          /*hlo_ordering=*/
+          std::make_unique<DependencyHloOrdering>(module.get()),
+          /*buffer_size=*/std::move(buffer_size_func),
+          /*alias_info=*/&alias_info,
+          /*color_alignment=*/[](LogicalBuffer::Color) -> int64_t { return 1; },
+          /*options=*/std::move(opts)));
+
+  BufferAssignmentProto buffer_assignment_proto = buffer_assignment->ToProto();
+  *opt_hlo_module_proto.mutable_buffer_assignment() = buffer_assignment_proto;
+
+  // Replace instruction ids with non-consecutive ones
+  absl::flat_hash_map<std::string, std::string> instruction_id_remap_map = {
+      {"4294967298", "4294967323"},
+      {"4294967299", "4294967324"},
+      {"4294967296", "4294967363"},
+      {"4294967297", "4294967423"},
+      {"4294967300", "4294967523"}};
+
+  std::string opt_hlo_module_proto_str;
+  ASSERT_TRUE(tsl::protobuf::TextFormat::PrintToString(
+      opt_hlo_module_proto, &opt_hlo_module_proto_str));
+
+  ASSERT_GT(
+      absl::StrReplaceAll(instruction_id_remap_map, &opt_hlo_module_proto_str),
+      5);
+
+  // Load modified HloProto from string and reassign ids instead of preserving
+  // them.
+  HloProto opt_hlo_module_proto_modified;
+  ASSERT_TRUE(tsl::protobuf::TextFormat::ParseFromString(
+      opt_hlo_module_proto_str, &opt_hlo_module_proto_modified));
+
+  // Recreate the hlo module from the altered protos.
+  TF_ASSERT_OK_AND_ASSIGN(
+      HloModuleConfig module_config_recreated,
+      HloModule::CreateModuleConfigFromProto(
+          opt_hlo_module_proto_modified.hlo_module(), DebugOptions()));
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<HloModule> hlo_module_recreated,
+      HloModule::CreateFromProto(
+          opt_hlo_module_proto_modified.hlo_module(), module_config_recreated,
+          opt_hlo_module_proto_modified.mutable_buffer_assignment(),
+          /*preserve_instruction_ids=*/false));
+
+  buffer_size_func = [](const BufferValue& buffer) -> int64_t {
+    return ShapeUtil::ByteSizeOf(buffer.shape(), sizeof(void*));
+  };
+  // Will fail if buffer assignment is not updated in the HLO proto.
+  TF_EXPECT_OK(BufferAssignment::FromProto(
+      opt_hlo_module_proto_modified.buffer_assignment(),
+      hlo_module_recreated.get(), std::move(buffer_size_func), &alias_info));
+}
+
+TEST(HloModuleTest, OnTheFlyCanonicalizeStackFrameId) {
+  HloModuleProto proto;
+  proto.set_name("test_module");
+  proto.set_entry_computation_id(1);
+
+  auto* entry = proto.add_computations();
+  entry->set_name("main");
+  entry->set_id(1);
+
+  auto* inst1 = entry->add_instructions();
+  inst1->set_name("inst1");
+  inst1->set_opcode("parameter");
+  inst1->set_id(2);
+  *inst1->mutable_shape() = ShapeUtil::MakeShape(F32, {}).ToProto();
+  inst1->set_parameter_number(0);
+  inst1->mutable_metadata()->set_stack_frame_id(1);
+
+  auto* inst2 = entry->add_instructions();
+  inst2->set_name("inst2");
+  inst2->set_opcode("parameter");
+  inst2->set_id(3);
+  *inst2->mutable_shape() = ShapeUtil::MakeShape(F32, {}).ToProto();
+  inst2->set_parameter_number(1);
+  inst2->mutable_metadata()->set_stack_frame_id(3);
+
+  auto* root = entry->add_instructions();
+  root->set_name("root");
+  root->set_opcode("add");
+  root->set_id(4);
+  *root->mutable_shape() = ShapeUtil::MakeShape(F32, {}).ToProto();
+  root->add_operand_ids(2);
+  root->add_operand_ids(3);
+  entry->set_root_id(4);
+
+  // Set host_program_shape
+  auto* shape_proto = proto.mutable_host_program_shape();
+  *shape_proto->add_parameters() = ShapeUtil::MakeShape(F32, {}).ToProto();
+  *shape_proto->add_parameters() = ShapeUtil::MakeShape(F32, {}).ToProto();
+  shape_proto->add_parameter_names("p0");
+  shape_proto->add_parameter_names("p1");
+  *shape_proto->mutable_result() = ShapeUtil::MakeShape(F32, {}).ToProto();
+
+  auto* index = proto.mutable_stack_frame_index();
+  index->add_file_names("file.py");
+  index->add_function_names("func");
+
+  auto* loc = index->add_file_locations();
+  loc->set_file_name_id(1);
+  loc->set_function_name_id(1);
+  loc->set_line(10);
+
+  // Frame 1: referenced by inst1
+  auto* frame1 = index->add_stack_frames();
+  frame1->set_file_location_id(1);
+  frame1->set_parent_frame_id(0);
+
+  // Frame 2: UNREFERENCED
+  auto* frame2 = index->add_stack_frames();
+  frame2->set_file_location_id(1);
+  frame2->set_parent_frame_id(0);
+
+  // Frame 3: referenced by inst2, structurally identical to Frame 1
+  auto* frame3 = index->add_stack_frames();
+  frame3->set_file_location_id(1);
+  frame3->set_parent_frame_id(0);
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      HloModuleConfig config,
+      HloModule::CreateModuleConfigFromProto(proto, DebugOptions()));
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          HloModule::CreateFromProto(proto, config));
+
+  // Only referenced and deduplicated frames should be present.
+  // Frame 1 and 3 are identical, Frame 2 is unreferenced.
+  // So we expect exactly 1 frame in the final DAG.
+  EXPECT_EQ(module->stack_frames().proto().stack_frames_size(), 1);
+
+  // Both instructions should now point to the same canonical frame ID.
+  HloInstruction* i1 =
+      module->entry_computation()->GetInstructionWithName("inst1");
+  HloInstruction* i2 =
+      module->entry_computation()->GetInstructionWithName("inst2");
+  EXPECT_EQ(i1->metadata().stack_frame_id(), 1);
+  EXPECT_EQ(i2->metadata().stack_frame_id(), 1);
+}
+
+TEST(HloModuleTest, DeviceTypeSerialization) {
+  const char* hlo = R"(
+    HloModule test_module
+    ENTRY main {
+      ROOT p0 = f32[128] parameter(0)
+    }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnUnverifiedModule(hlo));
+  module->mutable_config().set_device_type("GPU");
+
+  // Test ToProto
+  HloModuleProto proto = module->ToProto();
+  EXPECT_EQ(proto.device_type(), "GPU");
+
+  // Verify CreateFromProto picks it up
+
+  // Case 1: Config matches but has different device type (should be
+  // overwritten).
+  HloModuleConfig config_tpu = module->config();
+  config_tpu.set_device_type("TPU");
+
+  auto status_or_module_from_proto =
+      HloModule::CreateFromProto(proto, config_tpu);
+  ASSERT_TRUE(status_or_module_from_proto.ok());
+  std::unique_ptr<HloModule> module_from_proto =
+      std::move(status_or_module_from_proto).value();
+
+  EXPECT_EQ(module_from_proto->config().device_type(), "GPU");
+
+  // Case 2: Config is default (should be set)
+  // Create config from proto (which we verified sets device type)
+  // But let's unset it to be sure CreateFromProto does the work.
+  auto status_or_config_default =
+      HloModule::CreateModuleConfigFromProto(proto, DebugOptions());
+  ASSERT_TRUE(status_or_config_default.ok());
+  HloModuleConfig config_default = std::move(status_or_config_default).value();
+  config_default.set_device_type("");
+
+  auto status_or_module_from_proto_2 =
+      HloModule::CreateFromProto(proto, config_default);
+  ASSERT_TRUE(status_or_module_from_proto_2.ok());
+  std::unique_ptr<HloModule> module_from_proto_2 =
+      std::move(status_or_module_from_proto_2).value();
+  EXPECT_EQ(module_from_proto_2->config().device_type(), "GPU");
 }
 
 }  // namespace

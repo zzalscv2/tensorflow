@@ -14,11 +14,11 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/common_runtime/buf_rendezvous.h"
 
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/types.pb.h"
-#include "tensorflow/core/lib/core/notification.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test.h"
@@ -28,9 +28,9 @@ namespace {
 
 class BufRendezvousTest : public ::testing::Test {
  protected:
-  static std::unique_ptr<Device> NewDevice(const string& name,
-                                           const string& type,
-                                           const uint64 incarnation) {
+  static std::unique_ptr<Device> NewDevice(const std::string& name,
+                                           const std::string& type,
+                                           const uint64_t incarnation) {
     class FakeDevice : public Device {
      public:
       explicit FakeDevice(const DeviceAttributes& attrs)
@@ -45,8 +45,8 @@ class BufRendezvousTest : public ::testing::Test {
     return std::make_unique<FakeDevice>(attrs);
   }
 
-  void InitializeDevice(const string& device, const string& type,
-                        const uint64 incarnation) {
+  void InitializeDevice(const std::string& device, const std::string& type,
+                        const uint64_t incarnation) {
     std::vector<std::unique_ptr<Device>> devices;
     devices.push_back(NewDevice(device, type, incarnation));
     dev_mgr_ = std::make_unique<StaticDeviceMgr>(std::move(devices));
@@ -69,22 +69,23 @@ class BufRendezvousTest : public ::testing::Test {
   std::unique_ptr<DeviceMgr> dev_mgr_;
   std::unique_ptr<BufRendezvous> br_;
   CancellationManager cm_;
-  static const string* const kDefaultKey;
-  static const string* const kDefaultDeviceName;
-  static const uint64 kDefaultIncarnation;
+  static const std::string* const kDefaultKey;
+  static const std::string* const kDefaultDeviceName;
+  static const uint64_t kDefaultIncarnation;
 };
 
-const string* const BufRendezvousTest::kDefaultKey = new string("key0");
-const string* const BufRendezvousTest::kDefaultDeviceName =
-    new string("/device:CPU:0");
-const uint64 BufRendezvousTest::kDefaultIncarnation = 12345;
+const std::string* const BufRendezvousTest::kDefaultKey =
+    new std::string("key0");
+const std::string* const BufRendezvousTest::kDefaultDeviceName =
+    new std::string("/device:CPU:0");
+const uint64_t BufRendezvousTest::kDefaultIncarnation = 12345;
 
 TEST_F(BufRendezvousTest, CorrectUseProducerFirst) {
   absl::Status prod_status;
   absl::Status cons_status;
   bool prod_callback_called = false;
   bool cons_callback_called = false;
-  Notification note;
+  absl::Notification note;
   br_->ProvideBuf(
       *kDefaultKey, default_device_, fake_device_context_, &a_, aa_,
       [&note, &prod_status, &prod_callback_called](const absl::Status& s) {
@@ -119,7 +120,7 @@ TEST_F(BufRendezvousTest, CorrectUseConsumerFirst) {
   absl::Status cons_status;
   bool prod_callback_called = false;
   bool cons_callback_called = false;
-  Notification note;
+  absl::Notification note;
   br_->ConsumeBuf(
       *kDefaultKey, *kDefaultDeviceName, kDefaultIncarnation,
       [this, &cons_status, &cons_callback_called](const absl::Status& s,
@@ -158,7 +159,7 @@ TEST_F(BufRendezvousTest, ErrorDuplicatePut) {
       },
       &cm_);
   absl::Status bad_status;
-  Notification note;
+  absl::Notification note;
   br_->ProvideBuf(
       *kDefaultKey, default_device_, fake_device_context_, &a_, aa_,
       [&bad_status, &note](const absl::Status& s) {
@@ -193,8 +194,8 @@ TEST_F(BufRendezvousTest, ErrorDeleteNonEmpty) {
 TEST_F(BufRendezvousTest, AbortNonEmpty) {
   absl::Status cons_status;
   absl::Status prod_status;
-  Notification prod_note;
-  Notification cons_note;
+  absl::Notification prod_note;
+  absl::Notification cons_note;
   br_->ConsumeBuf(
       *kDefaultKey, *kDefaultDeviceName, kDefaultIncarnation,
       [&cons_note, &cons_status](const absl::Status& s,
@@ -227,8 +228,8 @@ TEST_F(BufRendezvousTest, UseAfterAbort) {
   br_->StartAbort(errors::Internal("Falling sky detected"));
   absl::Status cons_status;
   absl::Status prod_status;
-  Notification prod_note;
-  Notification cons_note;
+  absl::Notification prod_note;
+  absl::Notification cons_note;
   br_->ConsumeBuf(
       *kDefaultKey, *kDefaultDeviceName, kDefaultIncarnation,
       [&cons_note, &cons_status](const absl::Status& s,
@@ -247,18 +248,20 @@ TEST_F(BufRendezvousTest, UseAfterAbort) {
   prod_note.WaitForNotification();
   cons_note.WaitForNotification();
   EXPECT_FALSE(prod_status.ok());
-  EXPECT_NE(prod_status.message().find("Falling sky detected"), string::npos);
+  EXPECT_NE(prod_status.message().find("Falling sky detected"),
+            std::string::npos);
   EXPECT_FALSE(cons_status.ok());
-  EXPECT_NE(cons_status.message().find("Falling sky detected"), string::npos);
+  EXPECT_NE(cons_status.message().find("Falling sky detected"),
+            std::string::npos);
 }
 
 TEST_F(BufRendezvousTest, DeviceIncarnationMismatch) {
   absl::Status cons_status;
-  Notification note;
+  absl::Notification note;
   br_->ProvideBuf(
       *kDefaultKey, default_device_, fake_device_context_, &a_, aa_,
       [](const absl::Status&) {}, /*cancellation_manager=*/nullptr);
-  const uint64 incorrect_incarnation = 23456;
+  const uint64_t incorrect_incarnation = 23456;
   br_->ConsumeBuf(
       *kDefaultKey, *kDefaultDeviceName, incorrect_incarnation,
       [&note, &cons_status](const absl::Status& s, BufRendezvous::Hook* h) {
@@ -272,7 +275,7 @@ TEST_F(BufRendezvousTest, DeviceIncarnationMismatch) {
 
 TEST_F(BufRendezvousTest, ProvideThenCancel) {
   absl::Status status;
-  Notification note;
+  absl::Notification note;
   br_->ProvideBuf(
       *kDefaultKey, default_device_, fake_device_context_, &a_, aa_,
       [&status, &note](const absl::Status& s) {
@@ -286,12 +289,12 @@ TEST_F(BufRendezvousTest, ProvideThenCancel) {
   EXPECT_NE(
       status.message().find(absl::StrCat(
           "Operation was cancelled for BufRendezvous key ", *kDefaultKey)),
-      string::npos);
+      std::string::npos);
 }
 
 TEST_F(BufRendezvousTest, CancelThenProvide) {
   absl::Status status;
-  Notification note;
+  absl::Notification note;
   cm_.StartCancel();
   br_->ProvideBuf(
       *kDefaultKey, default_device_, fake_device_context_, &a_, aa_,
@@ -305,12 +308,12 @@ TEST_F(BufRendezvousTest, CancelThenProvide) {
   EXPECT_NE(
       status.message().find(absl::StrCat(
           "Operation was cancelled for BufRendezvous key ", *kDefaultKey)),
-      string::npos);
+      std::string::npos);
 }
 
 TEST_F(BufRendezvousTest, ConsumeThenCancel) {
   absl::Status status;
-  Notification note;
+  absl::Notification note;
   br_->ConsumeBuf(
       *kDefaultKey, *kDefaultDeviceName, kDefaultIncarnation,
       [&status, &note](const absl::Status& s, BufRendezvous::Hook* h) {
@@ -324,12 +327,12 @@ TEST_F(BufRendezvousTest, ConsumeThenCancel) {
   EXPECT_NE(
       status.message().find(absl::StrCat(
           "Operation was cancelled for BufRendezvous key ", *kDefaultKey)),
-      string::npos);
+      std::string::npos);
 }
 
 TEST_F(BufRendezvousTest, CancelThenConsume) {
   absl::Status status;
-  Notification note;
+  absl::Notification note;
   cm_.StartCancel();
   br_->ConsumeBuf(
       *kDefaultKey, *kDefaultDeviceName, kDefaultIncarnation,
@@ -343,7 +346,7 @@ TEST_F(BufRendezvousTest, CancelThenConsume) {
   EXPECT_NE(
       status.message().find(absl::StrCat(
           "Operation was cancelled for BufRendezvous key ", *kDefaultKey)),
-      string::npos);
+      std::string::npos);
 }
 
 TEST_F(BufRendezvousTest, ProvideConsumeThenCancel) {
@@ -351,7 +354,7 @@ TEST_F(BufRendezvousTest, ProvideConsumeThenCancel) {
   absl::Status cons_status;
   bool prod_callback_called = false;
   bool cons_callback_called = false;
-  Notification note;
+  absl::Notification note;
   br_->ProvideBuf(
       *kDefaultKey, default_device_, fake_device_context_, &a_, aa_,
       [&note, &prod_status, &prod_callback_called](const absl::Status& s) {

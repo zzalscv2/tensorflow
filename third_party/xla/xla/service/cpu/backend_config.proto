@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package xla.cpu;
 
+import "xla/backends/cpu/xnn_fusion_options.proto";
+import "xla/backends/cpu/ynn_fusion_options.proto";
 import "xla/service/cpu/onednn_config.proto";
 
 // Backend config for a general custom call instruction, e.g. XLA FFI.
@@ -17,6 +19,18 @@ message CustomCallBackendConfig {
 
 message FusionBackendConfig {
   string kind = 1;
+  oneof custom_fusion_config_oneof {
+    // TODO: b/467367981, this is deprecated and should be removed.
+    XnnFusionOptions xnn_fusion_options = 2;
+    YnnFusionOptions ynn_fusion_options = 3;
+  }
+}
+
+message LlvmKernelOptions {
+  bool slp_vectorizer_disabled = 1;
+  bool disable_loop_unrolling = 2;
+  bool optimize_for_size = 3;
+  bool disable_platform_dependent_math = 4;
 }
 
 // Backend config for XLA:CPU.
@@ -38,5 +52,7 @@ message BackendConfig {
     CustomCallBackendConfig custom_call_config = 6;
     // Configuration for custom fusions.
     FusionBackendConfig fusion_config = 7;
+    // LlvmKernelOptions config options.
+    LlvmKernelOptions llvm_kernel_options = 8;
   }
 }

@@ -22,6 +22,8 @@ limitations under the License.
 
 #include "absl/status/statusor.h"
 #include "xla/python/ifrt/dtype.pb.h"
+#include "xla/python/ifrt/serdes_default_version_accessor.h"
+#include "xla/python/ifrt/serdes_version.h"
 
 namespace xla {
 namespace ifrt {
@@ -45,6 +47,7 @@ class DType {
     kPred = 1,
 
     // Signed integral values of fixed width.
+    kS1 = 30,
     kS2 = 26,
     kS4 = 21,
     kS8 = 2,
@@ -53,6 +56,7 @@ class DType {
     kS64 = 5,
 
     // Unsigned integral values of fixed width.
+    kU1 = 31,
     kU2 = 27,
     kU4 = 22,
     kU8 = 6,
@@ -131,11 +135,18 @@ class DType {
   // Constructs `DType` from `DTypeProto`.
   static absl::StatusOr<DType> FromProto(const DTypeProto& proto);
 
-  // Returns a `DTypeProto` representation.
-  DTypeProto ToProto() const;
+  // Converts the dtype to a protobuf.
+  void ToProto(
+      DTypeProto& dtype_proto,
+      SerDesVersion version = SerDesDefaultVersionAccessor::Get()) const;
 
-  // TODO(hyeontaek): Remove this method in favor of AbslStringify.
-  std::string DebugString() const;
+  // Returns a `DTypeProto` representation.
+  DTypeProto ToProto(
+      SerDesVersion version = SerDesDefaultVersionAccessor::Get()) const {
+    DTypeProto proto;
+    ToProto(proto, version);
+    return proto;
+  }
 
   template <typename Sink>
   friend void AbslStringify(Sink& sink, const DType& dtype) {
@@ -143,6 +154,8 @@ class DType {
   }
 
  private:
+  std::string DebugString() const;
+
   Kind kind_;
 };
 

@@ -28,6 +28,7 @@ limitations under the License.
 #include "absl/base/call_once.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_format.h"
+#include "absl/synchronization/notification.h"
 #include "xla/tsl/platform/logging.h"
 #include "tensorflow/core/common_runtime/function.h"
 #include "tensorflow/core/common_runtime/input_colocation_exemption_registry.h"
@@ -135,7 +136,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
   ~Dataset() override { input_->Unref(); }
 
   std::unique_ptr<IteratorBase> MakeIteratorInternal(
-      const string& prefix) const override {
+      const std::string& prefix) const override {
     name_utils::IteratorPrefixParams params;
     params.op_version = op_version_;
     return std::make_unique<Iterator>(Iterator::Params{
@@ -148,7 +149,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
     return output_shapes_;
   }
 
-  string DebugString() const override {
+  std::string DebugString() const override {
     name_utils::DatasetDebugStringParams params;
     params.op_version = op_version_;
     return name_utils::DatasetDebugString(ParallelMapDatasetOp::kDatasetType,
@@ -163,7 +164,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
     }
   }
 
-  absl::Status Get(OpKernelContext* ctx, int64 index,
+  absl::Status Get(OpKernelContext* ctx, int64_t index,
                    std::vector<Tensor>* out_tensors) const override {
     TF_RETURN_IF_ERROR(CheckRandomAccessCompatible(index));
     absl::call_once(instantiated_captured_func_once_, [this, ctx] {
@@ -208,7 +209,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
     // Input: num_parallel_calls
     Node* num_parallel_calls = nullptr;
     if (op_version_ == 1) {
-      TF_RETURN_IF_ERROR(b->AddScalar(static_cast<int32>(num_parallel_calls_),
+      TF_RETURN_IF_ERROR(b->AddScalar(static_cast<int32_t>(num_parallel_calls_),
                                       &num_parallel_calls));
     } else {
       TF_RETURN_IF_ERROR(
@@ -491,10 +492,10 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
           "parallelism",
           parallelism == -1
               ? kTraceInfoUnavailable
-              : strings::Printf("%lld", static_cast<long long>(parallelism))));
+              : absl::StrFormat("%lld", static_cast<long long>(parallelism))));
       result.push_back(std::make_pair(
           "interleave_depth",
-          strings::Printf("%lld", static_cast<long long>(interleave_depth_))));
+          absl::StrFormat("%lld", static_cast<long long>(interleave_depth_))));
       return result;
     }
 
@@ -504,7 +505,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
           : uid(tensorflow::EnvTime::NowNanos()),
             checkpoint(MemoryCheckpoint{ctx->id_registry()}) {}
 
-      Notification notification;
+      absl::Notification notification;
       absl::Status status;
       std::vector<Tensor> return_values;
       bool end_of_input = false;
@@ -818,7 +819,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
     // root node to this node (not including this node) in the input pipeline
     // tree. We record the interleave depth so that it can be included in the
     // trace metadata.
-    int64 interleave_depth_ = -1;
+    int64_t interleave_depth_ = -1;
   };
 
   const DatasetBase* const input_;

@@ -36,7 +36,7 @@ limitations under the License.
 #include "mlir/Support/LogicalResult.h"  // from @llvm-project
 #include "mlir/Support/TypeID.h"  // from @llvm-project
 #include "mlir/Transforms/DialectConversion.h"  // from @llvm-project
-#include "stablehlo/api/PortableApi.h"  // from @stablehlo
+#include "shardy/dialect/sdy/ir/register.h"  // from @shardy
 #include "stablehlo/dialect/Serialization.h"  // from @stablehlo
 #include "stablehlo/dialect/StablehloOps.h"  // from @stablehlo  // IWYU pragma: keep
 #include "tensorflow/compiler/mlir/quantization/stablehlo/passes/passes.h"  // IWYU pragma: keep
@@ -55,6 +55,7 @@ absl::StatusOr<std::string> ConvertSerializedStableHloModuleToBfloat16(
   }
 
   MLIRContext context;
+  mlir::sdy::loadAllRequiredDialects(&context);
   OwningOpRef<ModuleOp> stablehlo_module_op =
       mlir::stablehlo::deserializePortableArtifact(serialized_stablehlo_module,
                                                    &context);
@@ -78,7 +79,8 @@ absl::StatusOr<std::string> ConvertSerializedStableHloModuleToBfloat16(
   std::string bytecode;
   llvm::raw_string_ostream os(bytecode);
   if (failed(mlir::stablehlo::serializePortableArtifact(
-          stablehlo_module_op.get(), version.value().toString(), os))) {
+          stablehlo_module_op.get(), version.value().toString(), os,
+          /*allowOtherDialects=*/true))) {
     return absl::InternalError("Failed to serialize StableHLO module.");
   }
   return bytecode;
@@ -120,19 +122,20 @@ void ConvertXlaCallModuleOpToBfloat16Pass::runOnOperation() {
     // Convert the `tf.XlaCallModuleOp` to bfloat16 and add casts around it.
     builder.setInsertionPoint(op);
     for (auto& op_operand : op->getOpOperands()) {
-      if (IsLargeFloatType(op_operand.get().getType())) {
-        op_operand.set(builder.create<TF::CastOp>(
-            op->getLoc(), ToBfloat16Type(op_operand.get().getType()),
+      if (quant::stablehlo::IsLargeFloatType(op_operand.get().getType())) {
+        op_operand.set(TF::CastOp::create(
+            builder, op->getLoc(),
+            quant::stablehlo::ToBfloat16Type(op_operand.get().getType()),
             op_operand.get()));
       }
     }
     builder.setInsertionPointAfter(op);
     for (auto op_result : op->getOpResults()) {
-      if (IsLargeFloatType(op_result.getType())) {
+      if (quant::stablehlo::IsLargeFloatType(op_result.getType())) {
         const Type original_type = op_result.getType();
-        op_result.setType(ToBfloat16Type(original_type));
+        op_result.setType(quant::stablehlo::ToBfloat16Type(original_type));
         const Value cast =
-            builder.create<TF::CastOp>(op->getLoc(), original_type, op_result);
+            TF::CastOp::create(builder, op->getLoc(), original_type, op_result);
         op_result.replaceAllUsesExcept(cast, cast.getDefiningOp());
       }
     }

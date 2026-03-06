@@ -15,6 +15,7 @@ limitations under the License.
 #include "xla/hlo/transforms/collectives/while_loop_all_reduce_code_motion_setup.h"
 
 #include <cstdint>
+#include <optional>
 
 #include "absl/log/check.h"
 #include "absl/log/log.h"
@@ -23,6 +24,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/service/collective_ops_utils.h"
 #include "xla/service/hlo_creation_utils.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
@@ -158,52 +160,71 @@ absl::StatusOr<HloInstruction*> ReorderReduceTranspose::ExpandInstruction(
 
 bool ReorderConvertReduceAdd::InstructionMatchesPattern(
     HloInstruction* instruction) {
-  // Instruction must be in while loop body.
+  // Check if the instruction is in while loop body.
   if (!instruction->parent()->GetUniqueCaller(HloOpcode::kWhile)) {
     return false;
   }
-  // Check if the instruction is an add operation
+  // Check if the instruction is an add operation.
   if (instruction->opcode() != HloOpcode::kAdd) {
     return false;
   }
 
   // Check if one of the operands is a convert operation
-  HloInstruction* convert_operand = nullptr;
-  HloInstruction* get_tuple_element_operand = nullptr;
-  for (HloInstruction* operand : instruction->operands()) {
+  const HloInstruction* convert_after_reduce = nullptr;
+  const HloInstruction* gte = nullptr;
+  for (const HloInstruction* operand : instruction->operands()) {
     if (operand->opcode() == HloOpcode::kConvert) {
-      convert_operand = operand;
+      convert_after_reduce = operand;
     } else if (operand->opcode() == HloOpcode::kGetTupleElement) {
-      get_tuple_element_operand = operand;
+      gte = operand;
     }
   }
-  if (convert_operand == nullptr || get_tuple_element_operand == nullptr) {
+  if (convert_after_reduce == nullptr || gte == nullptr) {
     return false;
   }
 
   // Check if the operand of the convert operation is a reduce-scatter or
-  // all-reduce
-  HloInstruction* reduce_op_operand = convert_operand->mutable_operand(0);
-  if (reduce_op_operand->opcode() != HloOpcode::kReduceScatter &&
-      reduce_op_operand->opcode() != HloOpcode::kAllReduce) {
+  // all-reduce.
+  const HloInstruction* reduce = convert_after_reduce->operand(0);
+  if (reduce->opcode() != HloOpcode::kReduceScatter &&
+      reduce->opcode() != HloOpcode::kAllReduce) {
     return false;
   }
-  // Check if the reduce_op_operand is a reduce-scatter and
-  // enable_reduce_scatter_ is true.
+  if (!MatchReductionComputation(reduce->to_apply())) {
+    return false;
+  }
+  // Check if the reduce op is a reduce-scatter and enable_reduce_scatter_ is
+  // true.
   if (!enable_reduce_scatter_ &&
-      reduce_op_operand->opcode() == HloOpcode::kReduceScatter) {
+      reduce->opcode() == HloOpcode::kReduceScatter) {
     return false;
   }
 
   // Check if the get-tuple-element instruction is operating on a parameter
-  // tuple
-  HloInstruction* tuple_operand = get_tuple_element_operand->mutable_operand(0);
-  if (tuple_operand->opcode() != HloOpcode::kParameter) {
+  // tuple.
+  if (gte->operand(0)->opcode() != HloOpcode::kParameter) {
     return false;
   }
 
+  // Check that it's not a convert, reduce and convert back pattern.
+  if (reduce->operand_count() == 1) {
+    const HloInstruction* convert_before_reduce = nullptr;
+    const HloInstruction* reduce_operand = reduce->operand(0);
+    if (reduce_operand->opcode() == HloOpcode::kConvert) {
+      convert_before_reduce = reduce_operand;
+    } else if (reduce_operand->opcode() == HloOpcode::kReshape &&
+               reduce_operand->operand(0)->opcode() == HloOpcode::kConvert) {
+      convert_before_reduce = reduce_operand->operand(0);
+    }
+    if (convert_before_reduce != nullptr &&
+        convert_before_reduce->operand(0)->shape().element_type() ==
+            convert_after_reduce->shape().element_type()) {
+      return false;
+    }
+  }
+
   VLOG(2) << "Found pattern: reduce-scatter/all-reduce, convert, add, with "
-             "get-tuple-element on parameter tuple";
+             "get-tuple-element on parameter tuple.";
   return true;
 }
 
@@ -243,6 +264,12 @@ absl::StatusOr<HloInstruction*> ReorderConvertReduceAdd::ExpandInstruction(
 
   // Create a new reduce-scatter/all-reduce instruction with the converted data
   // type
+  std::optional<ReductionKind> reduction_kind =
+      MatchReductionComputation(reduce_op->to_apply());
+  CHECK(reduction_kind);
+  HloComputation* new_reduction =
+      instruction->GetModule()->AddEmbeddedComputation(
+          MakeReductionComputation(*reduction_kind, new_data_type));
   HloInstruction* new_reduce_op;
   if (reduce_op->opcode() == HloOpcode::kReduceScatter) {
     auto* reduce_scatter = Cast<HloReduceScatterInstruction>(reduce_op);
@@ -251,8 +278,7 @@ absl::StatusOr<HloInstruction*> ReorderConvertReduceAdd::ExpandInstruction(
 
     new_reduce_op = instruction->parent()->AddInstruction(
         HloInstruction::CreateReduceScatter(
-            new_reduce_scatter_shape, {new_convert},
-            reduce_scatter->called_computations()[0],
+            new_reduce_scatter_shape, {new_convert}, new_reduction,
             reduce_scatter->replica_groups(),
             reduce_scatter->constrain_layout(), reduce_scatter->channel_id(),
             reduce_scatter->use_global_device_ids(),
@@ -266,10 +292,9 @@ absl::StatusOr<HloInstruction*> ReorderConvertReduceAdd::ExpandInstruction(
 
     new_reduce_op =
         instruction->parent()->AddInstruction(HloInstruction::CreateAllReduce(
-            new_all_reduce_shape, {new_convert},
-            all_reduce->called_computations()[0], all_reduce->replica_groups(),
-            all_reduce->constrain_layout(), all_reduce->channel_id(),
-            all_reduce->use_global_device_ids()));
+            new_all_reduce_shape, {new_convert}, new_reduction,
+            all_reduce->replica_groups(), all_reduce->constrain_layout(),
+            all_reduce->channel_id(), all_reduce->use_global_device_ids()));
     VLOG(2) << "Created new_reduce_op (AllReduce): "
             << new_reduce_op->ToString();
   }

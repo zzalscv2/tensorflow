@@ -2,7 +2,7 @@
 # Tensorflow default op definitions.
 
 load(
-    "@local_xla//xla/tsl/mkl:build_defs.bzl",
+    "@xla//xla/tsl/mkl:build_defs.bzl",
     "if_mkl",
 )
 load(
@@ -550,5 +550,6 @@ tf_cc_test(
         "//tensorflow/core:test_main",
         "//tensorflow/core:testlib",
         "//tensorflow/core/common_runtime:type_inference",
+        "@com_google_googletest//:gtest",
     ],
 )

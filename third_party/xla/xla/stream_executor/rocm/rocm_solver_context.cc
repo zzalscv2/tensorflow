@@ -26,8 +26,10 @@ limitations under the License.
 #include "rocm/include/hiprand/hiprand.h"
 #include "xla/primitive_util.h"
 #include "xla/stream_executor/blas.h"
-#include "xla/stream_executor/device_memory.h"
+#include "xla/stream_executor/device_address.h"
 #include "xla/stream_executor/gpu_solver_context.h"
+#include "xla/stream_executor/platform/platform_object_registry.h"
+#include "xla/stream_executor/rocm/rocm_platform_id.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/logging.h"
@@ -92,7 +94,7 @@ struct GpuComplexT<std::complex<double>*> {
 #endif  // TF_ROCM_VERSION >= 40500
 
 template <typename T>
-inline typename GpuComplexT<T>::type* ToDevicePointer(DeviceMemory<T> p) {
+inline typename GpuComplexT<T>::type* ToDevicePointer(DeviceAddress<T> p) {
   return static_cast<typename GpuComplexT<T>::type*>(p.opaque());
 }
 
@@ -307,8 +309,8 @@ absl::StatusOr<int64_t> RocmSolverContext::PotrfBufferSize(
 }
 
 absl::Status RocmSolverContext::PotrfBatched(blas::UpperLower uplo, int n,
-                                             DeviceMemory<float*> as, int lda,
-                                             DeviceMemory<int> lapack_info,
+                                             DeviceAddress<float*> as, int lda,
+                                             DeviceAddress<int> lapack_info,
                                              int batch_size) {
   return ConvertStatus(GpuSolverSpotrfBatched(
       handle_, GpuBlasUpperLower(uplo), n, ToDevicePointer(as), lda,
@@ -319,8 +321,8 @@ absl::Status RocmSolverContext::PotrfBatched(blas::UpperLower uplo, int n,
 }
 
 absl::Status RocmSolverContext::PotrfBatched(blas::UpperLower uplo, int n,
-                                             DeviceMemory<double*> as, int lda,
-                                             DeviceMemory<int> lapack_info,
+                                             DeviceAddress<double*> as, int lda,
+                                             DeviceAddress<int> lapack_info,
                                              int batch_size) {
   return ConvertStatus(GpuSolverDpotrfBatched(
       handle_, GpuBlasUpperLower(uplo), n, ToDevicePointer(as), lda,
@@ -331,8 +333,8 @@ absl::Status RocmSolverContext::PotrfBatched(blas::UpperLower uplo, int n,
 }
 
 absl::Status RocmSolverContext::PotrfBatched(
-    blas::UpperLower uplo, int n, DeviceMemory<std::complex<float>*> as,
-    int lda, DeviceMemory<int> lapack_info, int batch_size) {
+    blas::UpperLower uplo, int n, DeviceAddress<std::complex<float>*> as,
+    int lda, DeviceAddress<int> lapack_info, int batch_size) {
   return ConvertStatus(GpuSolverCpotrfBatched(
       handle_, GpuBlasUpperLower(uplo), n, ToDevicePointer(as), lda,
 #if TENSORFLOW_USE_HIPSOLVER
@@ -342,8 +344,8 @@ absl::Status RocmSolverContext::PotrfBatched(
 }
 
 absl::Status RocmSolverContext::PotrfBatched(
-    blas::UpperLower uplo, int n, DeviceMemory<std::complex<double>*> as,
-    int lda, DeviceMemory<int> lapack_info, int batch_size) {
+    blas::UpperLower uplo, int n, DeviceAddress<std::complex<double>*> as,
+    int lda, DeviceAddress<int> lapack_info, int batch_size) {
   return ConvertStatus(GpuSolverZpotrfBatched(
       handle_, GpuBlasUpperLower(uplo), n, ToDevicePointer(as), lda,
 #if TENSORFLOW_USE_HIPSOLVER
@@ -354,40 +356,45 @@ absl::Status RocmSolverContext::PotrfBatched(
 
 #if TENSORFLOW_USE_HIPSOLVER
 absl::Status RocmSolverContext::Potrf(blas::UpperLower uplo, int n,
-                                      DeviceMemory<double> a, int lda,
-                                      DeviceMemory<int> lapack_info,
-                                      DeviceMemory<double> workspace) {
+                                      DeviceAddress<double> a, int lda,
+                                      DeviceAddress<int> lapack_info,
+                                      DeviceAddress<double> workspace) {
   return ConvertStatus(GpuSolverDpotrf(handle_, GpuBlasUpperLower(uplo), n,
                                        ToDevicePointer(a), lda, nullptr, 0,
                                        ToDevicePointer(lapack_info)));
 }
 
 absl::Status RocmSolverContext::Potrf(blas::UpperLower uplo, int n,
-                                      DeviceMemory<float> a, int lda,
-                                      DeviceMemory<int> lapack_info,
-                                      DeviceMemory<float> workspace) {
+                                      DeviceAddress<float> a, int lda,
+                                      DeviceAddress<int> lapack_info,
+                                      DeviceAddress<float> workspace) {
   return ConvertStatus(GpuSolverSpotrf(handle_, GpuBlasUpperLower(uplo), n,
                                        ToDevicePointer(a), lda, nullptr, 0,
                                        ToDevicePointer(lapack_info)));
 }
 
 absl::Status RocmSolverContext::Potrf(
-    blas::UpperLower uplo, int n, DeviceMemory<std::complex<float>> a, int lda,
-    DeviceMemory<int> lapack_info,
-    DeviceMemory<std::complex<float>> workspace) {
+    blas::UpperLower uplo, int n, DeviceAddress<std::complex<float>> a, int lda,
+    DeviceAddress<int> lapack_info,
+    DeviceAddress<std::complex<float>> workspace) {
   return ConvertStatus(GpuSolverCpotrf(handle_, GpuBlasUpperLower(uplo), n,
                                        ToDevicePointer(a), lda, nullptr, 0,
                                        ToDevicePointer(lapack_info)));
 }
 
 absl::Status RocmSolverContext::Potrf(
-    blas::UpperLower uplo, int n, DeviceMemory<std::complex<double>> a, int lda,
-    DeviceMemory<int> lapack_info,
-    DeviceMemory<std::complex<double>> workspace) {
+    blas::UpperLower uplo, int n, DeviceAddress<std::complex<double>> a,
+    int lda, DeviceAddress<int> lapack_info,
+    DeviceAddress<std::complex<double>> workspace) {
   return ConvertStatus(GpuSolverZpotrf(handle_, GpuBlasUpperLower(uplo), n,
                                        ToDevicePointer(a), lda, nullptr, 0,
                                        ToDevicePointer(lapack_info)));
 }
 #endif  // TENSORFLOW_USE_HIPSOLVER
+
+STREAM_EXECUTOR_REGISTER_OBJECT_STATICALLY(RocmSolverContextFactory,
+                                           GpuSolverContextFactory,
+                                           rocm::kROCmPlatformId,
+                                           RocmSolverContext::Create);
 
 }  // namespace stream_executor

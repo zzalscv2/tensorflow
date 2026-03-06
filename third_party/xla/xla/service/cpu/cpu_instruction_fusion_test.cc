@@ -15,7 +15,6 @@ limitations under the License.
 
 #include "xla/service/cpu/cpu_instruction_fusion.h"
 
-#include <algorithm>
 #include <memory>
 #include <set>
 #include <string>
@@ -23,26 +22,33 @@ limitations under the License.
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/algorithm/container.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "xla/hlo/analysis/alias_info.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
 #include "xla/hlo/utils/hlo_matchers.h"
 #include "xla/literal_util.h"
+#include "xla/service/cpu/cpu_options.h"
 #include "xla/service/transpose_folding.h"
 #include "xla/shape.h"
 #include "xla/tests/test_utils.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/statusor.h"
 
 namespace op = xla::testing::opcode_matchers;
 
 namespace xla::cpu {
 namespace {
 
-using InstructionFusionTest = HloHardwareIndependentTestBase;
+class InstructionFusionTest : public HloHardwareIndependentTestBase {
+ protected:
+  AliasInfo alias_info_;
+};
 
 std::unique_ptr<HloInstruction> MakeDot(const Shape& shape, HloInstruction* lhs,
                                         HloInstruction* rhs) {
@@ -72,7 +78,7 @@ TEST_F(InstructionFusionTest, DotOperationFusion_Basic_0) {
   auto module = CreateNewVerifiedModule();
   auto computation = module->AddEntryComputation(builder.Build());
   EXPECT_EQ(dot, computation->root_instruction());
-  EXPECT_TRUE(CpuInstructionFusion().Run(module.get()).value());
+  EXPECT_TRUE(CpuInstructionFusion(&alias_info_).Run(module.get()).value());
   EXPECT_THAT(computation->root_instruction(), op::Fusion());
 }
 
@@ -91,7 +97,7 @@ TEST_F(InstructionFusionTest, DotOperationFusion_Basic_1) {
   auto module = CreateNewVerifiedModule();
   auto computation = module->AddEntryComputation(builder.Build());
   EXPECT_EQ(dot, computation->root_instruction());
-  EXPECT_TRUE(CpuInstructionFusion().Run(module.get()).value());
+  EXPECT_TRUE(CpuInstructionFusion(&alias_info_).Run(module.get()).value());
   EXPECT_THAT(computation->root_instruction(), op::Fusion());
 }
 
@@ -112,7 +118,7 @@ TEST_F(InstructionFusionTest, DotOperationFusion_Bitcast) {
   auto module = CreateNewVerifiedModule();
   auto computation = module->AddEntryComputation(builder.Build());
   EXPECT_EQ(dot, computation->root_instruction());
-  EXPECT_TRUE(CpuInstructionFusion().Run(module.get()).value());
+  EXPECT_TRUE(CpuInstructionFusion(&alias_info_).Run(module.get()).value());
   EXPECT_THAT(computation->root_instruction(), op::Fusion());
 }
 
@@ -134,7 +140,7 @@ TEST_F(InstructionFusionTest, DotOperationFusion_Reshape) {
   auto module = CreateNewVerifiedModule();
   auto computation = module->AddEntryComputation(builder.Build());
   EXPECT_EQ(dot, computation->root_instruction());
-  EXPECT_TRUE(CpuInstructionFusion().Run(module.get()).value());
+  EXPECT_TRUE(CpuInstructionFusion(&alias_info_).Run(module.get()).value());
   EXPECT_THAT(computation->root_instruction(), op::Fusion());
 }
 
@@ -153,7 +159,7 @@ TEST_F(InstructionFusionTest, DotOperationFusion_TooLarge) {
   auto module = CreateNewVerifiedModule();
   auto computation = module->AddEntryComputation(builder.Build());
   EXPECT_EQ(dot, computation->root_instruction());
-  EXPECT_FALSE(CpuInstructionFusion().Run(module.get()).value());
+  EXPECT_FALSE(CpuInstructionFusion(&alias_info_).Run(module.get()).value());
   EXPECT_EQ(dot, computation->root_instruction());
 }
 
@@ -172,7 +178,7 @@ TEST_F(InstructionFusionTest, DotOperationFusion_ElementReuse) {
   auto module = CreateNewVerifiedModule();
   auto computation = module->AddEntryComputation(builder.Build());
   EXPECT_EQ(dot, computation->root_instruction());
-  EXPECT_FALSE(CpuInstructionFusion().Run(module.get()).value());
+  EXPECT_FALSE(CpuInstructionFusion(&alias_info_).Run(module.get()).value());
   EXPECT_EQ(dot, computation->root_instruction());
 }
 
@@ -251,6 +257,16 @@ ENTRY DotOperationFusion_TransposeFusion {
 
 class OpcodeFusionTest : public InstructionFusionTest {
  protected:
+  bool RunFusion(HloModule* module) {
+    absl::StatusOr<bool> did_fusion =
+        CpuInstructionFusion(&alias_info_).Run(module);
+    EXPECT_TRUE(did_fusion.ok());
+    if (!did_fusion.ok()) {
+      return false;
+    }
+    return *did_fusion;
+  }
+
   // Runs CPU instruction fusion on the given module, and tests that the result
   // contains a fused op at the root with exactly the given multiset of opcodes.
   void RunFusionAndCheckOpcodesWereFused(
@@ -258,18 +274,16 @@ class OpcodeFusionTest : public InstructionFusionTest {
       HloInstruction::FusionKind fusion_kind =
           HloInstruction::FusionKind::kLoop) {
     auto computation = module->entry_computation();
-    auto did_fusion = CpuInstructionFusion().Run(module);
-    ASSERT_TRUE(did_fusion.ok());
-    EXPECT_TRUE(did_fusion.value());
+    auto did_fusion = RunFusion(module);
+    EXPECT_TRUE(did_fusion);
 
     HloInstruction* root = computation->root_instruction();
     ASSERT_THAT(root, op::Fusion());
     EXPECT_EQ(root->fusion_kind(), fusion_kind);
 
     std::vector<HloOpcode> fused_opcodes(root->fused_instruction_count());
-    std::transform(root->fused_instructions().begin(),
-                   root->fused_instructions().end(), fused_opcodes.begin(),
-                   [](const HloInstruction* hlo) { return hlo->opcode(); });
+    absl::c_transform(root->fused_instructions(), fused_opcodes.begin(),
+                      [](const HloInstruction* hlo) { return hlo->opcode(); });
 
     EXPECT_EQ(
         std::multiset<HloOpcode>(fused_opcodes.begin(), fused_opcodes.end()),
@@ -578,6 +592,11 @@ TEST_F(OpcodeFusionTest, DynamicSliceWithDynamicUpdateSlice) {
 
 TEST_F(OpcodeFusionTest, MessOfFusibleNodes) {
   auto module = CreateNewVerifiedModule();
+
+  if (options::UseExperimentalLoopFusion(module->config())) {
+    GTEST_SKIP() << "New fusion emitter does not support DUS yet.";
+  }
+
   HloComputation::Builder builder(TestName());
 
   Shape full_shape = ShapeUtil::MakeShape(F32, {4, 100, 10, 100, 50});
@@ -691,7 +710,7 @@ TEST_F(OpcodeFusionTest, DotAddOutputFusion_19x50x19) {
                                              /*add_extra_use_for_dot=*/false);
 
   TF_ASSERT_OK_AND_ASSIGN(bool fused_something,
-                          CpuInstructionFusion().Run(module.get()));
+                          CpuInstructionFusion(&alias_info_).Run(module.get()));
   EXPECT_FALSE(fused_something);
   EXPECT_THAT(module->entry_computation()->root_instruction(),
               Not(op::Fusion()));
@@ -704,7 +723,7 @@ TEST_F(OpcodeFusionTest, DotAddOutputFusion_19x50x1_multi_use) {
                                              /*add_extra_use_for_dot=*/true);
 
   TF_ASSERT_OK_AND_ASSIGN(bool fused_something,
-                          CpuInstructionFusion().Run(module.get()));
+                          CpuInstructionFusion(&alias_info_).Run(module.get()));
   EXPECT_FALSE(fused_something);
   EXPECT_THAT(module->entry_computation()->root_instruction(),
               Not(op::Fusion()));
@@ -726,7 +745,7 @@ ENTRY main {
   TF_ASSERT_OK_AND_ASSIGN(auto module,
                           ParseAndReturnVerifiedModule(module_string));
   TF_ASSERT_OK_AND_ASSIGN(bool fused_something,
-                          CpuInstructionFusion().Run(module.get()));
+                          CpuInstructionFusion(&alias_info_).Run(module.get()));
   EXPECT_FALSE(fused_something);
   EXPECT_THAT(module->entry_computation()->root_instruction(),
               Not(op::Fusion()));
@@ -904,7 +923,7 @@ ENTRY main {
   TF_ASSERT_OK_AND_ASSIGN(auto module,
                           ParseAndReturnVerifiedModule(module_string));
   TF_ASSERT_OK_AND_ASSIGN(bool fused_something,
-                          CpuInstructionFusion().Run(module.get()));
+                          CpuInstructionFusion(&alias_info_).Run(module.get()));
   EXPECT_TRUE(fused_something);
   EXPECT_THAT(module->entry_computation()->root_instruction(), op::Fusion());
 }
@@ -931,7 +950,7 @@ ENTRY main {
   TF_ASSERT_OK_AND_ASSIGN(auto module,
                           ParseAndReturnVerifiedModule(module_string));
   TF_ASSERT_OK_AND_ASSIGN(bool fused_something,
-                          CpuInstructionFusion().Run(module.get()));
+                          CpuInstructionFusion(&alias_info_).Run(module.get()));
   EXPECT_TRUE(fused_something);
   EXPECT_THAT(module->entry_computation()->root_instruction(), op::Fusion());
 }
@@ -956,16 +975,16 @@ ENTRY main {
                      HloOpcode::kParameter, HloOpcode::kAdd, HloOpcode::kAdd});
 }
 
-TEST_F(OpcodeFusionTest, SmallConstantInFusion) {
+TEST_F(OpcodeFusionTest, ScalarConstantInFusion) {
   absl::string_view module_string = R"(
 HloModule module
 
 ENTRY main {
-  a = f32[10,10]{1,0} parameter(0)
-  b = f32[10,10]{1,0} constant({...})
-  a_plus_b = f32[10,10]{1,0} add(a, b)
-  c = f32[10,10]{1,0} constant({...})
-  ROOT result = f32[10,10]{1,0} add(a_plus_b, c)
+  a = f32[1] parameter(0)
+  b = f32[1] constant({...})
+  a_plus_b = f32[1] add(a, b)
+  c = f32[1] constant({...})
+  ROOT result = f32[1] add(a_plus_b, c)
 }
 )";
 
@@ -976,7 +995,7 @@ ENTRY main {
                      HloOpcode::kConstant, HloOpcode::kAdd, HloOpcode::kAdd});
 }
 
-TEST_F(InstructionFusionTest, SkipCustomFusions) {
+TEST_F(InstructionFusionTest, SkipCustomFusionsBasic) {
   absl::string_view module_string = R"(
 HloModule module
 
@@ -998,7 +1017,35 @@ ENTRY %main (Arg_0: f32[10,10], Arg_1: f32[10,10]) -> f32[10,10] {
   TF_ASSERT_OK_AND_ASSIGN(auto module,
                           ParseAndReturnVerifiedModule(module_string));
   TF_ASSERT_OK_AND_ASSIGN(bool changed,
-                          CpuInstructionFusion().Run(module.get()));
+                          CpuInstructionFusion(&alias_info_).Run(module.get()));
+  EXPECT_FALSE(changed);
+}
+
+TEST_F(InstructionFusionTest, SkipCustomFusions) {
+  absl::string_view module_string = R"(
+HloModule module
+
+%fused_computation (param_0: f32[10,10], param_1: f32[10,10]) -> f32[10,10] {
+  %param_0 = f32[10,10] parameter(0)
+  %param_1 = f32[10,10] parameter(1)
+  %add = f32[10,10] add(f32[10,10] %param_0, f32[10,10] %param_1)
+  %subtract = f32[10,10] subtract(f32[10,10] %param_0, f32[10,10] %param_1)
+  ROOT %multiply = f32[10,10] multiply(f32[10,10] %add, f32[10,10] %subtract)
+}
+
+ENTRY %main (Arg_0: f32[10,10], Arg_1: f32[10,10]) -> f32[10,10] {
+  %Arg_0 = f32[10,10] parameter(0)
+  %Arg_1 = f32[10,10] parameter(1)
+  %Add = f32[10,10] add(f32[10,10] %Arg_0, f32[10,10] %Arg_1)
+  %Sub = f32[10,10] subtract(f32[10,10] %Arg_0, f32[10,10] %Arg_1)
+  ROOT %subtract_multiply_fusion = f32[10,10] fusion(f32[10,10] %Add, f32[10,10] %Sub), kind=kCustom, calls=%fused_computation
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(module_string));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          CpuInstructionFusion(&alias_info_).Run(module.get()));
   EXPECT_FALSE(changed);
 }
 
@@ -1024,7 +1071,7 @@ ENTRY %main (Arg_0: f32[10,10], Arg_1: f32[10,10]) -> f32[10,10] {
   TF_ASSERT_OK_AND_ASSIGN(auto module,
                           ParseAndReturnVerifiedModule(module_string));
   TF_ASSERT_OK_AND_ASSIGN(bool changed,
-                          CpuInstructionFusion().Run(module.get()));
+                          CpuInstructionFusion(&alias_info_).Run(module.get()));
   EXPECT_FALSE(changed);
 }
 
@@ -1056,13 +1103,12 @@ ENTRY %main (arg0: f32[13,5,10,62], arg1: s32[3,1], arg2: f32[3,1,5,10,62])
 TEST_F(InstructionFusionTest, SkipScatterComputationsIfFusionEmitters) {
   auto mod_config = GetModuleConfigForTest();
   auto debug_options = GetDebugOptionsForTest();
-  debug_options.set_xla_cpu_use_thunk_runtime(true);
   debug_options.set_xla_cpu_use_fusion_emitters(true);
   mod_config.set_debug_options(debug_options);
   TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(
                                            kScatterModuleString, mod_config));
   TF_ASSERT_OK_AND_ASSIGN(bool changed,
-                          CpuInstructionFusion().Run(module.get()));
+                          CpuInstructionFusion(&alias_info_).Run(module.get()));
   EXPECT_FALSE(changed);
 }
 
@@ -1074,7 +1120,48 @@ TEST_F(InstructionFusionTest, NoSkipScatterComputationsIfNoFusionEmitters) {
   TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(
                                            kScatterModuleString, mod_config));
   TF_ASSERT_OK_AND_ASSIGN(bool changed,
-                          CpuInstructionFusion().Run(module.get()));
+                          CpuInstructionFusion(&alias_info_).Run(module.get()));
+  EXPECT_TRUE(changed);
+}
+
+static constexpr absl::string_view kReduceModuleString = R"(
+  HloModule module
+
+  %reduce_max (param0: f32[], param1: f32[]) -> f32[] {
+    %lhs = f32[] parameter(0)
+    %rhs = f32[] parameter(1)
+    %maximum.1 = f32[] maximum(f32[] lhs, f32[] rhs)
+    %convert.8 = bf16[] convert(f32[] maximum.1)
+    ROOT %convert.9 = f32[] convert(bf16[] convert.8)
+  }
+
+  ENTRY %main (arg0: f32[13,5,10,62])
+      -> f32[13,5,10] {
+    %arg0 = f32[13,5,10,62]{3,2,1,0} parameter(0)
+    %init = f32[] constant(0)
+    ROOT %reduce = f32[13,5,10]{2,1,0} reduce(%arg0, %init),
+                     dimensions={3}, to_apply=reduce_max
+  }
+)";
+
+TEST_F(InstructionFusionTest, SkipReduceComputationsIfFusionEmitters) {
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(kReduceModuleString));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          CpuInstructionFusion(&alias_info_).Run(module.get()));
+  EXPECT_FALSE(changed);
+}
+
+TEST_F(InstructionFusionTest, NoSkipReduceComputationsIfNoFusionEmitters) {
+  auto mod_config = GetModuleConfigForTest();
+  auto debug_options = GetDebugOptionsForTest();
+  (*debug_options.mutable_xla_backend_extra_options())
+      [options::kDisableNewFusionEmitters] = "true";
+  mod_config.set_debug_options(debug_options);
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(
+                                           kReduceModuleString, mod_config));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed,
+                          CpuInstructionFusion(&alias_info_).Run(module.get()));
   EXPECT_TRUE(changed);
 }
 

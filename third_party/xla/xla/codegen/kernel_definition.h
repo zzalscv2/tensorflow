@@ -16,40 +16,70 @@ limitations under the License.
 #ifndef XLA_CODEGEN_KERNEL_DEFINITION_H_
 #define XLA_CODEGEN_KERNEL_DEFINITION_H_
 
-#include <memory>
 #include <utility>
 
 #include "xla/codegen/kernel_source.h"
 #include "xla/codegen/kernel_spec.h"
-#include "xla/tsl/platform/logging.h"
 
 namespace xla {
 
-class KernelDefinition {
- public:
-  KernelDefinition(KernelSpec spec, std::unique_ptr<KernelSource> source)
-      : spec_(std::move(spec)), source_(std::move(source)) {}
+//===----------------------------------------------------------------------===//
+// KernelDefinitionBase.
+//===----------------------------------------------------------------------===//
 
-  KernelDefinition(KernelDefinition&& other) = default;
-  KernelDefinition& operator=(KernelDefinition&& other) noexcept = default;
+// A base class for kernel definitions.
+//
+// KernelDefinition defines how the kernel must be executed via the `KernelSpec`
+// and also contains the `KernelSource` that implements the kernel itself.
+class KernelDefinitionBase {
+ public:
+  explicit KernelDefinitionBase(KernelSpec spec) : spec_(std::move(spec)) {}
+  virtual ~KernelDefinitionBase() = default;
 
   const KernelSpec& spec() const { return spec_; }
-  const KernelSource& source() const {
-    CHECK_NOTNULL(source_);  // CRASH OK - use after move.
-    return *source_;
-  }
+  KernelSpec& spec() { return spec_; }
 
-  // Release the kernel definition.
-  // This is useful for backends that need to store the kernel definition
-  // separately from the kernel spec.
-  std::pair<KernelSpec, std::unique_ptr<KernelSource>> release() && {
-    return std::make_pair(std::move(spec_), std::move(source_));
-  }
+  virtual const KernelSource& source() const = 0;
+  virtual KernelSource& source() = 0;
+
+ protected:
+  KernelDefinitionBase(KernelDefinitionBase&&) = default;
+  KernelDefinitionBase& operator=(KernelDefinitionBase&&) noexcept = default;
 
  private:
   KernelSpec spec_;
-  std::unique_ptr<KernelSource> source_;
 };
+
+//===----------------------------------------------------------------------===//
+// KernelDefinition.
+//===----------------------------------------------------------------------===//
+
+// A concrete kernel definition implementation for the given kernel source type.
+template <typename Source>
+class KernelDefinition final : public KernelDefinitionBase {
+  static_assert(std::is_base_of_v<KernelSource, Source>,
+                "Source must be a subclass of KernelSource");
+
+ public:
+  KernelDefinition(KernelSpec spec, Source source)
+      : KernelDefinitionBase(std::move(spec)), source_(std::move(source)) {}
+
+  KernelDefinition(KernelDefinition&&) = default;
+  KernelDefinition& operator=(KernelDefinition&&) noexcept = default;
+
+  const Source& source() const final { return source_; }
+  Source& source() final { return source_; }
+
+  // Moves ownership of the source to the caller.
+  Source TakeSource() && { return std::move(source_); }
+
+ private:
+  Source source_;
+};
+
+// Class template argument deduction guide for KernelDefinition.
+template <typename Source>
+KernelDefinition(KernelSpec, Source) -> KernelDefinition<Source>;
 
 }  // namespace xla
 

@@ -17,8 +17,8 @@ find_package(Protobuf REQUIRED)
 add_library(profiling_info_proto profiling_info.proto)
 
 list(APPEND profiling_info_generated_files
-    ${TFLITE_GENERATED_HEADERS_DIR}/profiling/proto/profiling_info.pb.cc
-    ${TFLITE_GENERATED_HEADERS_DIR}/profiling/proto/profiling_info.pb.h)
+    ${CMAKE_BINARY_DIR}/tensorflow/lite/profiling/proto/profiling_info.pb.cc
+    ${CMAKE_BINARY_DIR}/tensorflow/lite/profiling/proto/profiling_info.pb.h)
 
 # Generate profiling_info.pb.cc and profiling_info.pb.h from
 # profiling_info.proto using protoc. Once the protobuf package version is
@@ -36,9 +36,9 @@ target_link_libraries(profiling_info_proto protobuf::libprotobuf)
 target_include_directories(profiling_info_proto PUBLIC ${CMAKE_BINARY_DIR})
 
 add_library(model_runtime_info_proto model_runtime_info.proto)
-list(APPEND model_runtime_info_generated_files 
-    ${TFLITE_GENERATED_HEADERS_DIR}/profiling/proto/model_runtime_info.pb.cc
-    ${TFLITE_GENERATED_HEADERS_DIR}/profiling/proto/model_runtime_info.pb.h
+list(APPEND model_runtime_info_generated_files
+    ${CMAKE_BINARY_DIR}/tensorflow/lite/profiling/proto/model_runtime_info.pb.cc
+    ${CMAKE_BINARY_DIR}/tensorflow/lite/profiling/proto/model_runtime_info.pb.h
 )
 
 # Generate model_runtime_info.pb.cc and model_runtime_info.pb.h from

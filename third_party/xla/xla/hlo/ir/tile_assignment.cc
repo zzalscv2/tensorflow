@@ -15,17 +15,21 @@ limitations under the License.
 
 #include "xla/hlo/ir/tile_assignment.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
+#include <vector>
 
 #include "absl/algorithm/container.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/functional/function_ref.h"
 #include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "xla/array.h"
@@ -126,52 +130,69 @@ TransposeKind GetTransposeKind(absl::Span<const int64_t> dims,
   for (int i = 0; i < perm.size(); ++i) {
     const auto& d = perm[i];
     if (dims[d] == 1) {
-      if (d != i && dims[i] != 1) kind = TransposeKind::kReshape;
+      if (d != i && dims[i] != 1) {
+        kind = TransposeKind::kReshape;
+      }
       continue;
     }
-    if (d <= prev_non_one_dim) return TransposeKind::kTranspose;
+    if (d <= prev_non_one_dim) {
+      return TransposeKind::kTranspose;
+    }
     prev_non_one_dim = d;
   }
   return kind;
 }
 
+struct DecanonicalizationInfo {
+  absl::InlinedVector<int64_t, 6> new_reshape_dims;
+  absl::InlinedVector<int, 6> new_transpose_perm;
+  absl::InlinedVector<int, 6> new_transpose_perm_idx_to_original_reshape_dim;
+  absl::InlinedVector<absl::InlinedVector<int, 6>, 6>
+      original_reshape_dim_to_new_transpose_perm_indices;
+};
+
 // Fully decanonicalizes reshape_dims into prime factors and return the new
 // reshape_dims and transpose_perm.
-std::pair<absl::InlinedVector<int64_t, 6>, absl::InlinedVector<int, 6>>
-FullyDecanonicalize(absl::Span<const int64_t> reshape_dims,
-                    absl::Span<const int> transpose_perm) {
-  absl::InlinedVector<int64_t, 6> new_reshape_dims;
+DecanonicalizationInfo FullyDecanonicalize(
+    absl::Span<const int64_t> reshape_dims,
+    absl::Span<const int> transpose_perm) {
+  DecanonicalizationInfo info;
   absl::InlinedVector<int, 6> old_to_new_dims(reshape_dims.size() + 1);
-
   for (int i = 0, n = reshape_dims.size(); i < n; ++i) {
     int64_t dim_size = reshape_dims[i];
     while (dim_size % 2 == 0) {
-      new_reshape_dims.push_back(2);
+      info.new_reshape_dims.push_back(2);
       dim_size /= 2;
     }
     for (int i = 3; i * i <= dim_size; i += 2) {
       while (dim_size % i == 0) {
-        new_reshape_dims.push_back(i);
+        info.new_reshape_dims.push_back(i);
         dim_size /= i;
       }
     }
     if (dim_size > 1) {
       CHECK_GT(dim_size, 2);
-      new_reshape_dims.push_back(dim_size);
+      info.new_reshape_dims.push_back(dim_size);
     }
-    old_to_new_dims[i + 1] = new_reshape_dims.size();
+    old_to_new_dims[i + 1] = info.new_reshape_dims.size();
   }
-  absl::InlinedVector<int, 6> new_transpose_perm;
-  new_transpose_perm.reserve(new_reshape_dims.size());
+  info.new_transpose_perm.reserve(info.new_reshape_dims.size());
+
+  info.new_transpose_perm_idx_to_original_reshape_dim.reserve(
+      info.new_transpose_perm.size());
+  info.original_reshape_dim_to_new_transpose_perm_indices.resize(
+      transpose_perm.size());
   for (int i = 0; i < transpose_perm.size(); ++i) {
     const int old_dim = transpose_perm[i];
     for (int j = old_to_new_dims[old_dim], n = old_to_new_dims[old_dim + 1];
          j < n; ++j) {
-      new_transpose_perm.push_back(j);
+      info.new_transpose_perm.push_back(j);
+      info.new_transpose_perm_idx_to_original_reshape_dim.push_back(old_dim);
+      info.original_reshape_dim_to_new_transpose_perm_indices[old_dim]
+          .push_back(info.new_transpose_perm.size() - 1);
     }
   }
-  return std::make_pair(std::move(new_reshape_dims),
-                        std::move(new_transpose_perm));
+  return info;
 }
 
 }  // namespace
@@ -200,12 +221,19 @@ FullyDecanonicalize(absl::Span<const int64_t> reshape_dims,
   return IotaTileAssignment(dims, dims_span, perm_span);
 }
 
-Array<int64_t> IotaTileAssignment::ToArray() const {
-  Array<int64_t> array(reshape_dims());
+// Materializes array representation of IotaTileAssignment.
+Array<int64_t> ToArray(absl::Span<const int64_t> reshape_dims,
+                       absl::Span<const int> transpose_perm,
+                       absl::Span<const int64_t> dims) {
+  Array<int64_t> array(reshape_dims);
   array.FillIota(0);
-  array.TransposeDimensions(transpose_perm());
-  array.Reshape(dims());
+  array.TransposeDimensions(transpose_perm);
+  array.Reshape(dims);
   return array;
+}
+
+Array<int64_t> IotaTileAssignment::ToArray() const {
+  return ::xla::ToArray(reshape_dims(), transpose_perm(), dims());
 }
 
 IotaTileAssignment::IotaTileAssignment(const IotaTileAssignment& other)
@@ -248,7 +276,9 @@ std::optional<IotaTileAssignment> IotaTileAssignment::Transpose(
   DCHECK_EQ(ndims_, perm.size());
   auto dims = this->dims();
   const TransposeKind kind = GetTransposeKind(dims, perm);
-  if (kind == TransposeKind::kNoop) return *this;
+  if (kind == TransposeKind::kNoop) {
+    return *this;
+  }
   absl::InlinedVector<int64_t, 6> new_dims(ndims_);
   for (int64_t i = 0; i < ndims_; ++i) {
     new_dims[i] = dims[perm[i]];
@@ -284,35 +314,107 @@ std::optional<IotaTileAssignment> IotaTileAssignment::Transpose(
     absl::InlinedVector<int, 6> new_perm;
     new_perm.reserve(non_one_dims.size());
     for (int i = 0; i < ndims_; ++i) {
-      if (dims[perm[i]] == 1) continue;
+      if (dims[perm[i]] == 1) {
+        continue;
+      }
       new_perm.push_back(transpose_perm[one_to_non_one[perm[i]]]);
     }
     CHECK_EQ(reshape_ndims_, new_perm.size());
     return IotaTileAssignment::Create(new_dims, reshape_dims, new_perm);
   }
 
-  auto [decanonicalized_reshape_dims, decanonicalized_transpose_perm] =
+  DecanonicalizationInfo decanonicalization_info =
       FullyDecanonicalize(reshape_dims, transpose_perm);
+  auto& decanonicalized_reshape_dims = decanonicalization_info.new_reshape_dims;
+  const auto& decanonicalized_transpose_perm =
+      decanonicalization_info.new_transpose_perm;
+  const auto& new_transpose_perm_idx_to_original_reshape_dim =
+      decanonicalization_info.new_transpose_perm_idx_to_original_reshape_dim;
+  const auto& original_reshape_dim_to_new_transpose_perm_indices =
+      decanonicalization_info
+          .original_reshape_dim_to_new_transpose_perm_indices;
   CHECK_LE(non_one_dims.size(), decanonicalized_reshape_dims.size());
   // Try grouping decanonicalized reshape dimensions together to see if they
   // form the identical tile dimensions, then transpose them in groups.
+  // The basic approach to grouping decanonicalized reshape dims to match the
+  // non_one_dims would be to iterate over the decanonicalized reshape dims and
+  // non_one_dims in major to minor order and form groups {x,y,z...} such that
+  // x*y*z... = non_one_dims[i]. However this sometimes does not work when
+  // decanonicalization of the original reshape dim is not in a order that is
+  // compatible with the non_one_dims.
+  //
+  // Consider the following example:
+  // Non_one_dims: [4,5,24]
+  // Original reshape dims: [15,4,8]
+  // Original transpose perm: [1,0,2]
+  // Reshape dims after decanonicalization: [3,5,2,2,2,2,2]
+  // Transpose perm after decanonicalization: [2,3,0,1,4,5,6]
+  //
+  // The basic approach would map non_one_dims[0] = 4 to reshape dimensions
+  // [2,3] but would fail to map 5 to reshape dimensions as the divisor of 5
+  // appears after 3.
+  //
+  // Decanonicalizations are not unique and some decanonicalizations generated
+  // will better match the non_one_dims than others. In this case, an equivalent
+  // decanonicalization with reshape dims: [5,3,2,2,2,2,2] and transpose perm:
+  // [2,3,0,1,4,5,6] would have better matched the non_one_dims.
+  //
+  // To avoid generating multiple decanonicalizations and retrying grouping
+  // reshape dims each time, if we are unable to find a divisor for the
+  // non_one_dim[i] when iterating through decanonicalized reshape dims in the
+  // major to minor direction, we look ahead in the decanonicalized reshape dims
+  // to see if any future dimensions that belong to the same original reshape
+  // dimension could be used as a divisor. If this is possible, we swap the
+  // future dimension with the current dimension and return the position of the
+  // current dimension.
   absl::InlinedVector<absl::InlinedVector<int, 2>, 6> grouped_reshape_dims(
       non_one_dims.size());
+  const auto generate_candidate =
+      [&](int64_t target, int64_t transpose_perm_idx) -> std::optional<int> {
+    const int reshape_dim_idx =
+        decanonicalized_transpose_perm[transpose_perm_idx];
+    const int64_t cand = decanonicalized_reshape_dims[reshape_dim_idx];
+    if (target % cand == 0) {
+      return reshape_dim_idx;
+    }
+    // If current dimension in decanonicalized reshape dims does not divide the
+    // target dim (non_one_dim[i]), we look ahead in the decanonicalized reshape
+    // dims to see if any future dimensions that belong to the same original
+    // reshape dimension could be used as a divisor.
+    const int64_t original_reshape_dim =
+        new_transpose_perm_idx_to_original_reshape_dim[transpose_perm_idx];
+    for (int64_t candidate_transpose_perm_idx :
+         original_reshape_dim_to_new_transpose_perm_indices
+             [original_reshape_dim]) {
+      if (candidate_transpose_perm_idx > transpose_perm_idx) {
+        const int new_reshape_dim_idx =
+            decanonicalized_transpose_perm[candidate_transpose_perm_idx];
+        const int64_t new_cand =
+            decanonicalized_reshape_dims[new_reshape_dim_idx];
+        if (target % new_cand == 0) {
+          std::swap(decanonicalized_reshape_dims[reshape_dim_idx],
+                    decanonicalized_reshape_dims[new_reshape_dim_idx]);
+          return reshape_dim_idx;
+        }
+      }
+    }
+    return std::nullopt;
+  };
   int transpose_perm_idx = 0;
   for (int i = 0, n = non_one_dims.size(),
            dn = decanonicalized_reshape_dims.size();
        i < n && transpose_perm_idx < dn; ++i) {
-    int reshape_dim_idx = decanonicalized_transpose_perm[transpose_perm_idx];
-    int64_t cand = decanonicalized_reshape_dims[reshape_dim_idx];
     int64_t target = non_one_dims[i];
-    while (target % cand == 0) {
+    std::optional<int> reshape_dim_idx =
+        generate_candidate(target, transpose_perm_idx);
+    while (reshape_dim_idx.has_value()) {
+      const int64_t cand = decanonicalized_reshape_dims[*reshape_dim_idx];
       target /= cand;
-      grouped_reshape_dims[i].push_back(reshape_dim_idx);
+      grouped_reshape_dims[i].push_back(*reshape_dim_idx);
       if (++transpose_perm_idx >= dn) {
         break;
       }
-      reshape_dim_idx = decanonicalized_transpose_perm[transpose_perm_idx];
-      cand = decanonicalized_reshape_dims[reshape_dim_idx];
+      reshape_dim_idx = generate_candidate(target, transpose_perm_idx);
     }
     if (target != 1) {
       // TODO(b/341371396): Handle remaining patterns and remove nullopt path.
@@ -340,10 +442,8 @@ std::optional<IotaTileAssignment> IotaTileAssignment::Transpose(
                                     flattened_transpose_perm);
 }
 
-void IotaTileAssignment::Print(Printer* printer) const {
+void IotaTileAssignment::PrintArray(Printer* printer) const {
   printer->Append("[");
-  AppendJoin(printer, dims(), ",");
-  printer->Append("]<=[");
   AppendJoin(printer, reshape_dims(), ",");
   printer->Append("]");
   if (reshape_ndims_ > 1) {
@@ -351,6 +451,19 @@ void IotaTileAssignment::Print(Printer* printer) const {
     AppendJoin(printer, transpose_perm(), ",");
     printer->Append(")");
   }
+}
+
+void IotaTileAssignment::Print(Printer* printer) const {
+  printer->Append("[");
+  AppendJoin(printer, dims(), ",");
+  printer->Append("]<=");
+  PrintArray(printer);
+}
+
+std::string IotaTileAssignment::ArrayToString() const {
+  StringPrinter printer;
+  PrintArray(&printer);
+  return std::move(printer).ToString();
 }
 
 std::string IotaTileAssignment::ToString() const {
@@ -386,13 +499,13 @@ int64_t IotaTileAssignment::value_at(absl::Span<const int64_t> index) const {
 
 TileAssignment::TileAssignment(const TileAssignment& other) {
   iota_ = other.iota_;
-  absl::MutexLock other_lock(&other.mu_);
+  absl::MutexLock other_lock(other.mu_);
   shared_array_ = other.shared_array_;
   array_ = other.array_;
 }
 
 TileAssignment::TileAssignment(TileAssignment&& other) {
-  absl::MutexLock other_lock(&other.mu_);
+  absl::MutexLock other_lock(other.mu_);
   iota_ = other.iota_;
   shared_array_ = std::move(other.shared_array_);
   array_ = other.array_;
@@ -403,11 +516,11 @@ TileAssignment& TileAssignment::operator=(const TileAssignment& other) {
   std::shared_ptr<const Array<int64_t>> shared_array;
   const Array<int64_t>* array;
   {
-    absl::MutexLock other_lock(&other.mu_);
+    absl::MutexLock other_lock(other.mu_);
     shared_array = other.shared_array_;
     array = other.array_;
   }
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   shared_array_ = shared_array;
   array_ = array;
   return *this;
@@ -418,11 +531,11 @@ TileAssignment& TileAssignment::operator=(TileAssignment&& other) {
   std::shared_ptr<const Array<int64_t>> shared_array;
   const Array<int64_t>* array;
   {
-    absl::MutexLock other_lock(&other.mu_);
+    absl::MutexLock other_lock(other.mu_);
     shared_array = std::move(other.shared_array_);
     array = other.array_;
   }
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   shared_array_ = shared_array;
   array_ = array;
   return *this;
@@ -436,31 +549,31 @@ bool TileAssignment::operator==(const TileAssignment& other) const {
 }
 
 int64_t TileAssignment::operator()(absl::Span<const int64_t> indexes) const {
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   return array_ ? (*array_)(indexes) : iota_->value_at(indexes);
 }
 
 absl::Span<const int64_t> TileAssignment::dimensions() const {
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   return array_ ? array_->dimensions() : iota_->dims();
 }
 
 int64_t TileAssignment::num_dimensions() const {
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   return array_ ? array_->num_dimensions() : iota_->ndims();
 }
 
 int64_t TileAssignment::dim(int64_t n) const {
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   return array_ ? array_->dim(n) : iota_->dim(n);
 }
 int64_t TileAssignment::num_elements() const {
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   return array_ ? array_->num_elements() : iota_->num_elements();
 }
 
 int64_t TileAssignment::first() const {
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   return array_ ? *array_->begin() : 0;
 }
 
@@ -468,7 +581,7 @@ void TileAssignment::Each(
     absl::FunctionRef<void(absl::Span<const int64_t>, int64_t)> f) const {
   Array<int64_t> const* array;
   {
-    absl::MutexLock lock(&mu_);
+    absl::MutexLock lock(mu_);
     MaybeMaterializeFullArray();
     array = array_;
   }
@@ -480,7 +593,7 @@ absl::Status TileAssignment::EachStatus(
     const {
   Array<int64_t> const* array;
   {
-    absl::MutexLock lock(&mu_);
+    absl::MutexLock lock(mu_);
     MaybeMaterializeFullArray();
     array = array_;
   }
@@ -491,10 +604,8 @@ absl::Status TileAssignment::EachStatus(
     absl::Span<const int64_t> new_dimensions) const {
   if (iota_) {
     CHECK_EQ(Product(new_dimensions), iota_->num_elements());
-    return TileAssignment(
-        IotaTileAssignment(new_dimensions, iota_->reshape_dims(),
-                           iota_->transpose_perm()),
-        /*shared_array=*/nullptr);
+    return TileAssignment(new_dimensions, iota_->reshape_dims(),
+                          iota_->transpose_perm());
   }
   std::shared_ptr<Array<int64_t>> reshaped = shared_array_clone();
   reshaped->Reshape(new_dimensions);
@@ -518,6 +629,14 @@ absl::Status TileAssignment::EachStatus(
   return TileAssignment(std::move(cloned_array));
 }
 
+void TileAssignment::PrintArray(Printer* printer) const {
+  if (iota_) {
+    iota_->PrintArray(printer);
+  } else {
+    AppendJoin(printer, array(), ",");
+  }
+}
+
 void TileAssignment::Print(Printer* printer) const {
   if (iota_) {
     printer->Append("devices=");
@@ -528,6 +647,12 @@ void TileAssignment::Print(Printer* printer) const {
     printer->Append("]");
     AppendJoin(printer, array(), ",");
   }
+}
+
+std::string TileAssignment::ArrayToString() const {
+  StringPrinter printer;
+  PrintArray(&printer);
+  return std::move(printer).ToString();
 }
 
 std::string TileAssignment::ToString() const {
@@ -542,18 +667,18 @@ bool TileAssignment::UsesDevice(int64_t device) const {
 }
 
 const Array<int64_t>& TileAssignment::array() const {
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   MaybeMaterializeFullArray();
   return *array_;
 }
 std::shared_ptr<const Array<int64_t>> TileAssignment::shared_array() const {
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   MaybeMaterializeFullArray();
   return shared_array_;
 }
 
 std::shared_ptr<Array<int64_t>> TileAssignment::shared_array_clone() const {
-  absl::MutexLock lock(&mu_);
+  absl::MutexLock lock(mu_);
   MaybeMaterializeFullArray();
   return std::make_shared<Array<int64_t>>(*array_);
 }
@@ -566,6 +691,122 @@ void TileAssignment::MaybeMaterializeFullArray() const {
     shared_array_ = std::move(full);
     array_ = shared_array_.get();
   }
+}
+
+std::vector<int64_t> ExtractCommonFactorSequence(
+    absl::Span<const int64_t> array1, absl::Span<const int64_t> array2) {
+  std::vector<int64_t> result;
+  int64_t index1 = 0;
+  int64_t index2 = 0;
+  int64_t val1 = 1;
+  int64_t val2 = 1;
+
+  while (index1 < array1.size() || index2 < array2.size() || val1 > 1 ||
+         val2 > 1) {
+    while (val1 == 1 && index1 < array1.size()) {
+      val1 = array1[index1++];
+    }
+    while (val2 == 1 && index2 < array2.size()) {
+      val2 = array2[index2++];
+    }
+
+    if (val1 == 1 && val2 == 1) {
+      break;
+    }
+    if (val1 == 1 || val2 == 1) {
+      return {};
+    }
+
+    const int64_t common = std::min(val1, val2);
+    if (val1 % common != 0 || val2 % common != 0) {
+      return {};
+    }
+    result.push_back(common);
+    val1 /= common;
+    val2 /= common;
+  }
+
+  return result;
+}
+
+std::optional<std::vector<SubDimInfo>> GetOrderedSubDimsFromIotaTileAssignment(
+    const IotaTileAssignment& iota) {
+  std::vector<int64_t> device_shape;
+  device_shape.reserve(iota.transpose_perm().size());
+  for (const int perm_index : iota.transpose_perm()) {
+    device_shape.emplace_back(iota.reshape_dims()[perm_index]);
+  }
+
+  const std::vector<int64_t> axis_sizes =
+      ExtractCommonFactorSequence(iota.dims(), device_shape);
+  if (axis_sizes.empty()) {
+    return std::nullopt;
+  }
+
+  std::vector<SubDimInfo> sub_dims;
+  sub_dims.reserve(axis_sizes.size());
+
+  int64_t tile_dim_index = iota.ndims() - 1;
+  int64_t trans_perm_index = iota.transpose_perm().size() - 1;
+  int64_t acc_tile_size = 1;
+  int64_t acc_device_size = 1;
+  int64_t sub_dim = 0;
+
+  for (auto it = axis_sizes.rbegin(); it != axis_sizes.rend(); ++it) {
+    int64_t axis_size = *it;
+    while (iota.dim(tile_dim_index) == 1) {
+      tile_dim_index--;
+    }
+    sub_dims.push_back(SubDimInfo{
+        /* .tile_dim_index = */ tile_dim_index,
+        /* .tile_sub_dim_index = */ sub_dim++,
+        /* .reshape_dim_index = */ iota.transpose_perm()[trans_perm_index],
+        /* .size = */ axis_size,
+    });
+    acc_tile_size *= axis_size;
+    acc_device_size *= axis_size;
+    if (iota.dim(tile_dim_index) == acc_tile_size) {
+      tile_dim_index--;
+      acc_tile_size = 1;
+      sub_dim = 0;
+    }
+    if (device_shape[trans_perm_index] == acc_device_size) {
+      acc_device_size = 1;
+      trans_perm_index--;
+    }
+  }
+
+  absl::c_sort(sub_dims, [](const SubDimInfo& a, const SubDimInfo& b) {
+    return std::forward_as_tuple(a.reshape_dim_index, a.tile_dim_index) <
+           std::forward_as_tuple(b.reshape_dim_index, b.tile_dim_index);
+  });
+  return sub_dims;
+}
+
+std::optional<AnalyzeTileAssignmentResult> AnalyzeTileAssignment(
+    const TileAssignment& tile_assignment) {
+  // If the input has iota tile assignment (the corresponding HloSharding is in
+  // V2 format), we use GetOrderedSubDimsFromIotaTileAssignment.
+  if (tile_assignment.iota()) {
+    std::optional<std::vector<SubDimInfo>> sub_dims =
+        GetOrderedSubDimsFromIotaTileAssignment(*tile_assignment.iota());
+    // TODO(b/489003790): Some V2 sharding cannot be converted to V3 with
+    // an iota mesh.
+    CHECK(sub_dims.has_value())
+        << "tile assignment: " << tile_assignment.ToString();
+
+    std::vector<int64_t> mesh;
+    mesh.reserve(sub_dims->size());
+    for (const SubDimInfo& sub_dim_info : *sub_dims) {
+      mesh.push_back(sub_dim_info.size);
+    }
+    return AnalyzeTileAssignmentResult{
+        /* .sub_dims = */ std::move(*sub_dims),
+        /* .local_mesh = */ std::move(mesh),
+    };
+  }
+
+  return std::nullopt;
 }
 
 }  // namespace xla

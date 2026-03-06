@@ -3,11 +3,17 @@ load("//tensorflow/core/platform:build_config.bzl", "tf_proto_library")
 load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
-    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
+    # copybara:uncomment_begin(google-only)
+    # default_visibility = [
+    # ":friends",
+    # "//tensorflow:__pkg__",
+    # ],
+    # copybara:uncomment_end_and_comment_begin
     default_visibility = [
-        ":friends",
-        "//tensorflow:__pkg__",
+        "//visibility:public",
     ],
+    # copybara:comment_end
     licenses = ["notice"],
 )
 
@@ -74,8 +80,8 @@ tf_native_cc_binary(
         "@llvm-project//llvm:TableGen",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:TableGen",
-        "@local_tsl//tsl/platform:regexp",
-        "@local_xla//xla/tsl/platform:logging",
+        "@tsl//tsl/platform:regexp",
+        "@xla//xla/tsl/platform:logging",
     ],
 )
 

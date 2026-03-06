@@ -28,7 +28,8 @@ void registerSdyRoundTripExportShardyAttrsPass();
 
 // Creates the pass to convert SDY attributes to frontend attributes:
 //
-// - Converts shardings from `kShardingAttr` to `kShardingRoundTripAttr`
+// - Converts shardings from `kShardingAttr` to
+// `HloSharding::kShardingFrontendAttrName`
 // - Converts sharding rules from `kShardingRuleAttr` to
 //   `kShardingRuleRoundTripAttr`
 // - Saves the mesh symbols as `kMeshesRoundTripAttr`
@@ -36,7 +37,8 @@ void registerSdyRoundTripExportShardyAttrsPass();
 // NOTE: The `kShardingAttr`s are not removed from the ops. They are kept around
 // because part of the `SdyRoundTripExportPipeline` also converts the
 // `kShardingAttr`s to `kXlaShardingAttr`s.
-std::unique_ptr<mlir::Pass> createSdyRoundTripExportShardyAttrsPass();
+std::unique_ptr<mlir::Pass> createSdyRoundTripExportShardyAttrsPass(
+    bool enableHloShardingV3 = false);
 
 }  // namespace sdy
 }  // namespace xla

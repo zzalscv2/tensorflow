@@ -22,6 +22,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
@@ -32,7 +33,6 @@ limitations under the License.
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/LogicalResult.h"
-#include "llvm/Support/raw_ostream.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/Attributes.h"  // from @llvm-project
 #include "mlir/IR/Block.h"  // from @llvm-project
@@ -46,28 +46,31 @@ limitations under the License.
 #include "mlir/IR/TypeUtilities.h"  // from @llvm-project
 #include "mlir/IR/Types.h"  // from @llvm-project
 #include "mlir/IR/Value.h"  // from @llvm-project
-#include "mlir/IR/ValueRange.h"  // from @llvm-project
 #include "mlir/IR/Verifier.h"  // from @llvm-project
+#include "mlir/IR/Visitors.h"  // from @llvm-project
 #include "mlir/Parser/Parser.h"  // from @llvm-project
 #include "mlir/Pass/PassManager.h"  // from @llvm-project
 #include "mlir/Support/DebugStringHelper.h"  // from @llvm-project
 #include "mlir/Support/LLVM.h"  // from @llvm-project
 #include "mlir/Support/LogicalResult.h"  // from @llvm-project
 #include "mlir/Transforms/Passes.h"  // from @llvm-project
+#include "shardy/dialect/sdy/ir/dialect.h"  // from @shardy
+#include "shardy/dialect/sdy/transforms/import/passes.h"  // from @shardy
 #include "stablehlo/dialect/ChloOps.h"  // from @stablehlo
 #include "stablehlo/dialect/Serialization.h"  // from @stablehlo
 #include "stablehlo/dialect/StablehloOps.h"  // from @stablehlo
 #include "stablehlo/dialect/VhloOps.h"  // from @stablehlo
 #include "stablehlo/transforms/StablehloRefineShapes.h"  // from @stablehlo
+#include "stablehlo/transforms/optimization/Passes.h"  // from @stablehlo
 #include "tensorflow/compiler/jit/flags.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/dump_mlir_util.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/error_util.h"
 #include "xla/hlo/builder/xla_computation.h"
 #include "xla/hlo/translate/stablehlo.h"
 #include "xla/mlir/utils/type_util.h"
-#include "xla/mlir_hlo/mhlo/transforms/passes.h"
 #include "xla/python/refine_polymorphic_shapes.h"
 #include "xla/service/hlo.pb.h"
+#include "xla/service/spmd/shardy/sdy_round_trip/pipelines.h"
 #include "xla/shape.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
@@ -88,10 +91,11 @@ constexpr int kVersionStartSupportDisabledChecks = 6;
 constexpr int kVersionStartSupportShapeAssertions = 7;
 constexpr int kVersionStartSupportUsesShapePolymorphismAttr = 8;
 constexpr int kVersionStartSupportEffects = 9;
+constexpr int kVersionStartSupportShardyPartitioner = 10;
 constexpr int kVersionMinimumSupported = kVersionStartStableHloCompatibility;
 
 // This should match xla.py:call_module_maximum_supported_version
-constexpr int kVersionMaximumSupported = kVersionStartSupportEffects;
+constexpr int kVersionMaximumSupported = kVersionStartSupportShardyPartitioner;
 
 constexpr llvm::StringRef kDisabledCheckPlatform = "platform";
 
@@ -117,16 +121,18 @@ bool IsTokenType(mlir::Type type) {
 }
 
 absl::StatusOr<std::unique_ptr<XlaCallModuleLoader>>
-XlaCallModuleLoader::Create(mlir::MLIRContext *context, int version,
+XlaCallModuleLoader::Create(mlir::MLIRContext* context, int version,
                             mlir::StringRef module_str,
                             std::vector<std::string> disabled_checks,
                             std::vector<std::string> platforms,
                             int num_invocation_args,
-                            bool main_has_token_input_output) {
+                            bool main_has_token_input_output,
+                            bool use_shardy_partitioner) {
   std::unique_ptr<XlaCallModuleLoader> loader(new XlaCallModuleLoader);
   TF_RETURN_IF_ERROR(loader->LoadModule(
       context, version, module_str, std::move(disabled_checks),
-      std::move(platforms), num_invocation_args, main_has_token_input_output));
+      std::move(platforms), num_invocation_args, main_has_token_input_output,
+      use_shardy_partitioner));
   return loader;
 }
 
@@ -159,7 +165,7 @@ absl::Status XlaCallModuleLoader::SetPlatformIndex(
   if (platform_index < 0) return absl::OkStatus();
   VLOG(3) << "XlaCallModule setting the platform_index to " << platform_index
           << " for platform " << compilation_platform << ".";
-  mlir::Block &main_body = main_.front();
+  mlir::Block& main_body = main_.front();
 
   if (main_.getNumArguments() < 1) {
     return absl::InvalidArgumentError(absl::StrCat(
@@ -183,8 +189,8 @@ absl::Status XlaCallModuleLoader::SetPlatformIndex(
   bool is_32_bit = arg_ranked_type.getElementType().isSignlessInteger(32);
   auto const_attr = is_32_bit ? op_builder.getI32IntegerAttr(platform_index)
                               : op_builder.getI64IntegerAttr(platform_index);
-  auto platform_index_op = op_builder.create<mlir::stablehlo::ConstantOp>(
-      platform_index_arg.getLoc(), const_attr);
+  auto platform_index_op = mlir::stablehlo::ConstantOp::create(
+      op_builder, platform_index_arg.getLoc(), const_attr);
   platform_index_arg.replaceAllUsesWith(platform_index_op);
 
   CHECK(llvm::succeeded(main_.eraseArgument(0)));
@@ -235,19 +241,19 @@ absl::Status XlaCallModuleLoader::RefineDynamicShapes(
         " non-token and non-platform-index arguments. The input ",
         "shapes are (",
         absl::StrJoin(input_shapes, ", ",
-                      [](std::string *out, const xla::Shape &s) {
+                      [](std::string* out, const xla::Shape& s) {
                         absl::StrAppend(out, s.ToString());
                       }),
         ") and the main function argument types are ",
         absl::StrJoin(InputTypes(), ", ",
-                      [](std::string *out, const mlir::Type &t) {
+                      [](std::string* out, const mlir::Type& t) {
                         absl::StrAppend(out, mlir::debugString(t));
                       }),
         ")"));
   }
 
   // Derive static input types to use for main.
-  mlir::Block &main_body = main_.front();
+  mlir::Block& main_body = main_.front();
   mlir::Builder builder(module_->getContext());
   std::vector<mlir::Type> static_array_input_types(nr_inputs);
   int next_actual_input = 0;
@@ -266,7 +272,7 @@ absl::Status XlaCallModuleLoader::RefineDynamicShapes(
     }
 
     // Get static MLIR Type from xla Shape.
-    const xla::Shape &xla_shape = input_shapes[next_actual_input++];
+    const xla::Shape& xla_shape = input_shapes[next_actual_input++];
     std::vector<int64_t> xla_dimensions;
     if (xla_shape.IsArray()) {
       xla_dimensions = std::vector<int64_t>(xla_shape.dimensions().begin(),
@@ -364,14 +370,15 @@ absl::Status XlaCallModuleLoader::RefineDynamicShapes(
 }
 
 absl::Status XlaCallModuleLoader::LoadModule(
-    mlir::MLIRContext *context, int version, mlir::StringRef module_str,
+    mlir::MLIRContext* context, int version, mlir::StringRef module_str,
     std::vector<std::string> disabled_checks,
     std::vector<std::string> platforms, int num_invocation_args,
-    bool main_has_token_input_output) {
+    bool main_has_token_input_output, bool use_shardy_partitioner) {
   context_ = context;
   version_ = version;
   platforms_ = platforms;
   loading_disabled_checks_ = disabled_checks;
+  use_shardy_partitioner_ = use_shardy_partitioner;
   loading_disabled_checks_.insert(
       loading_disabled_checks_.end(),
       GetXlaCallModuleFlags()->disabled_checks.begin(),
@@ -383,6 +390,7 @@ absl::Status XlaCallModuleLoader::LoadModule(
   context_->loadDialect<mlir::stablehlo::StablehloDialect>();
   context_->loadDialect<mlir::chlo::ChloDialect>();
   context_->loadDialect<mlir::vhlo::VhloDialect>();
+  context_->loadDialect<mlir::sdy::SdyDialect>();
 
   if (version < kVersionMinimumSupported) {
     return absl::InvalidArgumentError(absl::StrCat(
@@ -420,6 +428,20 @@ absl::Status XlaCallModuleLoader::LoadModule(
           << absl::StrJoin(loading_disabled_checks_, ", ") << "]), module = "
           << DumpMlirOpToFile("xla_call_module.parsed", *module_);
 
+  if (use_shardy_partitioner) {
+    // We need to inline `sdy.mesh` symbols because otherwise they are going
+    // to be discarded or their names might collide with `sdy.mesh` symbols in
+    // another XlaCallModuleOp.
+    mlir::StatusScopedDiagnosticHandler diag_handler(context_);
+    mlir::PassManager pm(module_->getContext());
+    pm.addPass(mlir::sdy::createInlineMeshesPass());
+    if (failed(pm.run(*module_))) {
+      return absl::InternalError(
+          absl::StrCat("Shardy inline meshes pass failed: ",
+                       diag_handler.ConsumeStatus().ToString()));
+    }
+  }
+
   {
     mlir::StatusScopedDiagnosticHandler diag_handler(module_->getContext());
     if (mlir::failed(mlir::verify(*module_))) {
@@ -432,7 +454,7 @@ absl::Status XlaCallModuleLoader::LoadModule(
     return absl::InvalidArgumentError("Cannot find 'main' in module");
   }
 
-  mlir::Block &main_body = main_.front();
+  mlir::Block& main_body = main_.front();
 
   int nr_token_arguments = llvm::count_if(InputTypes(), IsTokenType);
   if (version < kVersionStartSupportEffects) {
@@ -460,24 +482,35 @@ absl::Status XlaCallModuleLoader::LoadModule(
   return absl::OkStatus();
 }
 
-absl::Status XlaCallModuleLoader::ValidateDialect() {
+absl::Status XlaCallModuleLoader::ValidateXlaCallModuleInvariants() {
   mlir::StatusScopedDiagnosticHandler diag_handler(module_->getContext());
-  bool moduleHasUnsupportedDialects = false;
+  bool moduleValidationFailed = false;
 
-  module_->walk([&](mlir::Operation *op) {
+  module_->walk([&](mlir::Operation* op) {
     // StableHLO programs created by jax2tf only contain operations
-    // from Builtin, Func and StableHLO dialects.
+    // from Builtin, Func, StableHLO, Shardy dialects.
     if (!llvm::isa<mlir::BuiltinDialect, mlir::chlo::ChloDialect,
-                   mlir::func::FuncDialect, mlir::stablehlo::StablehloDialect>(
-            op->getDialect())) {
-      moduleHasUnsupportedDialects = true;
+                   mlir::func::FuncDialect, mlir::stablehlo::StablehloDialect,
+                   mlir::sdy::SdyDialect>(op->getDialect())) {
       op->emitOpError() << "is an op from an unsupported dialect";
+      moduleValidationFailed = true;
+    }
+    // `shape_assertion` custom calls must have side effects. We check this here
+    // because a pure `shape_assertion` is likely to be removed by MLIR's
+    // dead-code elimination, preventing us from detecting the issue later.
+    if (auto customCallOp = llvm::dyn_cast<mlir::stablehlo::CustomCallOp>(op)) {
+      if (!customCallOp.getHasSideEffect() &&
+          customCallOp.getCallTargetName() == "shape_assertion") {
+        op->emitOpError() << "`shape_assertion` custom calls must set "
+                             "`has_side_effect = true`.";
+        moduleValidationFailed = true;
+      }
     }
   });
 
-  if (moduleHasUnsupportedDialects) {
+  if (moduleValidationFailed) {
     return absl::InvalidArgumentError(
-        absl::StrCat("Module has unsupported dialects: ",
+        absl::StrCat("XlaCallModule failed validation: ",
                      diag_handler.ConsumeStatus().ToString()));
   }
   return absl::OkStatus();
@@ -490,17 +523,20 @@ absl::Status XlaCallModuleLoader::ValidateStaticShapes() {
 absl::Status XlaCallModuleLoader::PrepareStablehloForLowering() {
   mlir::StatusScopedDiagnosticHandler diag_handler(module_->getContext());
 
-  // TODO (b/410057228): Replace MHLO canonicalization with StableHLO.
-  // This code requires MHLO CaseOp canonicalization to remove unreachable
-  // branches, else `tf.call_tf_function` inlining can fail.
   mlir::PassManager pm(module_->getContext());
-  pm.addPass(mlir::mhlo::createStablehloLegalizeToHloPass());
-  pm.addNestedPass<mlir::func::FuncOp>(mlir::createCanonicalizerPass());
-  pm.addPass(mlir::mhlo::createHloLegalizeToStablehloPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::stablehlo::createStablehloTargetIndependentOptimizationPass());
+  if (use_shardy_partitioner_) {
+    // We need to export shardings because the lowering path go directly to
+    // HLO but not the MLIR to HLO path that invokes SdyRoundTripExport.
+    // We keep meshes inlined to avoid naming collisions when multiple
+    // XlaCallModules are combined.
+    xla::sdy::addSdyRoundTripExportPipeline(pm, /*keepMeshesInlined=*/true);
+  }
 
   if (failed(pm.run(*module_))) {
     return absl::InternalError(
-        absl::StrCat("MHLO->HLO lowering passes failed: ",
+        absl::StrCat("StableHLO->HLO lowering passes failed: ",
                      diag_handler.ConsumeStatus().ToString()));
   }
 

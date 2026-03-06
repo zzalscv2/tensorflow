@@ -27,35 +27,26 @@ limitations under the License.
 #include "absl/strings/str_replace.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/Module.h"
 #include "xla/error_spec.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/testlib/test.h"
 #include "xla/literal.h"
 #include "xla/literal_util.h"
+#include "xla/primitive_util.h"
 #include "xla/service/hlo_module_config.h"
-#include "xla/service/llvm_ir/ir_array.h"
-#include "xla/service/llvm_ir/llvm_util.h"
-#include "xla/tests/hlo_test_base.h"
-#include "xla/tests/test_macros.h"
+#include "xla/tests/hlo_pjrt_interpreter_reference_mixin.h"
+#include "xla/tests/hlo_pjrt_test_base.h"
 #include "xla/types.h"
 #include "tsl/platform/ml_dtypes.h"
-#include "tsl/platform/statusor.h"
 
 namespace xla {
 namespace {
 
 using std::nullopt;
 
-struct EmitReducePrecisionIrTestCase {
-  float input;
-  std::string expected_res;
-};
-
-class ElementalIrEmitterExecutionTest : public HloTestBase {
+class ElementalIrEmitterExecutionTest
+    : public HloPjRtInterpreterReferenceMixin<HloPjRtTestBase> {
  protected:
   void RunTest(const std::string& hlo_text, absl::Span<Literal* const> args) {
     HloModuleConfig config;
@@ -97,6 +88,9 @@ class ElementalIrEmitterExecutionTypedTest
     return primitive_util::LowercasePrimitiveTypeName(
         primitive_util::NativeToPrimitiveType<T>());
   }
+  int64_t BitWidth() {
+    return primitive_util::BitWidth(primitive_util::NativeToPrimitiveType<T>());
+  }
 };
 
 using FloatTypes =
@@ -107,7 +101,7 @@ using FloatTypes =
 
 TYPED_TEST_SUITE(ElementalIrEmitterExecutionTypedTest, FloatTypes);
 
-XLA_TEST_F(ElementalIrEmitterExecutionTest, DotFusion) {
+TEST_F(ElementalIrEmitterExecutionTest, DotFusion) {
   const std::string hlo_text = R"(
 HloModule FusedDot
 
@@ -131,193 +125,7 @@ ENTRY main {
   RunTest(hlo_text, {&lhs, &rhs});
 }
 
-XLA_TEST_F(ElementalIrEmitterExecutionTest, EmitReducePrecisionIR_F16ToF8e5m2) {
-  llvm::LLVMContext llvm_context;
-  llvm::IRBuilder<> builder(llvm_context);
-  llvm::IRBuilderBase* b = &builder;
-  llvm::Type* f16_type = b->getHalfTy();
-
-  float inf = std::numeric_limits<float>::infinity();
-  float qnan = std::numeric_limits<float>::quiet_NaN();
-  float snan = std::numeric_limits<float>::signaling_NaN();
-
-  EmitReducePrecisionIrTestCase test_cases[] = {
-      // clang-format off
-      {0.0, "half 0xH0000"},
-      {0x1.0p-14, "half 0xH0400"},
-      {0.250, "half 0xH3400"},
-      {1.0, "half 0xH3C00"},
-      {0x1.2p0, "half 0xH3C00"},
-      {0x1.Cp15, "half 0xH7B00"},
-      {-0x1.Cp15, "half 0xHFB00"},
-      {0x1.Dp15, "half 0xH7B00"},
-      {0x1.Ep15, "half 0xH7C00"},
-      {0x1.0p16, "half 0xH7C00"},
-      {inf, "half 0xH7C00"},
-      {-inf, "half 0xHFC00"},
-      {qnan, "half 0xH7E00"},
-      {-qnan, "half 0xHFE00"},
-      {snan, "half 0xH7F00"},
-      {-snan, "half 0xHFF00"},
-      // clang-format on
-  };
-
-  for (auto tc : test_cases) {
-    llvm::Value* c0 = llvm::ConstantFP::get(f16_type, tc.input);
-
-    absl::StatusOr<llvm::Value*> f16_reduced_statusor = EmitReducePrecisionIR(
-        /*src_ty=*/F16, c0,
-        /*dest_exponent_bits=*/primitive_util::ExponentWidth(F8E5M2),
-        /*dest_mantissa_bits=*/primitive_util::SignificandWidth(F8E5M2) - 1,
-        /*quiet_nans=*/true, b);
-    CHECK(f16_reduced_statusor.ok());
-    llvm::Value* f16_reduced = f16_reduced_statusor.value();
-
-    std::string res = llvm_ir::DumpToString(f16_reduced);
-    EXPECT_EQ(res, tc.expected_res) << "Wrong result for input " << tc.input;
-  }
-}
-
-XLA_TEST_F(ElementalIrEmitterExecutionTest, EmitReducePrecisionIR_F16ToF8e4m3) {
-  llvm::LLVMContext llvm_context;
-  llvm::IRBuilder<> builder(llvm_context);
-  llvm::IRBuilderBase* b = &builder;
-  llvm::Type* f16_type = b->getHalfTy();
-
-  float inf = std::numeric_limits<float>::infinity();
-  float qnan = std::numeric_limits<float>::quiet_NaN();
-  float snan = std::numeric_limits<float>::signaling_NaN();
-
-  EmitReducePrecisionIrTestCase test_cases[] = {
-      // clang-format off
-      {0.0, "half 0xH0000"},
-      {0x1.0p-6, "half 0xH2400"},
-      {0.125, "half 0xH3000"},
-      {1.0, "half 0xH3C00"},
-      {0x1.1p0, "half 0xH3C00"},
-      {0x1.Ep7, "half 0xH5B80"},
-      {-0x1.Ep7, "half 0xHDB80"},
-      {0x1.E8p7, "half 0xH5B80"},
-      {0x1.Fp7, "half 0xH7C00"},
-      {0x1.0p8, "half 0xH7C00"},
-      {inf, "half 0xH7C00"},
-      {-inf, "half 0xHFC00"},
-      {qnan, "half 0xH7E00"},
-      {-qnan, "half 0xHFE00"},
-      {snan, "half 0xH7E00"},
-      {-snan, "half 0xHFE00"},
-      // clang-format on
-  };
-
-  for (auto tc : test_cases) {
-    llvm::Value* c0 = llvm::ConstantFP::get(f16_type, tc.input);
-
-    absl::StatusOr<llvm::Value*> f16_reduced_statusor = EmitReducePrecisionIR(
-        /*src_ty=*/F16, c0,
-        /*dest_exponent_bits=*/4,
-        /*dest_mantissa_bits=*/3,
-        /*quiet_nans=*/true, b);
-    CHECK(f16_reduced_statusor.ok());
-    llvm::Value* f16_reduced = f16_reduced_statusor.value();
-
-    std::string res = llvm_ir::DumpToString(f16_reduced);
-    EXPECT_EQ(res, tc.expected_res) << "Wrong result for input " << tc.input;
-  }
-}
-
-XLA_TEST_F(ElementalIrEmitterExecutionTest, EmitReducePrecisionIR_F16ToF8e3m4) {
-  llvm::LLVMContext llvm_context;
-  llvm::IRBuilder<> builder(llvm_context);
-  llvm::IRBuilderBase* b = &builder;
-  llvm::Type* f16_type = b->getHalfTy();
-
-  float inf = std::numeric_limits<float>::infinity();
-  float qnan = std::numeric_limits<float>::quiet_NaN();
-  float snan = std::numeric_limits<float>::signaling_NaN();
-
-  EmitReducePrecisionIrTestCase test_cases[] = {
-      // clang-format off
-      {0.0, "half 0xH0000"},
-      {0x1.0p-2, "half 0xH3400"},
-      {0.5, "half 0xH3800"},
-      {1.0, "half 0xH3C00"},
-      {0x1.08p0, "half 0xH3C00"},
-      {0x1.Fp3, "half 0xH4BC0"},
-      {-0x1.Fp3, "half 0xHCBC0"},
-      {0x1.F4p3, "half 0xH4BC0"},
-      {0x1.F8p3, "half 0xH7C00"},
-      {0x1.0p4, "half 0xH7C00"},
-      {inf, "half 0xH7C00"},
-      {-inf, "half 0xHFC00"},
-      {qnan, "half 0xH7E00"},
-      {-qnan, "half 0xHFE00"},
-      {snan, "half 0xH7E00"},
-      {-snan, "half 0xHFE00"},
-      // clang-format on
-  };
-
-  for (auto tc : test_cases) {
-    llvm::Value* c0 = llvm::ConstantFP::get(f16_type, tc.input);
-
-    absl::StatusOr<llvm::Value*> f16_reduced_statusor = EmitReducePrecisionIR(
-        /*src_ty=*/F16, c0,
-        /*dest_exponent_bits=*/3,
-        /*dest_mantissa_bits=*/4,
-        /*quiet_nans=*/true, b);
-    CHECK(f16_reduced_statusor.ok());
-    llvm::Value* f16_reduced = f16_reduced_statusor.value();
-
-    std::string res = llvm_ir::DumpToString(f16_reduced);
-    EXPECT_EQ(res, tc.expected_res) << "Wrong result for input " << tc.input;
-  }
-}
-
-XLA_TEST_F(ElementalIrEmitterExecutionTest,
-           EmitReducePrecisionIR_F16ToF8e4m3fn) {
-  llvm::LLVMContext llvm_context;
-  llvm::IRBuilder<> builder(llvm_context);
-  llvm::IRBuilderBase* b = &builder;
-  llvm::Type* f16_type = b->getHalfTy();
-
-  float inf = std::numeric_limits<float>::infinity();
-
-  EmitReducePrecisionIrTestCase test_cases[] = {
-      // clang-format off
-      {0.0, "half 0xH0000"},
-      {0x1.0p-6, "half 0xH2400"},
-      {0.125, "half 0xH3000"},
-      {1.0, "half 0xH3C00"},
-      {0x1.1p0, "half 0xH3C00"},
-      {0x1.Cp8, "half 0xH5F00"},
-      {-0x1.Cp8, "half 0xHDF00"},
-      {0x1.Dp8, "half 0xH5F00"},
-      {0x1.Ep8, "half 0xH5F80"},
-      {0x1.0p9, "half 0xH6000"},
-      {inf, "half 0xH7C00"},
-      {-inf, "half 0xHFC00"},
-      // clang-format on
-  };
-
-  for (auto tc : test_cases) {
-    llvm::Value* c0 = llvm::ConstantFP::get(f16_type, tc.input);
-
-    // Truncate the mantissa to 3 bits. ReducePrecision cannot deal with
-    // f8E4M3FN's NaN representations, so don't use ReducePrecision to handle
-    // exponent reduction.
-    absl::StatusOr<llvm::Value*> f16_reduced_statusor = EmitReducePrecisionIR(
-        /*src_ty=*/F16, c0,
-        /*dest_exponent_bits=*/5,
-        /*dest_mantissa_bits=*/3,
-        /*quiet_nans=*/false, b);
-    CHECK(f16_reduced_statusor.ok());
-    llvm::Value* f16_reduced = f16_reduced_statusor.value();
-
-    std::string res = llvm_ir::DumpToString(f16_reduced);
-    EXPECT_EQ(res, tc.expected_res) << "Wrong result for input " << tc.input;
-  }
-}
-
-XLA_TEST_F(ElementalIrEmitterExecutionTest, ScalarDotFusion) {
+TEST_F(ElementalIrEmitterExecutionTest, ScalarDotFusion) {
   const char* hlo_text = R"(
 HloModule ScalarDotFusion
 
@@ -341,7 +149,7 @@ ENTRY main {
   RunTest(hlo_text, {&lhs, &rhs});
 }
 
-XLA_TEST_F(ElementalIrEmitterExecutionTest, BatchDot) {
+TEST_F(ElementalIrEmitterExecutionTest, BatchDot) {
   const char* hlo_text = R"(
 HloModule BatchDot
 
@@ -374,8 +182,8 @@ ENTRY resampler_Resampler.49 {
   EXPECT_TRUE(RunAndCompare(std::move(module), ErrorSpec{4e-3, 4e-3}));
 }
 
-XLA_TEST_F(ElementalIrEmitterExecutionTest,
-           DivideComplexNumbersWithInfiniteNormRhs) {
+TEST_F(ElementalIrEmitterExecutionTest,
+       DivideComplexNumbersWithInfiniteNormRhs) {
   constexpr char hlo_text[] = R"(
     HloModule DivideComplexNumbers
     ENTRY DivideComplexNumbers {
@@ -398,8 +206,7 @@ XLA_TEST_F(ElementalIrEmitterExecutionTest,
   EXPECT_TRUE(RunAndCompare(std::move(module), ErrorSpec{(0.)}));
 }
 
-XLA_TEST_F(ElementalIrEmitterExecutionTest,
-           DivideComplexNumbersWithFiniteNormRhs) {
+TEST_F(ElementalIrEmitterExecutionTest, DivideComplexNumbersWithFiniteNormRhs) {
   constexpr char hlo_text[] = R"(
     HloModule DivideComplexNumbers
     ENTRY DivideComplexNumbers {
@@ -421,8 +228,7 @@ XLA_TEST_F(ElementalIrEmitterExecutionTest,
   EXPECT_TRUE(RunAndCompare(std::move(module), ErrorSpec{(0.)}));
 }
 
-XLA_TEST_F(ElementalIrEmitterExecutionTest,
-           DivideComplexNumbersWithZeroNormRhs) {
+TEST_F(ElementalIrEmitterExecutionTest, DivideComplexNumbersWithZeroNormRhs) {
   constexpr char hlo_text[] = R"(
     HloModule DivideComplexNumbers
     ENTRY DivideComplexNumbers {
@@ -595,14 +401,18 @@ TYPED_TEST(ElementalIrEmitterExecutionTypedTest, CompareFloat) {
   if (std::is_same<TypeParam, tsl::float8_e4m3b11fnuz>()) {
     GTEST_SKIP() << "Skipping test for type " << tname;
   }
-  const auto hlo_text = absl::StrReplaceAll(R"(
+  const auto hlo_text = absl::StrReplaceAll(
+      R"(
   HloModule m
   ENTRY main {
-    p0 = ${tname}[4] parameter(0)
-    p1 = ${tname}[4] parameter(1)
-    ROOT cmp = pred[4] compare(p0, p1), direction=LT
+    p0 = ${tname}[4]{0${element_size}} parameter(0)
+    p1 = ${tname}[4]{0${element_size}} parameter(1)
+    ROOT cmp = pred[4]{0} compare(p0, p1), direction=LT
 })",
-                                            {{"${tname}", tname}});
+      {{"${tname}", tname},
+       {"${element_size}", this->BitWidth() < 8
+                               ? absl::StrCat(":E(", this->BitWidth(), ")")
+                               : ""}});
   Literal lhs = LiteralUtil::CreateR1<TypeParam>(
       {TypeParam(1.), TypeParam(2.), TypeParam(3.), TypeParam(4.)});
   Literal rhs = LiteralUtil::CreateR1<TypeParam>(
@@ -648,19 +458,12 @@ TYPED_TEST(ElementalIrEmitterExecutionTypedTest, BatchDotFloat) {
   }
   )",
                                             {{"${tname}", tname}});
-  HloModuleConfig config;
-  DebugOptions debug_options = HloTestBase::GetDebugOptionsForTest();
-  config.set_debug_options(debug_options);
-
-  TF_ASSERT_OK_AND_ASSIGN(
-      std::unique_ptr<HloModule> module,
-      HloTestBase::ParseAndReturnVerifiedModule(hlo_text, config));
-  EXPECT_TRUE(
-      HloTestBase::RunAndCompare(std::move(module), ErrorSpec{1e-3, 1e-3}));
+  EXPECT_TRUE(ElementalIrEmitterExecutionTest::RunAndCompare(
+      hlo_text, ErrorSpec{1e-3, 1e-3}));
 }
 
-XLA_TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax,
-           MinimumHandlesNaNsOnTheLeft) {
+TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax,
+       MinimumHandlesNaNsOnTheLeft) {
   constexpr absl::string_view kHloText = R"(
 HloModule t
 
@@ -674,8 +477,8 @@ ENTRY e {
   EXPECT_TRUE(RunAndCompare(kHloText, ErrorSpec{/*aabs=*/1e-3, /*arel=*/1e-3}));
 }
 
-XLA_TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax,
-           MinimumHandlesNaNsOnTheRight) {
+TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax,
+       MinimumHandlesNaNsOnTheRight) {
   constexpr absl::string_view kHloText = R"(
 HloModule t
 
@@ -689,8 +492,8 @@ ENTRY e {
   EXPECT_TRUE(RunAndCompare(kHloText, ErrorSpec{/*aabs=*/1e-3, /*arel=*/1e-3}));
 }
 
-XLA_TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax,
-           MaximumHandlesNaNsOnTheLeft) {
+TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax,
+       MaximumHandlesNaNsOnTheLeft) {
   constexpr absl::string_view kHloText = R"(
 HloModule t
 
@@ -704,8 +507,8 @@ ENTRY e {
   EXPECT_TRUE(RunAndCompare(kHloText, ErrorSpec{/*aabs=*/1e-3, /*arel=*/1e-3}));
 }
 
-XLA_TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax,
-           MaximumHandlesNaNsOnTheRight) {
+TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax,
+       MaximumHandlesNaNsOnTheRight) {
   constexpr absl::string_view kHloText = R"(
 HloModule t
 
@@ -719,8 +522,7 @@ ENTRY e {
   EXPECT_TRUE(RunAndCompare(kHloText, ErrorSpec{/*aabs=*/1e-3, /*arel=*/1e-3}));
 }
 
-XLA_TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax,
-           MinimumReturnsLHS) {
+TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax, MinimumReturnsLHS) {
   constexpr absl::string_view kHloText = R"(
 HloModule t
 
@@ -736,8 +538,7 @@ ENTRY e {
                                                 /*arel=*/1e-3}));
 }
 
-XLA_TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax,
-           MinimumReturnsRHS) {
+TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax, MinimumReturnsRHS) {
   constexpr absl::string_view kHloText = R"(
 HloModule t
 
@@ -753,8 +554,7 @@ ENTRY e {
                                                 /*arel=*/1e-3}));
 }
 
-XLA_TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax,
-           MaximumReturnsLHS) {
+TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax, MaximumReturnsLHS) {
   constexpr absl::string_view kHloText = R"(
 HloModule t
 
@@ -770,8 +570,7 @@ ENTRY e {
                                                 /*arel=*/1e-3}));
 }
 
-XLA_TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax,
-           MaximumReturnsRHS) {
+TEST_F(ElementalIrEmitterExecutionTestWithoutFastMinMax, MaximumReturnsRHS) {
   constexpr absl::string_view kHloText = R"(
 HloModule t
 
@@ -785,33 +584,6 @@ ENTRY e {
 
   EXPECT_TRUE(RunAndCompare(kHloText, ErrorSpec{/*aabs=*/1e-3,
                                                 /*arel=*/1e-3}));
-}
-
-class ElementalIrEmitterInternalTest : public HloTestBase {};
-
-XLA_TEST_F(ElementalIrEmitterInternalTest, SparseDotIsUnsupported) {
-  constexpr absl::string_view kHloText = R"(
-HloModule test
-
-ENTRY main {
-  lhs = f16[5,16] parameter(0)
-  rhs = f16[32,10] parameter(1)
-  meta = u16[5,2] parameter(2)
-  ROOT dot = f32[5,10] dot(lhs, rhs, meta),
-      lhs_contracting_dims={1}, rhs_contracting_dims={0}, sparsity=L.1@2:4
-})";
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
-                          ParseAndReturnVerifiedModule(kHloText));
-  HloInstruction* root = module->entry_computation()->root_instruction();
-
-  llvm::LLVMContext llvm_context;
-  llvm::Module llvm_module("", llvm_context);
-  llvm::IRBuilder<> builder(llvm_context);
-  ElementalIrEmitterForTests emitter(&llvm_module, &builder);
-
-  llvm_ir::IrArray::Index test_index{builder.getInt64Ty()};
-  auto result = emitter.TestElementalDot(root, test_index);
-  EXPECT_FALSE(result.ok());
 }
 
 }  // namespace

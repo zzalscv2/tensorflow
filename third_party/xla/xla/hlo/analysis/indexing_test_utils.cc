@@ -15,7 +15,6 @@ limitations under the License.
 
 #include "xla/hlo/analysis/indexing_test_utils.h"
 
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -26,11 +25,11 @@ limitations under the License.
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
-#include "absl/container/flat_hash_set.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
@@ -40,7 +39,6 @@ limitations under the License.
 #include "mlir/AsmParser/AsmParser.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/MLIRContext.h"
 #include "mlir/Support/LLVM.h"
 #include "xla/hlo/analysis/indexing_analysis.h"
 #include "xla/hlo/analysis/indexing_map.h"
@@ -53,7 +51,6 @@ namespace {
 
 using ::mlir::AffineExpr;
 using ::mlir::AffineMap;
-using ::mlir::MLIRContext;
 
 std::string FormatDimsAndSyms(absl::Span<int64_t const> dims,
                               absl::Span<int64_t const> syms) {
@@ -76,7 +73,9 @@ HloInstructionIndexing IndexingTestBase::GetOutputToInputIndexing(
   HloInstructionIndexing indexing =
       ComputeOutputToInputIndexing(instr, output_id, &mlir_context_);
 
-  if (!use_physical_layout) return indexing;
+  if (!use_physical_layout) {
+    return indexing;
+  }
 
   IndexingMap output_permutation = GetIndexingMapFromPhysicalLayoutToLogical(
       GetOutputShape(instr, output_id), &mlir_context_);
@@ -86,16 +85,16 @@ HloInstructionIndexing IndexingTestBase::GetOutputToInputIndexing(
     IndexingMap operand_permutation = GetIndexingMapFromLogicalToPhysicalLayout(
         instr->operand(operand_id)->shape(), &mlir_context_);
 
-    absl::flat_hash_set<IndexingMap> operand_indexing_maps;
-    for (const IndexingMap& indexing_map : indexing_maps) {
+    OperandIndexingSet operand_indexing_maps;
+    for (const OperandIndexing& indexing_map : indexing_maps) {
       auto normalized_indexing_map = indexing_map;
       if (!output_permutation.GetAffineMap().isIdentity()) {
-        normalized_indexing_map =
-            ComposeIndexingMaps(output_permutation, normalized_indexing_map);
+        normalized_indexing_map = ComposeOperandIndexing(
+            OperandIndexing(output_permutation), normalized_indexing_map);
       }
       if (!operand_permutation.GetAffineMap().isIdentity()) {
-        normalized_indexing_map =
-            ComposeIndexingMaps(normalized_indexing_map, operand_permutation);
+        normalized_indexing_map = ComposeOperandIndexing(
+            normalized_indexing_map, OperandIndexing(operand_permutation));
       }
       operand_indexing_maps.insert(normalized_indexing_map);
     }
@@ -109,26 +108,30 @@ HloInstructionIndexing IndexingTestBase::GetInputToOutputIndexing(
   HloInstructionIndexing indexing =
       ComputeInputToOutputIndexing(instr, input_id, &mlir_context_);
 
-  if (!use_physical_layout) return indexing;
+  if (!use_physical_layout) {
+    return indexing;
+  }
 
-  IndexingMap input_permutation = GetIndexingMapFromPhysicalLayoutToLogical(
-      instr->operand(input_id)->shape(), &mlir_context_);
+  OperandIndexing input_permutation =
+      OperandIndexing(GetIndexingMapFromPhysicalLayoutToLogical(
+          instr->operand(input_id)->shape(), &mlir_context_));
 
   for (const auto& [output_id, indexing_maps] :
        llvm::enumerate(indexing.indexing_maps)) {
-    IndexingMap operand_permutation = GetIndexingMapFromLogicalToPhysicalLayout(
-        GetOutputShape(instr, output_id), &mlir_context_);
+    OperandIndexing operand_permutation =
+        OperandIndexing(GetIndexingMapFromLogicalToPhysicalLayout(
+            GetOutputShape(instr, output_id), &mlir_context_));
 
-    absl::flat_hash_set<IndexingMap> operand_indexing_maps;
-    for (const IndexingMap& indexing_map : indexing_maps) {
+    OperandIndexingSet operand_indexing_maps;
+    for (const OperandIndexing& indexing_map : indexing_maps) {
       auto normalized_indexing_map = indexing_map;
-      if (!input_permutation.GetAffineMap().isIdentity()) {
+      if (!input_permutation.map().GetAffineMap().isIdentity()) {
         normalized_indexing_map =
-            ComposeIndexingMaps(input_permutation, normalized_indexing_map);
+            ComposeOperandIndexing(input_permutation, normalized_indexing_map);
       }
-      if (!operand_permutation.GetAffineMap().isIdentity()) {
-        normalized_indexing_map =
-            ComposeIndexingMaps(normalized_indexing_map, operand_permutation);
+      if (!operand_permutation.map().GetAffineMap().isIdentity()) {
+        normalized_indexing_map = ComposeOperandIndexing(
+            normalized_indexing_map, operand_permutation);
       }
       operand_indexing_maps.insert(normalized_indexing_map);
     }
@@ -137,25 +140,16 @@ HloInstructionIndexing IndexingTestBase::GetInputToOutputIndexing(
   return indexing;
 }
 
-AffineMap ParseAffineMap(absl::string_view serialized_affine_map,
-                         MLIRContext* context) {
-  std::string full_affine_map_string =
-      absl::StrCat("affine_map<", serialized_affine_map, ">");
-  return mlir::cast<mlir::AffineMapAttr>(
-             mlir::parseAttribute(full_affine_map_string, context))
-      .getValue();
-}
-
 // Since MLIR does not have AffineExprAttr, we construct an AffineMap and then
 // retrieve its first result.
 AffineExpr ParseAffineExpr(absl::string_view serialized_affine_expr,
-                           MLIRContext* context) {
+                           mlir::MLIRContext* mlir_context) {
   std::string full_affine_map_string = absl::StrCat(
       "affine_map<(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9)"
       "[s0, s1, s2, s3, s4, s5, s6, s7, s8, s9] -> (",
       serialized_affine_expr, ")>");
   return mlir::cast<mlir::AffineMapAttr>(
-             mlir::parseAttribute(full_affine_map_string, context))
+             mlir::parseAttribute(full_affine_map_string, mlir_context))
       .getValue()
       .getResult(0);
 }
@@ -165,10 +159,10 @@ bool ApproximateMatch(absl::string_view lhs, absl::string_view rhs) {
   size_t rhs_length = rhs.size();
   size_t l = 0, r = 0;
   while (l < lhs_length || r < rhs_length) {
-    while (l < lhs_length && std::isspace(lhs[l])) {
+    while (l < lhs_length && absl::ascii_isspace(lhs[l])) {
       ++l;
     }
-    while (r < rhs_length && std::isspace(rhs[r])) {
+    while (r < rhs_length && absl::ascii_isspace(rhs[r])) {
       ++r;
     }
     if (l == lhs_length || r == rhs_length) {

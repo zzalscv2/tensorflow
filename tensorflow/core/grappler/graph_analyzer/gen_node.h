@@ -21,6 +21,7 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/op_def.pb.h"
@@ -34,7 +35,7 @@ namespace graph_analyzer {
 class GenNode;
 
 // To find nodes by name.
-using GenNodeMap = std::unordered_map<string, std::unique_ptr<GenNode>>;
+using GenNodeMap = std::unordered_map<std::string, std::unique_ptr<GenNode>>;
 
 // One node in the graph, in the form convenient for traversal and generation of
 // subgraphs. It refers to the original NodeDef protobuf for most information
@@ -50,8 +51,8 @@ class GenNode {
   explicit GenNode(const NodeDef* node);
 
   // Access wrappers.
-  const string& name() const { return node_->name(); }
-  const string& opcode() const { return node_->op(); }
+  const std::string& name() const { return node_->name(); }
+  const std::string& opcode() const { return node_->op(); }
   const NodeDef* node_def() const { return node_; }
 
   // Parse the inputs of this node and update the map accordingly, creating the
@@ -110,7 +111,7 @@ class GenNode {
 
     // Convenient for printing. I've really wanted it to be implicit but
     // ClangTidy insists on making it explicit.
-    explicit operator string() const;
+    explicit operator std::string() const;
 
    private:
     explicit Port(IntPort value) : value_(value) {}

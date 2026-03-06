@@ -13,7 +13,7 @@ load(
 load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
-    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = [
         "//visibility:public",
     ],
@@ -279,7 +279,7 @@ cc_library(
     testonly = True,
     deps = [
         ":target_aware_conversion",
-        "//tensorflow/compiler/mlir:tf_mlir_opt_main",
+        "//tensorflow/compiler/mlir/lite:litert_mlir_opt_main",
     ],
     alwayslink = 1,
 )

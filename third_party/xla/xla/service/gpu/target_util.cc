@@ -63,7 +63,9 @@ using absl::StrCat;
 // intrinsics. Therefore a variant type is used to wrap the lambda to call
 // those device functions.
 struct TargetIntrinsics {
-  llvm::Intrinsic::ID nvptx_intrinsic;
+  std::variant<llvm::Intrinsic::ID,
+               std::function<llvm::CallInst*(llvm::IRBuilderBase*)>>
+      nvptx_intrinsic_or_function;
   std::variant<llvm::Intrinsic::ID,
                std::function<llvm::CallInst*(llvm::IRBuilderBase*)>>
       amdgpu_intrinsic_or_function;
@@ -143,7 +145,19 @@ struct TargetIntrinsics GetIntrinsic(TargetIntrinsicID intrin) {
       };
     }
     case TargetIntrinsicID::kBarrierId: {
-      return {llvm::Intrinsic::nvvm_barrier0, llvm::Intrinsic::amdgcn_s_barrier,
+      return {[](llvm::IRBuilderBase* b_) -> llvm::CallInst* {
+                // We need to use the callback mechanism here, because the
+                // barrier intrinsics expects a constant 0 as operand, whereas
+                // for AMD no operand is expected. We don't want to distinguish
+                // at the call site.
+                llvm::Module* module = b_->GetInsertBlock()->getModule();
+                llvm::Function* intrinsic =
+                    llvm::Intrinsic::getOrInsertDeclaration(
+                        module,
+                        llvm::Intrinsic::nvvm_barrier_cta_sync_aligned_all, {});
+                return b_->CreateCall(intrinsic, {b_->getInt32(0)});
+              },
+              llvm::Intrinsic::amdgcn_s_barrier,
               [](llvm::IRBuilderBase* b_) -> llvm::CallInst* {
                 return EmitDeviceFunctionCall(
                     "_Z22__spirv_ControlBarrierjjj",
@@ -221,11 +235,29 @@ struct TargetDeviceFunction {
 struct TargetDeviceFunction GetDeviceFunctionRoot(
     TargetDeviceFunctionID func_id) {
   switch (func_id) {
+    case TargetDeviceFunctionID::kAcos: {
+      return {"__nv_acos", "__ocml_acos", "_Z16__spirv_ocl_acos"};
+    }
+    case TargetDeviceFunctionID::kAcosh: {
+      return {"__nv_acosh", "__ocml_acosh", "_Z17__spirv_ocl_acosh"};
+    }
     case TargetDeviceFunctionID::kAtan2: {
       return {"__nv_atan2", "__ocml_atan2", "_Z17__spirv_ocl_atan2"};
     }
+    case TargetDeviceFunctionID::kAsin: {
+      return {"__nv_asin", "__ocml_asin", "_Z16__spirv_ocl_asin"};
+    }
+    case TargetDeviceFunctionID::kAsinh: {
+      return {"__nv_asinh", "__ocml_asinh", "_Z17__spirv_ocl_asinh"};
+    }
+    case TargetDeviceFunctionID::kAtanh: {
+      return {"__nv_atanh", "__ocml_atanh", "_Z17__spirv_ocl_atanh"};
+    }
     case TargetDeviceFunctionID::kCos: {
       return {"__nv_cos", "__ocml_cos", "_Z15__spirv_ocl_cos"};
+    }
+    case TargetDeviceFunctionID::kCosh: {
+      return {"__nv_cosh", "__ocml_cosh", "_Z16__spirv_ocl_cosh"};
     }
     case TargetDeviceFunctionID::kErf: {
       return {"__nv_erf", "__ocml_erf", "_Z15__spirv_ocl_erf"};
@@ -257,6 +289,9 @@ struct TargetDeviceFunction GetDeviceFunctionRoot(
     case TargetDeviceFunctionID::kSin: {
       return {"__nv_sin", "__ocml_sin", "_Z15__spirv_ocl_sin"};
     }
+    case TargetDeviceFunctionID::kSinh: {
+      return {"__nv_sinh", "__ocml_sinh", "_Z16__spirv_ocl_sinh"};
+    }
     case TargetDeviceFunctionID::kSqrt: {
       return {"__nv_sqrt", "__ocml_sqrt", "_Z16__spirv_ocl_sqrt"};
     }
@@ -275,10 +310,22 @@ struct TargetDeviceFunction GetDeviceFunctionRoot(
 
 std::optional<TargetDeviceFunctionID> GetTargetDeviceFunctionID(HloOpcode op) {
   switch (op) {
+    case HloOpcode::kAcos:
+      return TargetDeviceFunctionID::kAcos;
+    case HloOpcode::kAcosh:
+      return TargetDeviceFunctionID::kAcosh;
+    case HloOpcode::kAsin:
+      return TargetDeviceFunctionID::kAsin;
+    case HloOpcode::kAsinh:
+      return TargetDeviceFunctionID::kAsinh;
     case HloOpcode::kAtan2:
       return TargetDeviceFunctionID::kAtan2;
+    case HloOpcode::kAtanh:
+      return TargetDeviceFunctionID::kAtanh;
     case HloOpcode::kCos:
       return TargetDeviceFunctionID::kCos;
+    case HloOpcode::kCosh:
+      return TargetDeviceFunctionID::kCosh;
     case HloOpcode::kExp:
       return TargetDeviceFunctionID::kExp;
     case HloOpcode::kErf:
@@ -297,6 +344,8 @@ std::optional<TargetDeviceFunctionID> GetTargetDeviceFunctionID(HloOpcode op) {
       return TargetDeviceFunctionID::kRsqrt;
     case HloOpcode::kSin:
       return TargetDeviceFunctionID::kSin;
+    case HloOpcode::kSinh:
+      return TargetDeviceFunctionID::kSinh;
     case HloOpcode::kSqrt:
       return TargetDeviceFunctionID::kSqrt;
     case HloOpcode::kTan:
@@ -355,7 +404,7 @@ std::string ObtainDeviceFunctionName(TargetDeviceFunctionID func_id,
     } else {
       LOG(FATAL) << "Unexpected type while getting device function name.";
     }
-  } else if (target_triple.isSPIR()) {
+  } else if (target_triple.isSPIROrSPIRV()) {
     // TODO(b/370452608): Are there approximate functions we can use for BF16
     // and F16 types?
     if (output_type == BF16 || output_type == F16 || output_type == F32) {
@@ -410,7 +459,7 @@ llvm::CallInst* EmitDeviceFunctionCall(
           .getCallee());
 
   callee->addFnAttrs(attributes);
-  if (target_triple.isSPIR())
+  if (target_triple.isSPIROrSPIRV())
     callee->setCallingConv(llvm::CallingConv::SPIR_FUNC);
 
   return b->CreateCall(callee, llvm_ir::AsArrayRef(operands), name.data());
@@ -421,41 +470,31 @@ llvm::CallInst* EmitCallToTargetIntrinsic(
     absl::Span<llvm::Type* const> overloaded_types, llvm::IRBuilderBase* b) {
   llvm::Module* module = b->GetInsertBlock()->getModule();
   struct TargetIntrinsics gpu_intrinsic_id = GetIntrinsic(intrinsic_id);
+  std::variant<llvm::Intrinsic::ID,
+               std::function<llvm::CallInst*(llvm::IRBuilderBase*)>>
+      llvm_intrinsic_or_function;
   llvm::Triple target_triple = llvm::Triple(module->getTargetTriple());
-  llvm::Intrinsic::ID llvm_intrinsic_id = llvm::Intrinsic::not_intrinsic;
   if (target_triple.isNVPTX()) {
-    llvm_intrinsic_id = gpu_intrinsic_id.nvptx_intrinsic;
+    llvm_intrinsic_or_function = gpu_intrinsic_id.nvptx_intrinsic_or_function;
   } else if (target_triple.getArch() == llvm::Triple::amdgcn) {
-    llvm::Intrinsic::ID* llvm_intrinsic_id_ptr =
-        std::get_if<llvm::Intrinsic::ID>(
-            &gpu_intrinsic_id.amdgpu_intrinsic_or_function);
-    if (llvm_intrinsic_id_ptr) {
-      llvm_intrinsic_id = *llvm_intrinsic_id_ptr;
-    } else {
-      std::function<llvm::CallInst*(llvm::IRBuilderBase*)>* builder_func =
-          std::get_if<std::function<llvm::CallInst*(llvm::IRBuilderBase*)>>(
-              &gpu_intrinsic_id.amdgpu_intrinsic_or_function);
-      return (*builder_func)(b);
-    }
-  } else if (target_triple.isSPIR()) {
-    llvm::Intrinsic::ID* llvm_intrinsic_id_ptr =
-        std::get_if<llvm::Intrinsic::ID>(
-            &gpu_intrinsic_id.spir_intrinsic_or_function);
-    if (llvm_intrinsic_id_ptr) {
-      llvm_intrinsic_id = *llvm_intrinsic_id_ptr;
-    } else {
-      std::function<llvm::CallInst*(llvm::IRBuilderBase*)>* builder_func =
-          std::get_if<std::function<llvm::CallInst*(llvm::IRBuilderBase*)>>(
-              &gpu_intrinsic_id.spir_intrinsic_or_function);
-      return (*builder_func)(b);
-    }
+    llvm_intrinsic_or_function = gpu_intrinsic_id.amdgpu_intrinsic_or_function;
+  } else if (target_triple.isSPIROrSPIRV()) {
+    llvm_intrinsic_or_function = gpu_intrinsic_id.spir_intrinsic_or_function;
   } else {
     LOG(FATAL) << "Invalid triple " << target_triple.str();
   }
-
-  llvm::Function* intrinsic = llvm::Intrinsic::getOrInsertDeclaration(
-      module, llvm_intrinsic_id, llvm_ir::AsArrayRef(overloaded_types));
-  return b->CreateCall(intrinsic, llvm_ir::AsArrayRef(operands));
+  llvm::Intrinsic::ID* llvm_intrinsic_id_ptr =
+      std::get_if<llvm::Intrinsic::ID>(&llvm_intrinsic_or_function);
+  if (llvm_intrinsic_id_ptr) {
+    llvm::Intrinsic::ID llvm_intrinsic_id = *llvm_intrinsic_id_ptr;
+    llvm::Function* intrinsic = llvm::Intrinsic::getOrInsertDeclaration(
+        module, llvm_intrinsic_id, llvm_ir::AsArrayRef(overloaded_types));
+    return b->CreateCall(intrinsic, llvm_ir::AsArrayRef(operands));
+  }
+  std::function<llvm::CallInst*(llvm::IRBuilderBase*)>* builder_func =
+      std::get_if<std::function<llvm::CallInst*(llvm::IRBuilderBase*)>>(
+          &llvm_intrinsic_or_function);
+  return (*builder_func)(b);
 }
 
 void AnnotateFunctionAsGpuKernel(llvm::Module* module, llvm::Function* func,
@@ -468,8 +507,8 @@ void AnnotateFunctionAsGpuKernel(llvm::Module* module, llvm::Function* func,
   } else if (target_triple.getArch() == llvm::Triple::amdgcn) {
     // Attach information so AMDGPU can recognize function as a AMDGPU kernel.
     func->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
-    func->addFnAttr("amdgpu-flat-work-group-size", "1, 1024");
-  } else if (target_triple.isSPIR()) {
+    func->addFnAttr("uniform-work-group-size", "true");
+  } else if (target_triple.isSPIROrSPIRV()) {
     // Attach information so that it can be recognized as a SPIR kernel.
     func->setCallingConv(llvm::CallingConv::SPIR_KERNEL);
   } else {

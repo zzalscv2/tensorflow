@@ -30,6 +30,7 @@ limitations under the License.
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
@@ -41,11 +42,14 @@ limitations under the License.
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LLVM.h"
 #include "shardy/common/file_utils.h"
+#include "shardy/dialect/sdy/transforms/common/propagation_options.h"
 #include "shardy/dialect/sdy/transforms/propagation/passes.h"
 #include "re2/re2.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_input_output_alias_config.h"
 #include "xla/hlo/ir/hlo_module.h"
+#include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/ir/stack_frames.h"
 #include "xla/hlo/transforms/simplifiers/hlo_dce.h"
 #include "xla/hlo/transforms/simplifiers/tuple_simplifier.h"
 #include "xla/hlo/translate/stablehlo.h"
@@ -67,6 +71,7 @@ limitations under the License.
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
+#include "xla/xla.pb.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/path.h"
 
@@ -131,6 +136,9 @@ absl::Status createFromProtoAndReplaceComputations(
   // Remove the old computations, which are currently dead.
   CHECK_OK(HloDCE().Run(module));
 
+  TF_ASSIGN_OR_RETURN(StackFrames stack_frames,
+                      StackFrames::FromProto(proto.stack_frame_index()));
+  module->set_stack_frames(std::move(stack_frames));
   return absl::OkStatus();
 }
 
@@ -167,11 +175,11 @@ OriginalParamIndexToFlattenedNum getOriginalParamIndexToFlattenedNum(
 // Flattens the given `shape`.
 Shape getFlattenedShape(const Shape& shape) {
   std::vector<Shape> flattenedShapes;
-  ShapeUtil::ForEachLeafShape(
-      shape, [&](const Shape& subShape, const ShapeIndex& index) {
-        flattenedShapes.push_back(subShape);
-      });
-  return ShapeUtil::MakeMaybeTupleShape(flattenedShapes);
+  ShapeUtil::ForEachLeafShape(shape,
+                              [&](const Shape& subShape, const ShapeIndex&) {
+                                flattenedShapes.push_back(subShape);
+                              });
+  return ShapeUtil::MakeValidatedMaybeTupleShape(flattenedShapes).value();
 }
 
 // Get the flattened version of a computation layout.
@@ -181,9 +189,6 @@ Shape getFlattenedShape(const Shape& shape) {
 // parameter.
 ComputationLayout getFlattenedComputationLayout(
     const ComputationLayout& computationLayout, bool useTupleArgs) {
-  if (!computationLayout.AnyLayoutSet()) {
-    return computationLayout;
-  }
   // Flatten the result layout.
   ComputationLayout flattenedComputationLayout = ComputationLayout(
       ShapeLayout(getFlattenedShape(computationLayout.result_shape())));
@@ -196,7 +201,7 @@ ComputationLayout getFlattenedComputationLayout(
   for (int64_t i = 0; i != computationLayout.parameter_count(); ++i) {
     ShapeUtil::ForEachLeafShape(
         computationLayout.parameter_shape(i),
-        [&](const Shape& subShape, const ShapeIndex& index) {
+        [&](const Shape& subShape, const ShapeIndex&) {
           if (useTupleArgs) {
             *tupleShape.add_tuple_shapes() = subShape;
           } else {
@@ -295,27 +300,30 @@ void removeFrontendAttributes(HloModule* hloModule,
 }
 
 std::string getShardyDirIfShouldDump(const DebugOptions& debugOptions,
-                                     absl::string_view passName) {
+                                     absl::string_view passName,
+                                     bool isShardyVerbose) {
   std::string shardyDir = debugOptions.xla_dump_to();
-  if (shardyDir.empty()) {
-    return "";
+  if (shardyDir.empty() || isShardyVerbose) {
+    return shardyDir;
   }
-  if (debugOptions.xla_dump_hlo_pass_re().empty() ||
-      !RE2::PartialMatch(passName, debugOptions.xla_dump_hlo_pass_re())) {
+  absl::string_view regex = debugOptions.xla_dump_hlo_pass_re();
+  if (regex.empty() || !RE2::PartialMatch(passName, regex)) {
     return "";
   }
   return shardyDir;
 }
 
-absl::Status runShardingPropagation(HloModule* hloModule,
-                                    mlir::ModuleOp mlirModule,
-                                    bool importMhloShardings,
-                                    mlir::sdy::PropagationOptions options,
-                                    absl::string_view passName) {
-  LOG(INFO) << "Using Shardy for XLA SPMD propagation.";
+absl::Status runShardingPropagation(
+    HloModule* hloModule, mlir::ModuleOp mlirModule, bool importMhloShardings,
+    mlir::sdy::PropagationOptions options, bool dedupFunctionsFully,
+    bool enableNativeNonFlatSupport, absl::string_view passName) {
+  VLOG(1) << "Using Shardy for XLA SPMD propagation.";
 
   const DebugOptions& debugOptions = hloModule->config().debug_options();
-  std::string shardyDir = getShardyDirIfShouldDump(debugOptions, passName);
+  bool isShardyVerbose =
+      absl::StrContains(debugOptions.xla_dump_hlo_pass_re(), kShardyVerbose);
+  std::string shardyDir =
+      getShardyDirIfShouldDump(debugOptions, passName, isShardyVerbose);
 
   if (shardyDir == "sponge") {
     shardyDir = getenv("TEST_UNDECLARED_OUTPUTS_DIR");
@@ -326,6 +334,11 @@ absl::Status runShardingPropagation(HloModule* hloModule,
       LOG(INFO) << "Shardy dump directory is sponge on undeclared outputs dir: "
                 << shardyDir;
     }
+  }
+
+  if (isShardyVerbose) {
+    options.debugPropagationEdgeSharding = true;
+    options.debugShardingOrigins = true;
   }
 
   if (!shardyDir.empty()) {
@@ -343,10 +356,15 @@ absl::Status runShardingPropagation(HloModule* hloModule,
 
   mlir::PassManager pm(mlirModule->getContext());
   pm.enableVerifier(enableVerifier);
-  pm.addPass(mlir::sdy::createSaveModuleOpPass(shardyDir,
-                                               "sdy_module_before_xla_import"));
+  int dumpIndex = 0;
+  pm.addPass(mlir::sdy::createSaveModuleOpPass(shardyDir, "input_module",
+                                               dumpIndex++));
 
   if (importMhloShardings) {
+    // This branch is only used for testing. It allows us to test the module
+    // with hlo shardings without the frontend attributes.
+    LOG(WARNING) << "ShardyXLA is run against a module with HLO shardings. It "
+                    "should be used only for testing.";
     auto spanToArrayRef = [](absl::Span<const bool> span) {
       return mlir::ArrayRef<bool>(span.data(), span.size());
     };
@@ -358,35 +376,79 @@ absl::Status runShardingPropagation(HloModule* hloModule,
         spanToArrayRef(
             hloModule->config().allow_spmd_sharding_propagation_to_output()));
   } else {
-    // This is the default path.
-    addSdyRoundTripImportPipeline(pm);
+    // This branch is in production.
+    addSdyRoundTripImportPipeline(pm, /*enableConstantImport=*/true,
+                                  /*liftAndDedupMeshes=*/true,
+                                  debugOptions.xla_enable_hlo_sharding_v3());
   }
 
   // NOTE: if we are using auto-spmd, we will use conservative propagation
   // since the TOAST cost model cannot account for split axes or padding.
   options.dumpDirectory = shardyDir;
   options.conservativePropagation = hloModule->use_auto_spmd_partitioning();
-  mlir::sdy::addPropagationPipeline(pm, options);
-  addStablehloExportPipeline(pm);
-  pm.addPass(mlir::sdy::createSaveModuleOpPass(shardyDir,
-                                               "sdy_module_after_xla_export"));
+  options.enableAutoPartitioning = hloModule->use_auto_spmd_partitioning();
+  options.enableNativeNonFlatSupport = enableNativeNonFlatSupport;
+  mlir::sdy::addPropagationPipeline(pm, dumpIndex, options);
+
+  xla::sdy::StablehloExportPipelineOptions stablehloExportPipelineOptions;
+  stablehloExportPipelineOptions.dedupFunctionsFully = dedupFunctionsFully;
+  stablehloExportPipelineOptions.enableHloShardingV3 =
+      debugOptions.xla_enable_hlo_sharding_v3();
+  addStablehloExportPipeline(pm, stablehloExportPipelineOptions);
+  pm.addPass(mlir::sdy::createSaveModuleOpPass(shardyDir, "output_module",
+                                               dumpIndex++));
   tsl::StatusScopedDiagnosticHandler diagnosticHandler(
       mlirModule->getContext());
   return diagnosticHandler.consumeStatus(pm.run(mlirModule));
 }
 
+bool eraseInlineableAttrForShardyManualComputations(HloModule* module) {
+  bool changed = false;
+  for (HloComputation* computation : module->computations()) {
+    for (HloInstruction* instruction : computation->instructions()) {
+      if (instruction->opcode() == HloOpcode::kCall &&
+          instruction->frontend_attributes().map().contains(
+              kXlaInlineableAttr) &&
+          absl::StrContains(instruction->to_apply()->name(),
+                            sdy::kManualComputationFuncName.str())) {
+        instruction->erase_frontend_attribute(kXlaInlineableAttr);
+        // TODO(b/436603025). CallInliner do not inline the Shardy related
+        // manual computations based on the callee name. We have to rename the
+        // callee to a name such that it can be inlined. If we can remove the
+        // special handling in CallInliner, we can remove this renaming.
+        module->SetAndUniquifyComputationName(instruction->to_apply(),
+                                              "inlineable_callee");
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
 }  // namespace
 
-absl::StatusOr<bool> ShardyXLA::Run(
+absl::StatusOr<bool> ShardyXLA::RunImpl(
     HloModule* hloModule,
     const absl::flat_hash_set<absl::string_view>& executionThreads) {
   auto moduleFrontendAttrs = hloModule->frontend_attributes().map();
   bool useTupleArgs = moduleFrontendAttrs.contains(kUseTupleArgs);
   bool importMhloShardings = moduleFrontendAttrs.contains(kImportMhloShardings);
 
-  if (!runSdyShardingPropagation && !useTupleArgs) {
-    // Nothing to do.
-    return false;
+  // If propagation is enabled, we don't need to erase the inlineable attribute
+  // for manual computations, since StablehloExportPipeline can handle it.
+  if (!runSdyShardingPropagation) {
+    bool changed = eraseInlineableAttrForShardyManualComputations(hloModule);
+    if (!useTupleArgs) {
+      // Nothing more to do.
+      return changed;
+    }
+  }
+
+  // The auto-spmd flag is present in both the HLO module and the config. Apply
+  // auto spmd partitioning if either is true.
+  if (hloModule->use_auto_spmd_partitioning() ||
+      hloModule->config().use_auto_spmd_partitioning()) {
+    hloModule->set_use_auto_spmd_partitioning(true);
   }
 
   // HLO -> StableHLO
@@ -414,9 +476,16 @@ absl::StatusOr<bool> ShardyXLA::Run(
                                      useTupleArgs);
 
   if (runSdyShardingPropagation) {
-    TF_RETURN_IF_ERROR(runShardingPropagation(hloModule, mlirModule.get(),
-                                              importMhloShardings,
-                                              defaultOptions, name()));
+    TF_RETURN_IF_ERROR(runShardingPropagation(
+        hloModule, mlirModule.get(), importMhloShardings, propagationOptions,
+        dedupFunctionsFully, enableNativeNonFlatSupport, name()));
+  }
+
+  // TODO(b/431836696): Remove once issue is fixed.
+  if (useTupleArgs) {
+    mlirModule.get()->removeAttr(
+        "mhlo.xla_entry_computation_parameter_layouts");
+    mlirModule.get()->removeAttr("mhlo.xla_entry_computation_parameter_tiles");
   }
 
   // StableHlo -> HLO
@@ -438,18 +507,17 @@ absl::StatusOr<bool> ShardyXLA::Run(
       std::move(flattenedInputOutputAliasConfig));
   hloModule->set_buffer_donor_config(std::move(flattenedBufferDonorsConfig));
 
-  // Shardy currently propagates shardings to parameters and root
-  // instructions. Hence, we specify `true` for update_output_layout and
-  // update_parameters_layout.
   TF_RETURN_IF_ERROR(
       hlo_sharding_util::CanonicalizeLayoutAfterShardingPropagation(
-          hloModule, /*update_output_layout=*/{true},
-          /*update_parameters_layout=*/{true}));
+          hloModule,
+          hloModule->config().allow_spmd_sharding_propagation_to_output(),
+          hloModule->config().allow_spmd_sharding_propagation_to_parameters()));
 
   // We don't fully replace the HLO module, so it will continue to have the
   // temporary frontend attributes. So clean them up as XLA won't need them.
   removeFrontendAttributes(
-      hloModule, {kUseTupleArgs, kImportMhloShardings, kMeshesRoundTripAttr});
+      hloModule, {kUseTupleArgs, kImportMhloShardings, kMeshesRoundTripAttr,
+                  kInTupleShardings, kOutTupleShardings});
 
   return true;
 }

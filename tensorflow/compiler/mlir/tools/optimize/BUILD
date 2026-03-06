@@ -1,3 +1,4 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 
 package(
@@ -14,7 +15,9 @@ cc_library(
     hdrs = ["quantization_utils.h"],
     compatible_with = get_compatible_with_portable(),
     deps = [
-        "//tensorflow/compiler/mlir/lite/kernels/internal:quantization_util",
-        "//tensorflow/compiler/mlir/lite/kernels/internal:runtime_shape",
+        "//tensorflow/compiler/mlir/tools:safe_cast",
+        "//tensorflow/core/framework:tensor_shape",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/types:span",
     ],
 )

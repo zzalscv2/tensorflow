@@ -13,17 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
 #include <optional>
+#include <string>
+#include <vector>
 
-#include "xla/execution_options_util.h"
-#include "xla/hlo/builder/xla_computation.h"
+#include <gtest/gtest.h>
+#include "absl/algorithm/container.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
+#include "xla/error_spec.h"
 #include "xla/hlo/testlib/test.h"
-#include "xla/hlo/transforms/despecializer.h"
-#include "xla/hlo/transforms/simplifiers/float_normalization.h"
-#include "xla/status_macros.h"
-#include "xla/tests/client_library_test_base.h"
-#include "xla/tests/hlo_test_base.h"
-#include "xla/tests/test_macros.h"
+#include "xla/tests/hlo_pjrt_interpreter_reference_mixin.h"
+#include "xla/tests/hlo_pjrt_test_base.h"
 
 namespace xla {
 namespace {
@@ -41,17 +44,15 @@ struct BatchGroupedConvolution2DSpec {
   std::vector<int64_t> output_layout;
 };
 
+using ConvDepthwiseBackpropFilterTest =
+    HloPjRtInterpreterReferenceMixin<HloPjRtTestBase>;
+
 class BatchGroupedConvolution2DTest
-    : public HloTestBase,
+    : public ConvDepthwiseBackpropFilterTest,
       public ::testing::WithParamInterface<
           ::testing::tuple<BatchGroupedConvolution2DSpec, bool>> {};
 
-class BatchGroupedConvolution2DDepthTest
-    : public HloTestBase,
-      public ::testing::WithParamInterface<
-          ::testing::tuple<BatchGroupedConvolution2DSpec, bool>> {};
-
-static std::vector<BatchGroupedConvolution2DSpec> GetConv2DTestCases(
+std::vector<BatchGroupedConvolution2DSpec> GetConv2DTestCases(
     bool use_depth_multiplier) {
   std::vector<BatchGroupedConvolution2DSpec> config_set;
   std::vector<std::vector<int64_t>> config_options = {
@@ -167,15 +168,10 @@ std::string BuildHloTextBatchGroupedConvolution2D(
       spec.window_dilation, spec.window_dilation, spec.output_batch);
 }
 
-XLA_TEST_P(BatchGroupedConvolution2DTest, DoIt) {
+TEST_P(BatchGroupedConvolution2DTest, DoIt) {
   const BatchGroupedConvolution2DSpec& spec = ::testing::get<0>(GetParam());
   bool use_bfloat16 = ::testing::get<1>(GetParam());
 
-#ifdef XLA_BACKEND_DOES_NOT_SUPPORT_BFLOAT16
-  if (use_bfloat16) {
-    return;
-  }
-#endif
 
   const std::string hlo_text = BuildHloTextBatchGroupedConvolution2D(
       spec, use_bfloat16, /*scheduled=*/false);
@@ -199,7 +195,7 @@ INSTANTIATE_TEST_CASE_P(
         ::testing::Bool()),
     BatchGroupedConvolution2DTestDataToString);
 
-XLA_TEST_F(HloTestBase, OutputChannelsSmallerThanBatch) {
+TEST_F(ConvDepthwiseBackpropFilterTest, OutputChannelsSmallerThanBatch) {
   const std::string& hlo_string = R"(
 HloModule main, entry_computation_layout={(bf16[4,4,4,1]{3,2,1,0},bf16[2,2,1,2]{3,2,1,0})->bf16[2,2,2,2]{3,2,1,0}}
 
@@ -212,7 +208,7 @@ ENTRY %main.4 (Arg_0.1: bf16[4,4,4,1], Arg_1.2: bf16[2,2,1,2]) -> bf16[2,2,2,2] 
   EXPECT_TRUE(RunAndCompare(hlo_string, ErrorSpec{0.01, 0.01}));
 }
 
-XLA_TEST_F(HloTestBase, DepthwiseBatchDot) {
+TEST_F(ConvDepthwiseBackpropFilterTest, DepthwiseBatchDot) {
   const std::string hlo_string = R"(
 HloModule main, entry_computation_layout={(f32[16,3,3,64]{3,0,2,1},f32[16,2,3,64]{3,0,2,1})->f32[4,3,64,1]{2,3,1,0}}
 
@@ -225,7 +221,7 @@ ENTRY main {
   EXPECT_TRUE(RunAndCompare(hlo_string, ErrorSpec{0.01, 0.01}));
 }
 
-XLA_TEST_F(HloTestBase, DepthwiseOuterDot) {
+TEST_F(ConvDepthwiseBackpropFilterTest, DepthwiseOuterDot) {
   const std::string hlo_string = R"(
 HloModule main, entry_computation_layout={(f32[16,3,1,64]{3,0,2,1},f32[16,2,3,64]{3,0,2,1})->f32[4,3,64,1]{2,3,1,0}}
 
@@ -238,7 +234,7 @@ ENTRY main {
   EXPECT_TRUE(RunAndCompare(hlo_string, ErrorSpec{0.01, 0.01}));
 }
 
-XLA_TEST_F(HloTestBase, DepthwiseBatchOuterDot) {
+TEST_F(ConvDepthwiseBackpropFilterTest, DepthwiseBatchOuterDot) {
   const std::string hlo_string = R"(
 HloModule main, entry_computation_layout={(f32[8,30,1,64,5]{3,0,2,1,4},f32[8,30,30,64,3]{3,0,2,1,4})->f32[30,30,64,1,11]{2,3,1,0,4}}
 

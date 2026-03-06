@@ -16,11 +16,17 @@ limitations under the License.
 #include <memory>
 #include <utility>
 
-#include "absl/algorithm/container.h"
-#include "llvm/ADT/StringRef.h"
+#include "mlir/IR/BuiltinOps.h"  // from @llvm-project
+#include "mlir/IR/MLIRContext.h"  // from @llvm-project
+#include "mlir/IR/OpDefinition.h"  // from @llvm-project
+#include "mlir/IR/Operation.h"  // from @llvm-project
 #include "mlir/IR/PatternMatch.h"  // from @llvm-project
+#include "mlir/IR/TypeUtilities.h"  // from @llvm-project
+#include "mlir/IR/Value.h"  // from @llvm-project
 #include "mlir/Pass/Pass.h"  // from @llvm-project
+#include "mlir/Pass/PassRegistry.h"  // from @llvm-project
 #include "mlir/Support/LLVM.h"  // from @llvm-project
+#include "mlir/Support/TypeID.h"  // from @llvm-project
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/quantization/common/attrs_and_constraints.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h"
@@ -85,8 +91,8 @@ class CastBf16OpsToF32 : public RewritePattern {
     for (int i = 0; i < op->getNumOperands(); i++) {
       Value input = op->getOperand(i);
       if (getElementTypeOrSelf(input).isBF16()) {
-        Value f32_cast = rewriter.create<TF::CastOp>(
-            op->getLoc(),
+        Value f32_cast = TF::CastOp::create(
+            rewriter, op->getLoc(),
             CloneTypeWithNewElementType(input.getType(), rewriter.getF32Type()),
             input);
         op->setOperand(i, f32_cast);
@@ -102,8 +108,8 @@ class CastBf16OpsToF32 : public RewritePattern {
         for (Operation* user : op->getUsers()) {
           for (int i = 0; i < user->getNumOperands(); i++) {
             if (user->getOperand(i) == value) {
-              Value bf16_cast = rewriter.create<TF::CastOp>(
-                  user->getLoc(),
+              Value bf16_cast = TF::CastOp::create(
+                  rewriter, user->getLoc(),
                   CloneTypeWithNewElementType(value.getType(),
                                               rewriter.getBF16Type()),
                   value);

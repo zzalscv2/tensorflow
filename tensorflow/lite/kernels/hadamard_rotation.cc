@@ -16,6 +16,7 @@ limitations under the License.
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <vector>
 
@@ -38,27 +39,75 @@ struct OpData {
   std::vector<int> random_binary_vector;
 };
 
-// Fast Walsh Hadamard Transform. Updates `data` in place.
-void FWHT(float* data, int n) {
-  if ((n & (n - 1)) != 0) {
-    std::cerr << "Error: Input size must be a power of 2." << std::endl;
-    return;
-  }
-
-  int h = 1;
-  while (h < n) {
-    for (int i = 0; i < n; i += h * 2) {
-      for (int j = i; j < i + h; ++j) {
-        float x = data[j];
-        float y = data[j + h];
+// FWHT implementation for fixed bounds.
+//
+// The compiler is capable of fully unrolling this, which gives much better
+// performance.
+template <size_t N, size_t H>
+void FWHTStaticSize(float* data) {
+  for (size_t h = H; h < N; h *= 2) {
+    for (size_t i = 0; i < N; i += 2 * h) {
+      for (size_t j = i; j < i + h; ++j) {
+        const float x = data[j];
+        const float y = data[j + h];
         data[j] = x + y;
         data[j + h] = x - y;
       }
     }
-    h *= 2;
   }
-  for (int k = 0; k < n; ++k) {
-    data[k] /= std::sqrt(n);
+}
+
+// Fast Walsh Hadamard Transform. Updates `data` in place.
+template <size_t kUnrollThreshold = 64>
+void FWHTFast(float* data, int hadamard_size) {
+  if ((hadamard_size & (hadamard_size - 1)) != 0) {
+    std::cerr << "hadamard_size needs to be a power of 2\n";
+    return;
+  }
+  if (hadamard_size < kUnrollThreshold) {
+    // For small sizes, we run an "unoptimized" loop. This avoids unrolling the
+    // loops for every valid size under kUnrollSize.
+    for (size_t h = 1; h < hadamard_size; h *= 2) {
+      for (size_t i = 0; i < hadamard_size; i += 2 * h) {
+        for (size_t j = i; j < i + h; ++j) {
+          const float x = data[j];
+          const float y = data[j + h];
+          data[j] = x + y;
+          data[j + h] = x - y;
+        }
+      }
+    }
+  } else {
+    const int num_chunks = hadamard_size / kUnrollThreshold;
+    float* in = data;
+    // Use general, iterative loops algorithm for sizes up to kUnrollLimit.
+    for (int chunk = 0; chunk < num_chunks; ++chunk, in += kUnrollThreshold) {
+      FWHTStaticSize<kUnrollThreshold, 1>(in);
+    }
+    // Finish the bigger butterflies manually.
+    for (int chunk_size = kUnrollThreshold; chunk_size < hadamard_size;
+         chunk_size *= 2) {
+      float* in1 = &data[0];
+      float* in2 = &data[chunk_size];
+      for (int i = 0; i < hadamard_size;
+           i += chunk_size * 2, in1 += chunk_size, in2 += chunk_size) {
+        for (int j = i; j < i + chunk_size; j += kUnrollThreshold) {
+          // Compiler will unroll this fixed size loop easily.
+          for (int k = 0; k < kUnrollThreshold; k++) {
+            float x = *in1;
+            float y = *in2;
+            *in1++ = x + y;
+            *in2++ = x - y;
+          }
+        }
+      }
+    }
+  }
+
+  // Calculate the inverse square root once.
+  const float norm_factor = 1.0f / std::sqrt(hadamard_size);
+  for (int i = 0; i < hadamard_size; ++i) {
+    data[i] *= norm_factor;
   }
 }
 
@@ -124,20 +173,16 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
     input_features = input_tensor->dims->data[1];
     input_feature_size = input_tensor->dims->data[2];
   }
-  int num_hadamards_per_feature = input_feature_size / hadamard_size;
-  for (int batch = 0; batch < input_batch; ++batch) {
-    int chunk_start = batch * input_features * num_hadamards_per_feature;
-    for (int chunk = 0; chunk < input_features * num_hadamards_per_feature;
-         ++chunk) {
-      for (int i = 0; i < hadamard_size; ++i) {
-        output->data.f[chunk_start + i] =
-            input_tensor->data.f[chunk_start + i] *
-            op_data->random_binary_vector[i];
-      }
-      // Update output->data.f in place.
-      FWHT(&output->data.f[chunk_start], hadamard_size);
-      chunk_start += hadamard_size;
-    }
+
+  memcpy(output->data.f, input_tensor->data.f, input_tensor->bytes);
+
+  const int num_hadamards_per_feature = input_feature_size / hadamard_size;
+  const int total_transforms =
+      input_batch * input_features * num_hadamards_per_feature;
+  for (int i = 0; i < total_transforms; ++i) {
+    int chunk_start = i * hadamard_size;
+    // Update output->data.f in place.
+    FWHTFast(&output->data.f[chunk_start], hadamard_size);
   }
 
   return kTfLiteOk;

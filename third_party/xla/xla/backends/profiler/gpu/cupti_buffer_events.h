@@ -140,6 +140,17 @@ struct CudaGraphDetails {
                            // instantiated. Note graph_id is put into general
                            // fields as if trace in node mode, many activity
                            // events will contains graph id.
+  uint64_t orig_graph_node_id;  // The original graph node from which new graph
+                                // node is cloned.
+};
+
+struct MarkerDataDetails {
+  absl::string_view marker_string;
+};
+
+struct EnvironmentDetails {
+  // The value of the environment metric collected (e.g., power, temp).
+  uint64_t metric_value;
 };
 
 inline std::string ToXStat(const KernelDetails& kernel_info,
@@ -177,6 +188,9 @@ enum class CuptiTracerEventType {
   ThreadMarkerRange = 16,
   ThreadMarkerStart = 17,
   ThreadMarkerEnd = 18,
+  CudaGraphNodeMap = 19,
+  MarkerData = 20,
+  Environment = 21,
   Generic = 100,
 };
 
@@ -217,6 +231,7 @@ struct CuptiTracerEvent {
   int64_t stream_id = kInvalidStreamId;
   uint32_t graph_id = 0;
   int64_t scope_range_id = 0;
+  uint64_t graph_node_id = 0;
   union {
     // For Memcpy API and activities. `type` must be Memcpy*.
     MemcpyDetails memcpy_info;
@@ -238,6 +253,10 @@ struct CuptiTracerEvent {
     GenericDetails generic_info;
     // Used for `source` DriverCallback, `type` must be CudaGraph.
     CudaGraphDetails cuda_graph_info;
+    // Used for `source` Activity, `type` must be ThreadMarkerRange.
+    MarkerDataDetails marker_data_info;
+    // Used for environment activities. `type` must be Environment.
+    EnvironmentDetails environment_info;
   };
 };
 
@@ -276,9 +295,14 @@ class AnnotationMap {
   explicit AnnotationMap(uint64_t max_size, uint32_t num_gpus)
       : max_size_(max_size), per_device_map_(num_gpus) {}
 
-  void Add(uint32_t device_id, uint32_t correlation_id,
-           absl::string_view annotation, absl::string_view nvtx_range,
-           int64_t scope_range_id = 0);
+  // Returns a string_view of the dedupped annotation string. The string_view is
+  // valid as long as the AnnotationMap is alive. If the annotation is dropped
+  // due to size limit or any other reason, an empty string_view will be
+  // returned.
+  absl::string_view Add(uint32_t device_id, uint32_t correlation_id,
+                        absl::string_view annotation,
+                        absl::string_view nvtx_range,
+                        int64_t scope_range_id = 0);
 
   AnnotationInfo LookUp(uint32_t device_id, uint32_t correlation_id) const
       ABSL_ATTRIBUTE_LIFETIME_BOUND;
@@ -327,13 +351,13 @@ class CuptiActivityBufferManager {
   void ReclaimBuffer(uint8_t* p) { buffer_pool_.ReclaimBuffer(p); }
 
   void CacheCuptiFilledActivityBuffer(uint8_t* p, size_t sz) {
-    absl::MutexLock lock(&buffer_mutex_);
+    absl::MutexLock lock(buffer_mutex_);
     cached_buffers_.emplace_back(p, sz);
   }
 
   std::list<ActivityBufferAndSize> PopCachedBuffers() {
     std::list<ActivityBufferAndSize> result;
-    absl::MutexLock lock(&buffer_mutex_);
+    absl::MutexLock lock(buffer_mutex_);
     std::swap(result, cached_buffers_);
     return result;
   }

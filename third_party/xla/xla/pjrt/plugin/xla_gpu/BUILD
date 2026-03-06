@@ -29,6 +29,7 @@ cc_library(
     hdrs = ["xla_gpu_client_options.h"],
     deps = [
         ":xla_gpu_allocator_config",
+        "//xla/pjrt:host_memory_allocator",
         "//xla/pjrt/distributed:key_value_store_interface",
     ],
 )
@@ -38,13 +39,14 @@ cc_library(
     srcs = [],
     hdrs = ["xla_gpu_allocator_config.h"],
     deps = [
+        "//xla/tsl/framework:allocator",
     ],
 )
 
 xla_test(
     name = "xla_gpu_pjrt_client_test",
     srcs = ["xla_gpu_pjrt_client_test.cc"],
-    backends = ["gpu_any"],
+    backends = ["nvgpu_any"],
     tags = [
         "gpu",
         "no_oss",
@@ -56,4 +58,16 @@ xla_test(
         "//xla/tests:xla_internal_test_main",
         "@com_google_googletest//:gtest",
     ],
+)
+
+cc_library(
+    name = "gpu_static_registration",
+    srcs = ["gpu_static_registration.cc"],
+    deps = [
+        "//xla/pjrt/c:pjrt_c_api_gpu_internal",
+        "//xla/pjrt/plugin:plugin_names",
+        "//xla/pjrt/plugin:static_registration",
+        "//xla/service:gpu_plugin",
+    ],
+    alwayslink = True,
 )

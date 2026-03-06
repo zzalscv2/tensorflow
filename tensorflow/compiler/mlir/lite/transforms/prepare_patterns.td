@@ -24,7 +24,7 @@ def DenseElementsAttr : ElementsAttrBase<
   "non-opaque constant tensor">;
 
 def CreateGatherNdOp : NativeCodeCall<
-    "$_builder.create<TF::GatherNdOp>($0.getLoc(), $0.getType(), $1, $2, $3)">;
+    "TF::GatherNdOp::create($_builder, $0.getLoc(), $0.getType(), $1, $2, $3)">;
 
 def CreateTFCastOpI32 : NativeCodeCall<
     "CreateTFCastOpI32(&$_builder, $_loc, $0, $1)">;
@@ -100,7 +100,7 @@ def ConvertPlaceholderWithDefault : Pat<(TF_PlaceholderWithDefaultOp $arg), (TF_
 // Op removal patterns.
 //===----------------------------------------------------------------------===//
 def RemovePreventGradient : Pat<(TF_PreventGradientOp $op, $msg), (replaceWithValue $op)>;
-def RemoveXlaSharding : Pat<(TF_XlaShardingOp $a, $b, $c), (replaceWithValue $a)>;
+def RemoveXlaSharding : Pat<(TF_XlaShardingOp $a, $b, $c, $d), (replaceWithValue $a)>;
 def RemoveIdentityN : Pat<(TF_IdentityNOp $arg), (replaceWithValue $arg)>;
 
 //===----------------------------------------------------------------------===//

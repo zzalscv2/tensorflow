@@ -27,12 +27,17 @@ limitations under the License.
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
 #include "xla/backends/gpu/runtime/host_memory_pool.h"
 #include "xla/backends/gpu/runtime/sequential_thunk.h"
 #include "xla/backends/gpu/runtime/thunk.h"
+#include "xla/backends/gpu/runtime/thunk.pb.h"
 #include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/runtime/buffer_use.h"
 #include "xla/service/buffer_assignment.h"
+#include "xla/shape_util.h"
 #include "xla/stream_executor/stream_executor.h"
+#include "xla/xla_data.pb.h"
 
 namespace xla {
 namespace gpu {
@@ -62,8 +67,7 @@ class WhileThunk : public Thunk {
   WhileThunk(const WhileThunk&) = delete;
   WhileThunk& operator=(const WhileThunk&) = delete;
 
-  absl::Status Prepare(const PrepareParams& params,
-                       ResourceRequestsInterface& resource_requests) override;
+  absl::Status Prepare(const PrepareParams& params) override;
   absl::Status Initialize(const InitializeParams& params) override;
   absl::Status ExecuteOnStream(const ExecuteParams& params) override;
 
@@ -81,19 +85,31 @@ class WhileThunk : public Thunk {
 
   std::optional<int64_t> trip_count() const { return trip_count_; }
 
-  // Returns the current loop iteration if the caller is inside a while loop(s).
-  //
-  // Implementation relies on thread local storage, be careful when call it from
-  // code running on multiple threads.
-  static absl::StatusOr<int64_t> CurrentLoopIteration(int64_t depth = 0);
-  static absl::StatusOr<int64_t> CurrentLoopIteration(
-      const HloInstruction* while_instr);
-
-  void ForAllThunks(absl::FunctionRef<void(const Thunk*)> fn) const override;
+  absl::Status WalkNested(Walker callback) override;
+  absl::Status TransformNested(Transformer callback) override;
 
   std::string ToString(int indent) const override;
 
+  BufferUses buffer_uses() const override {
+    return {BufferUse::Read(condition_result_buffer_index_,
+                            ShapeUtil::MakeShape(PRED, {}))};
+  }
+
   absl::StatusOr<ThunkProto> ToProto() const override;
+
+  // Deserializes a WhileThunk from its proto representation.
+  // Parameters:
+  // - thunk_info: Metadata about the thunk
+  // - thunk_proto: Serialized WhileThunk proto message.
+  // - buffer_allocations: Buffer allocations available for use by the thunk.
+  // - deserializer: Callable (e.g., lambda) for deserializing nested thunks.
+  //
+  // Returns a unique_ptr to a WhileThunk on success, or an error status on
+  // failure.
+  static absl::StatusOr<std::unique_ptr<WhileThunk>> FromProto(
+      ThunkInfo thunk_info, const WhileThunkProto& thunk_proto,
+      absl::Span<const BufferAllocation> buffer_allocations,
+      const Deserializer& deserializer);
 
  private:
   const HloInstruction* loop_;
@@ -102,7 +118,7 @@ class WhileThunk : public Thunk {
   std::unique_ptr<SequentialThunk> body_thunk_sequence_;
   std::optional<int64_t> trip_count_;
 
-  // Host memory pool for transfering predicate value from device to host.
+  // Host memory pool for transferring predicate value from device to host.
   absl::Mutex mutex_;
   absl::flat_hash_map<se::StreamExecutor*, std::unique_ptr<HostMemoryPool>>
       host_memory_pools_ ABSL_GUARDED_BY(mutex_);

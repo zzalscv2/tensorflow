@@ -75,7 +75,8 @@ class HloInstructionSequence {
   void remove_instruction(HloInstruction* instruction) {
     auto instruction_it = std::find(instruction_sequence_.begin(),
                                     instruction_sequence_.end(), instruction);
-    if (instruction_it != instruction_sequence_.end()) {
+    if (instruction_it != instruction_sequence_.end() &&
+        instruction->parent() != nullptr) {
       auto id_it = std::find(id_sequence_.begin(), id_sequence_.end(),
                              instruction->unique_id());
       instruction_sequence_.erase(instruction_it);
@@ -125,7 +126,17 @@ class HloInstructionSequence {
   }
 
   // Returns the unique IDs of the instructions in the sequence (in order).
-  const std::vector<int>& ids() const { return id_sequence_; }
+  const std::vector<int64_t>& ids() const { return id_sequence_; }
+
+  // Updates the sequence of unique IDs to match the sequence of instructions.
+  // This is required when the HLO Module calls Cleanup(), which invalidates
+  // the old unique IDs.
+  void update_id_sequence() {
+    id_sequence_.clear();
+    for (HloInstruction* instruction : instruction_sequence_) {
+      id_sequence_.push_back(instruction->unique_id());
+    }
+  }
 
  private:
   // The sequence as HloInstructions.
@@ -136,7 +147,7 @@ class HloInstructionSequence {
   // sequence may be referenced after transformations to the HLO graph and HLO
   // pointers can be invalidated or recycled in this process (see
   // HloSchedule::Update).
-  std::vector<int> id_sequence_;
+  std::vector<int64_t> id_sequence_;
 };
 
 // A class representing a sequential schedule of instructions for an HLO
@@ -146,9 +157,16 @@ class HloSchedule {
  public:
   explicit HloSchedule(const HloModule* module) : module_(module) {}
 
-  // (De)Serialize an HloSchedule to/from a HloScheduleProto.
+  // (De)Serialize an HloSchedule to/from a HloScheduleProto. If
+  // proto_id_to_instruction_id_map is provided, it will be used to map the
+  // instruction ids in the proto to the instruction ids in the HloModule. This
+  // is necessary if the HloModuleProto was created with
+  // preserve_instruction_ids=false. The map must use full instruction unique
+  // ids as keys.
   static absl::StatusOr<HloSchedule> CreateFromProto(
-      const HloModule* module, const HloScheduleProto& proto);
+      const HloModule* module, const HloScheduleProto& proto,
+      const absl::flat_hash_map<int64_t, absl::flat_hash_map<int64_t, int64_t>>*
+          computation_id_to_instruction_id_remap = nullptr);
   absl::StatusOr<HloScheduleProto> ToProto() const;
 
   // Returns a reference to the sequence for the given computation.
@@ -223,6 +241,9 @@ class HloSchedule {
   // non-fusion computations in the module and every dependency in the module is
   // satisfied in the schedule.
   absl::Status Verify() const;
+
+  // Verifies that the given schedule is valid for the given computation.
+  absl::Status Verify(const HloComputation* computation) const;
 
   std::string ToString() const;
 

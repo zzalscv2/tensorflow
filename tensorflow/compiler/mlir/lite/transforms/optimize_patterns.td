@@ -39,7 +39,7 @@ def ExtractSingleElementAsFloat : NativeCodeCall<
     "ExtractSingleElementAsFloat(llvm::cast<ElementsAttr>($_self))">;
 
 // Checks if the value has rank 'n'.
-class HasRank<int n> : Constraint<
+class HasRankN<int n> : Constraint<
     CPred<"llvm::cast<ShapedType>($0.getType()).hasRank() && "
           "llvm::cast<ShapedType>($0.getType()).getRank() == " # n>>;
 
@@ -389,14 +389,17 @@ def ConstAPFloatNegLargestOrNegInfinity : Constraint<CPred<
 def L2NormValidReduceIndex : Constraint<CPred<
   "L2NormalizeReduceAxis($0, llvm::cast<DenseElementsAttr>($1))">>;
 
+// Checks if the ReshapeOp adds a trailing dimension of size 1.
+def IsL2NormalizationKeepDimsReshape
+    : Constraint<CPred<"IsL2NormalizationKeepDimsReshape($0)">>;
+
 // Currently L2Normalization doesn't support activation function
 // in TFLite.
 // TODO(karimnosseir): Add constraints that the kernel code assumes.
 // constraint on axis and depth.
 multiclass L2NormalizePatterns<Op FirstOp, Op SecondOp> {
-  // This pattern constructs L2NormalizationOp from
-  // Mul->Rsqrt->Sum->Square Or
-  // Div->sqrt->Sum->Square
+  // Fuses `(x * rsqrt(sum(square(x))))` or `(x / sqrt(sum(square(x))))`
+  // into a L2NormalizationOp.
   def L2NormalizePattern1#FirstOp#SecondOp : Pat<
                   (FirstOp $x,
                      (SecondOp
@@ -438,6 +441,74 @@ multiclass L2NormalizePatterns<Op FirstOp, Op SecondOp> {
            [(L2NormValidReduceIndex $sq_op, $axis),
             (ConstDoubleValueLessThan<"1e-3"> $epsilon)]>;
 
+  // Fuses L2 norm with Mul(x,x) instead of Square(x) and a reshape that
+  // emulates keep_dims.
+  def L2NormalizePattern4#FirstOp#SecondOp : Pat<
+      (FirstOp $x,
+          (TFL_ReshapeOp:$reshape_op
+              (SecondOp
+                  (TFL_SumOp
+                      (TFL_MulOp:$mul_op $x, $x, TFL_AF_None),
+                      (Arith_ConstantOp I32ElementsAttr:$axis),
+                      ConstBoolAttrFalse
+                  )
+              ),
+              (Arith_ConstantOp $shape)
+          ),
+          TFL_AF_None
+      ),
+      (TFL_L2NormalizationOp $x, TFL_AF_None),
+      [(L2NormValidReduceIndex $mul_op, $axis), 
+       (IsL2NormalizationKeepDimsReshape $reshape_op)]
+  >;
+
+  // Fuses L2 norm with Mul(x,x), a reshape, and a small constant add for
+  // numerical stability.
+  def L2NormalizePattern5#FirstOp#SecondOp : Pat<
+      (FirstOp $x,
+          (TFL_ReshapeOp:$reshape_op
+              (TFL_AddOp
+                  (SecondOp
+                    (TFL_SumOp
+                        (TFL_MulOp:$mul_op $x, $x, TFL_AF_None),
+                        (Arith_ConstantOp I32ElementsAttr:$axis),
+                        ConstBoolAttrFalse
+                    )
+                  ), (Arith_ConstantOp $epsilon), TFL_AF_None
+              ),
+              (Arith_ConstantOp $shape)
+          ),
+          TFL_AF_None
+      ),
+      (TFL_L2NormalizationOp $x, TFL_AF_None),
+      [(L2NormValidReduceIndex $mul_op, $axis), 
+       (IsL2NormalizationKeepDimsReshape $reshape_op),
+       (ConstDoubleValueLessThan<"1e-3"> $epsilon)]
+  >;
+
+  // Fuses L2 norm with Mul(x,x), a reshape, and a small constant maximum for
+  // numerical stability.
+  def L2NormalizePattern6#FirstOp#SecondOp : Pat<
+      (FirstOp $x,
+          (TFL_ReshapeOp:$reshape_op
+              (TFL_MaximumOp
+                  (SecondOp
+                    (TFL_SumOp
+                        (TFL_MulOp:$mul_op $x, $x, TFL_AF_None),
+                        (Arith_ConstantOp I32ElementsAttr:$axis),
+                        ConstBoolAttrFalse
+                    )
+                  ), (Arith_ConstantOp $epsilon)
+              ),
+              (Arith_ConstantOp $shape)
+          ),
+          TFL_AF_None
+      ),
+      (TFL_L2NormalizationOp $x, TFL_AF_None),
+      [(L2NormValidReduceIndex $mul_op, $axis), 
+       (IsL2NormalizationKeepDimsReshape $reshape_op),
+       (ConstDoubleValueLessThan<"1e-3"> $epsilon)]
+  >;
 }
 
 foreach L2NormalizePairs = [[TFL_MulOp, TFL_RsqrtOp], [TFL_DivOp, TFL_SqrtOp]]
@@ -1722,8 +1793,8 @@ def FuseReshapesAroundBatchMatMulLHS: Pat<
   (TFL_BatchMatMulOp $input, $rhs, $adj_x, $adj_y, $bool_attr),
   [(HasRankAtLeast<2> $input),
    (HasRankAtLeast<2> $final_shape_change),
-   (HasRank<2> $rhs),
-   (HasRank<2> $initial_shape_change),
+   (HasRankN<2> $rhs),
+   (HasRankN<2> $initial_shape_change),
    (AnyStaticShapeTensor $input),
    (AnyStaticShapeTensor $initial_shape_change),
    (AnyStaticShapeTensor $final_shape_change),
@@ -1753,8 +1824,8 @@ def FuseOutputReshape_BatchMatMulWithFlattenedContractingDims: Pat<
       (Arith_ConstantOp (GetExpandedShapeAttr<1> $initial_shape_change))),
     $rhs, $adj_x, $adj_y, $bool_attr),
   [(HasRankAtLeast<4> $input),
-   (HasRank<2> $rhs),
-   (HasRank<2> $initial_shape_change),
+   (HasRankN<2> $rhs),
+   (HasRankN<2> $initial_shape_change),
    (AnyStaticShapeTensor $input),
    (AnyStaticShapeTensor $initial_shape_change),
    (AnyStaticShapeTensor $final_shape_change),
@@ -1782,9 +1853,9 @@ def FuseInputReshape_BatchMatMulWithFlattenedRhsDims: Pat<
     (TFL_BatchMatMulOp $input, $rhs, $adj_x, $adj_y, $bool_attr,
       (returnType (GetExpandedShapeType<1> $bmm_tmp_output))),
     (Arith_ConstantOp $s1)),
-  [(HasRank<2> $rhs),
-   (HasRank<3> $input),
-   (HasRank<2> $initial_shape_change),
+  [(HasRankN<2> $rhs),
+   (HasRankN<3> $input),
+   (HasRankN<2> $initial_shape_change),
    (AnyStaticShapeTensor $input),
    (AnyStaticShapeTensor $initial_shape_change),
    (AnyStaticShapeTensor $final_shape_change),
@@ -1804,8 +1875,8 @@ def FuseReshapesAroundBatchMatMulLHS1: Pat<
     (Arith_ConstantOp $s1)),
   (TFL_BatchMatMulOp $input, $rhs, $adj_x, $adj_y, $bool_attr),
   [(HasRankAtLeast<3> $input),
-   (HasRank<3> $rhs),
-   (HasRank<3> $initial_shape_change),
+   (HasRankN<3> $rhs),
+   (HasRankN<3> $initial_shape_change),
    (AnyStaticShapeTensor $input),
    (AnyStaticShapeTensor $initial_shape_change),
    (AnyStaticShapeTensor $final_shape_change),
@@ -1850,7 +1921,7 @@ def FuseTransposeIntoBatchMatMulRHS: Pat<
     $lhs,
     $input, (CreateNoneValue $lhs), TFL_AF_None, TFL_FCWO_Default,
     ConstBoolAttrTrue, $asymmetric_quantize_inputs),
-  [(HasRank<2> $input),
+  [(HasRankN<2> $input),
    (AnyStaticShapeTensor $input),
    (AreLastTwoDimsTransposed $perm_value),
    (IsBoolAttrEqual<"false"> $adj_x),
@@ -1886,8 +1957,8 @@ def FuseSqueezingLhsReshapeIntoFC_Output: Pat<
    (AnyStaticShapeTensor $input),
    (AnyStaticShapeTensor $reshaped_input),
    (HasRankAtLeast<3> $input),
-   (HasRank<2> $reshaped_input),
-   (HasRank<2> $filter),
+   (HasRankN<2> $reshaped_input),
+   (HasRankN<2> $filter),
    (IsReducedTailOfShape $input, $reshaped_input)]>;
 
 // Replace conv-->transpose-->add with conv-->add-->transpose
@@ -2211,7 +2282,48 @@ def DegenerateFCtoMul : Pat<
     (Arith_ConstantOp (FlattenTo1D $filterVal)),
     $fused_activation_function),
   [(HasRankAtMost<4> $input),
-   (HasRank<2> $filter),
+   (HasRankN<2> $filter),
    (IsLastDimensionEqualOne $input),
    (SameElementType $input, $filter),
    (IsNoneType $bias)]>;
+
+// Reorder operands of BMM with LHS constant input to the RHS.
+def BMMMoveConstantInputToRHS : Pat<
+  (TFL_BatchMatMulOp:$bmm_out
+    (Arith_ConstantOp:$const_input $constInputVal),
+    $filter, ConstBoolAttrFalse, ConstBoolAttrFalse, $asymmetric_quantize_inputs),
+  (TFL_TransposeOp
+    (TFL_BatchMatMulOp
+      $filter,
+      $const_input,
+      ConstBoolAttrTrue, ConstBoolAttrTrue, $asymmetric_quantize_inputs,
+       (returnType (GetTransposedType<"{1, 0}"> $bmm_out))),
+    (Arith_ConstantOp ConstantAttr<RankedI32ElementsAttr<[2]>, "{1,0}">)),
+  [(HasRankN<2> $const_input),
+   (HasRankN<2> $filter),
+   (IsLastDimensionEqualOne $const_input),
+   (SameElementType $const_input, $filter)]>;
+
+def EliminateAddZerosLikeRHS : Pat<
+  (TFL_AddOp:$output $lhs, (TFL_ZerosLikeOp $ignored), $act_fn),
+  (replaceWithValue $lhs),
+  [(IsNoneType $act_fn), (HaveSameType $lhs, $output)]
+>;
+
+def EliminateAddZerosLikeLHS : Pat<
+  (TFL_AddOp:$output (TFL_ZerosLikeOp $ignored), $rhs, $act_fn),
+  (replaceWithValue $rhs),
+  [(IsNoneType $act_fn), (HaveSameType $rhs, $output)]
+>;
+
+def EliminateSubZerosLikeRHS : Pat<
+  (TFL_SubOp:$output $lhs, (TFL_ZerosLikeOp $ignored), $act_fn),
+  (replaceWithValue $lhs),
+  [(IsNoneType $act_fn), (HaveSameType $lhs, $output)]
+>;
+
+def ConvertSubZerosLikeToNeg : Pat<
+  (TFL_SubOp:$output (TFL_ZerosLikeOp $ignored), $rhs, $act_fn),
+  (TFL_NegOp $rhs),
+  [(IsNoneType $act_fn), (HaveSameType $rhs, $output)]
+>;

@@ -20,7 +20,6 @@ limitations under the License.
 
 #include "Eigen/Core"  // from @eigen_archive
 #include "llvm/ADT/SetVector.h"
-#include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
 #include "mlir/IR/BuiltinTypeInterfaces.h"  // from @llvm-project
@@ -33,12 +32,10 @@ limitations under the License.
 #include "mlir/Rewrite/FrozenRewritePatternSet.h"  // from @llvm-project
 #include "mlir/Support/LLVM.h"  // from @llvm-project
 #include "mlir/Support/LogicalResult.h"  // from @llvm-project
-#include "mlir/Support/TypeID.h"  // from @llvm-project
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"  // from @llvm-project
 #include "stablehlo/dialect/StablehloOps.h"  // from @stablehlo
 #include "tensorflow/compiler/mlir/quantization/stablehlo/passes/passes.h"
 #include "tensorflow/compiler/mlir/quantization/stablehlo/quantization_options.pb.h"
-#include "tensorflow/compiler/mlir/quantization/stablehlo/utils/fill_quantization_options.h"
 
 // NOLINTNEXTLINE
 //===----------------------------------------------------------------------===//
@@ -47,8 +44,8 @@ limitations under the License.
 
 namespace mlir::quant::stablehlo {
 
-// Put the definitions inside the ::mlir::quant::stablehlo namespace, to match
-// the declarations in passes.h.
+// Put the definitions inside the ::mlir::tf_quant::stablehlo namespace, to
+// match the declarations in passes.h.
 #define GEN_PASS_DEF_QUANTIZEWEIGHTPASS
 #include "tensorflow/compiler/mlir/quantization/stablehlo/passes/passes.h.inc"
 
@@ -166,8 +163,8 @@ class QuantizeWeight : public OpRewritePattern<ConstantOp> {
       }
     }
     rewriter.setInsertionPointAfter(op);
-    ConvertOp new_convert_op = rewriter.create<ConvertOp>(
-        op->getLoc(), new_result_type, op.getResult());
+    ConvertOp new_convert_op = ConvertOp::create(
+        rewriter, op->getLoc(), new_result_type, op.getResult());
     quantizable_op->setOperand(quantize_operand_num,
                                new_convert_op.getResult());
   }
@@ -206,10 +203,10 @@ class QuantizeWeight : public OpRewritePattern<ConstantOp> {
       // of its number of users.
       rewriter.setInsertionPointAfter(op);
       // create new F16 constant op in that location
-      ConstantOp new_const = rewriter.create<ConstantOp>(
-          op->getLoc(), new_result_type, new_value_attr);
+      ConstantOp new_const = ConstantOp::create(
+          rewriter, op->getLoc(), new_result_type, new_value_attr);
       ConvertOp dcast =
-          rewriter.create<ConvertOp>(op->getLoc(), old_result_type, new_const);
+          ConvertOp::create(rewriter, op->getLoc(), old_result_type, new_const);
       // replace all convert ops with dq op.
       convert_op->replaceAllUsesWith(dcast);
       // Return without scanning for the next ConvertOp as only one ConvertOp is

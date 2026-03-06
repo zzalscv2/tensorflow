@@ -20,6 +20,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "tensorflow/c/eager/abstract_operation.h"
 #include "tensorflow/c/eager/abstract_tensor_handle.h"
@@ -210,7 +211,7 @@ absl::Status TapeOperation::SetAttrShapeList(const char* attr_name,
     }
   }
   forward_op_.attrs.Set(
-      attr_name, gtl::ArraySlice<TensorShapeProto>(proto.get(), num_values));
+      attr_name, absl::Span<const TensorShapeProto>(proto.get(), num_values));
   return parent_op_->SetAttrShapeList(attr_name, dims, num_dims, num_values);
 }
 absl::Status TapeOperation::SetAttrFunctionList(

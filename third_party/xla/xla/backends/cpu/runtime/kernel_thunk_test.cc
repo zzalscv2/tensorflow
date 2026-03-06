@@ -29,7 +29,7 @@ limitations under the License.
 #include "xla/backends/cpu/runtime/thunk.h"
 #include "xla/backends/cpu/runtime/thunk_testlib.h"
 #include "xla/literal_util.h"
-#include "xla/runtime/workgroup_dim.h"
+#include "xla/runtime/work_group.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/tsl/concurrency/async_value_ref.h"
 #include "xla/tsl/platform/statusor.h"
@@ -60,7 +60,7 @@ class AddF32HostKernel : public FunctionLibrary {
 
 TEST(KernelThunkTest, CheckAlignment) {
   auto thunk =
-      KernelThunk::Create({"test"}, {}, {}, "test", WorkgroupDim{1, 1, 1}, {},
+      KernelThunk::Create({"test"}, {}, {}, "test", NumWorkGroups{1, 1, 1}, {},
                           /*min_alignment=*/3);
   EXPECT_TRUE(absl::StrContains(thunk.status().message(),
                                 "minimum alignment 3 is not a power of 2"));
@@ -77,8 +77,9 @@ TEST(KernelThunkTest, AddF32) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       auto thunk,
-      KernelThunk::Create({"add_f32"}, {in_slice}, {out_slice}, "add_f32",
-                          WorkgroupDim{4}, /*invariant_arguments=*/{0}));
+      KernelThunk::Create({"add_f32"}, {{in_slice, in.shape()}},
+                          {{out_slice, out.shape()}}, "add_f32",
+                          NumWorkGroups{4}, /*invariant_arguments=*/{0}));
 
   AddF32HostKernel host_kernels;
   Thunk::ExecuteParams params = {&host_kernels, &allocations};
@@ -100,8 +101,9 @@ TEST(KernelThunkTest, AddF32Inline) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       auto thunk,
-      KernelThunk::Create({"add_f32"}, {slice}, {slice}, "add_f32",
-                          WorkgroupDim{4}, /*invariant_arguments=*/{}));
+      KernelThunk::Create({"add_f32"}, {{slice, in_out.shape()}},
+                          {{slice, in_out.shape()}}, "add_f32",
+                          NumWorkGroups{4}, /*invariant_arguments=*/{}));
 
   AddF32HostKernel host_kernels;
   Thunk::ExecuteParams params = {&host_kernels, &allocations};
@@ -129,8 +131,9 @@ TEST(KernelThunkInvariantBuffersTest, MissingBufferSlice) {
   // Invariant buffer set is incorrect - should include in_slice, but is empty.
   TF_ASSERT_OK_AND_ASSIGN(
       auto thunk,
-      KernelThunk::Create({"add_f32"}, {in_slice}, {out_slice}, "add_f32",
-                          WorkgroupDim{4}, /*invariant_arguments=*/{}));
+      KernelThunk::Create({"add_f32"}, {{in_slice, in.shape()}},
+                          {{out_slice, out.shape()}}, "add_f32",
+                          NumWorkGroups{4}, /*invariant_arguments=*/{}));
 
   AddF32HostKernel host_kernels;
   Thunk::ExecuteParams params = {&host_kernels, &allocations};
@@ -162,8 +165,9 @@ TEST(KernelThunkInvariantBuffersTest, ExtraInputOutputBufferSlice) {
   // buffer that's not invariant.
   TF_ASSERT_OK_AND_ASSIGN(
       auto thunk,
-      KernelThunk::Create({"add_f32"}, {slice}, {slice}, "add_f32",
-                          WorkgroupDim{4}, /*invariant_arguments=*/{0}));
+      KernelThunk::Create({"add_f32"}, {{slice, in_out.shape()}},
+                          {{slice, in_out.shape()}}, "add_f32",
+                          NumWorkGroups{4}, /*invariant_arguments=*/{0}));
 
   AddF32HostKernel host_kernels;
   Thunk::ExecuteParams params = {&host_kernels, &allocations};
@@ -195,17 +199,19 @@ TEST(KernelThunkInvariantBuffersTest,
   auto [slice_0, slice_1] = CreateBufferAllocationSlice(alloc_0, alloc_1);
 
   TF_ASSERT_OK_AND_ASSIGN(
-      auto thunk, KernelThunk::Create({"add_f32"}, {slice_0, slice_1},
-                                      {slice_0}, "add_f32", WorkgroupDim{4},
-                                      /*invariant_arguments=*/{1}));
+      auto thunk,
+      KernelThunk::Create(
+          {"add_f32"}, {{slice_0, data0.shape()}, {slice_1, data1.shape()}},
+          {{slice_0, data0.shape()}}, "add_f32", NumWorkGroups{4},
+          /*invariant_arguments=*/{1}));
 
   AddF32HostKernel host_kernels;
 
   // But runtime output buffer overlaps with invariant input buffer.
   std::array<float, 5> runtime_buffer;
   BufferAllocations runtime_allocations(BufferAllocations::Buffers{
-      se::DeviceMemoryBase(runtime_buffer.data(), 16),
-      se::DeviceMemoryBase(runtime_buffer.data() + 1, 16)});
+      se::DeviceAddressBase(runtime_buffer.data(), 16),
+      se::DeviceAddressBase(runtime_buffer.data() + 1, 16)});
   Thunk::ExecuteParams params = {&host_kernels, &runtime_allocations};
 
   auto execute_event = thunk->Execute(params);

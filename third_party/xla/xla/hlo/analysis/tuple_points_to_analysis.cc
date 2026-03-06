@@ -33,15 +33,15 @@ limitations under the License.
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 #include "absl/types/span.h"
+#include "xla/hlo/analysis/logical_buffer_analysis.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
-#include "xla/map_util.h"
+#include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/service/logical_buffer.h"
 #include "xla/shape_util.h"
-#include "xla/types.h"
+#include "xla/tsl/platform/logging.h"
 #include "xla/util.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/logging.h"
 
 namespace xla {
 
@@ -146,9 +146,10 @@ void GatherFusionInstructions(
 
 /* static */ absl::StatusOr<std::unique_ptr<TuplePointsToAnalysis>>
 TuplePointsToAnalysis::Run(const HloModule* module) {
-  auto logical_buffer_analysis = LogicalBufferAnalysis::Run(module);
-  std::unique_ptr<TuplePointsToAnalysis> analysis(new TuplePointsToAnalysis(
-      module, std::move(logical_buffer_analysis).value()));
+  TF_ASSIGN_OR_RETURN(auto logical_buffer_analysis,
+                      LogicalBufferAnalysis::Run(module));
+  std::unique_ptr<TuplePointsToAnalysis> analysis(
+      new TuplePointsToAnalysis(module, std::move(logical_buffer_analysis)));
   TF_RETURN_IF_ERROR(analysis->Analyze());
   return analysis;
 }
@@ -331,10 +332,19 @@ absl::Status TuplePointsToAnalysis::HandleAsyncStart(
     HloInstruction* async_start) {
   // AsyncStart forwards its aliased operands to {0}.
   PointsToSet& points_to_set = CreateEmptyPointsToSet(async_start);
-
+  absl::flat_hash_map<ShapeIndex, std::pair<int64_t, ShapeIndex>>
+      aliased_outputs;
+  for (const auto& pair : Cast<HloAsyncStartInstruction>(async_start)
+                              ->output_to_operand_aliasing()) {
+    aliased_outputs.emplace(pair.first, pair.second);
+  }
   points_to_set.ForEachMutableElement(
       [&](const ShapeIndex& target_index, PointsToSet::BufferList* buffers) {
-        if (target_index.size() >= 2 && target_index.front() == 0) {
+        auto it = aliased_outputs.find(target_index);
+        bool has_implicit_alias =
+            (target_index.size() >= 2 && target_index.front() == 0);
+        bool has_explicit_alias = it != aliased_outputs.end();
+        if (has_implicit_alias) {
           const PointsToSet& operand_points_to_set =
               GetPointsToSet(async_start->operand(target_index[1]));
           ShapeIndex source_index(target_index.begin() + 2, target_index.end());
@@ -343,12 +353,25 @@ absl::Status TuplePointsToAnalysis::HandleAsyncStart(
                operand_points_to_set.tuple_sources(source_index)) {
             points_to_set.add_tuple_source(target_index, tuple);
           }
-        } else {
+        }
+        if (has_explicit_alias) {
+          const PointsToSet& input_set =
+              GetPointsToSet(async_start->operand(it->second.first));
+          for (const LogicalBuffer* input_buffer :
+               input_set.element(it->second.second)) {
+            points_to_set.AddPointedToBuffer(*input_buffer, target_index);
+          }
+          for (HloInstruction* tuple :
+               input_set.tuple_sources(it->second.second)) {
+            points_to_set.add_tuple_source(target_index, tuple);
+          }
+        }
+        if (!has_implicit_alias && !has_explicit_alias) {
           buffers->push_back(
               &logical_buffer_analysis_->GetBuffer(async_start, target_index));
         }
       });
-
+  points_to_set.add_tuple_source({}, async_start);
   return absl::OkStatus();
 }
 
@@ -769,7 +792,8 @@ bool TuplePointsToAnalysis::DoesNotUseOperandBuffer(
     // GetTupleElement instructions only access the top-level buffer of their
     // operand.
     return true;
-  } else if (user->IsLoopFusion()) {
+  }
+  if (user->IsLoopFusion()) {
     // Find fusion parameter associated with 'operand'.
     auto it = absl::c_find_if(
         user->fused_parameters(), [&](HloInstruction* fused_param) {
@@ -796,63 +820,18 @@ bool TuplePointsToAnalysis::DoesNotUseOperandBuffer(
   return false;
 }
 
-// Returns all uses of all aliases of 'instruction' at 'index' in 'uses'.
-// Each use in 'uses' is a pair (HloInstruction* user, int64_t operand_index)
-// where 'user' is a user of an alias of 'instruction' at 'index', and
-// 'operand_index' is the operand index at which the alias appears in the
-// operand list of 'user'.
-std::vector<std::pair<HloInstruction*, int64_t>>
-TuplePointsToAnalysis::GetAllUsesOfInstructionAtIndex(
-    HloInstruction* instruction, const ShapeIndex& index) const {
-  std::vector<std::pair<HloInstruction*, int64_t>> uses;
-  const PointsToSet::BufferList& points_to =
-      GetPointsToSet(instruction).element(index);
-  for (const LogicalBuffer* buffer : points_to) {
-    for (const BufferAlias& alias : GetBufferAliases(*buffer)) {
-      for (HloInstruction* alias_user : alias.instruction()->users()) {
-        if (DoesNotUseOperandBuffer(alias.instruction(), alias.index(),
-                                    alias_user)) {
-          continue;
-        }
-        for (int64_t op_idx : alias_user->OperandIndices(alias.instruction())) {
-          uses.emplace_back(alias_user, op_idx);
-        }
-      }
-    }
-  }
-  return uses;
+std::string PointsToSet::ToString() const {
+  std::string output;
+  ForEachElement([&output](const ShapeIndex& index,
+                           const BufferList& points_to) {
+    absl::StrAppend(&output, "{", absl::StrJoin(index, ","), "}: ",
+                    absl::StrJoin(points_to, ", ",
+                                  [](std::string* out, const LogicalBuffer* b) {
+                                    out->append(b->ToString());
+                                  }),
+                    "\n");
+  });
+  return output;
 }
 
-// Returns true if there is exactly one use of 'operand' at 'operand_index'
-// in 'fusion.fused_instructions', where the singleton use is the fused
-// root at operand index 'use_operand_index'. Returns false otherwise.
-//
-// REQUIRES: 'fusion' opcode is a kFusion instruction.
-bool TuplePointsToAnalysis::HasUniqueFusedUseOfOperandAt(
-    HloInstruction* operand, const ShapeIndex& operand_index,
-    HloInstruction* fusion, const int64_t use_operand_index) const {
-  CHECK_EQ(HloOpcode::kFusion, fusion->opcode());
-  // Check that 'operand' is unique in the operand list of 'fusion'.
-  if (fusion->OperandIndices(operand).size() > 1) {
-    return false;
-  }
-  // Find fusion parameter associated with 'operand'.
-  const auto& fused_params = fusion->fused_parameters();
-  auto fused_param_it =
-      absl::c_find_if(fused_params, [&](HloInstruction* fused_param) {
-        return fusion->operand(fused_param->parameter_number()) == operand;
-      });
-  if (fused_param_it == fused_params.end()) {
-    return false;
-  }
-  auto* fused_param = *fused_param_it;
-  // Get all uses of 'operand' at 'index' from 'fusion.fused_instructions'.
-  auto fused_param_uses =
-      GetAllUsesOfInstructionAtIndex(fused_param, operand_index);
-  // Return true iff there is exactly one use of 'operand' at 'index', and
-  // this singleton use is the fused root (at index in 'use_operand_indices').
-  return fused_param_uses.size() == 1 &&
-         fused_param_uses[0].first == fusion->fused_expression_root() &&
-         fused_param_uses[0].second == use_operand_index;
-}
 }  // namespace xla

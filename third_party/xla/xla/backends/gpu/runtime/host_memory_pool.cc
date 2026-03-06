@@ -27,6 +27,7 @@ limitations under the License.
 #include "xla/stream_executor/memory_allocation.h"
 #include "xla/stream_executor/stream_executor.h"
 #include "xla/tsl/platform/statusor.h"
+#include "xla/xla_data.pb.h"
 
 namespace xla {
 namespace gpu {
@@ -40,7 +41,7 @@ absl::StatusOr<std::unique_ptr<HostMemoryPool>> HostMemoryPool::Create(
 }
 
 absl::StatusOr<HostMemoryPool::Handle> HostMemoryPool::Acquire() {
-  absl::MutexLock lock(&mutex_);
+  absl::MutexLock lock(mutex_);
   if (free_list_.empty()) {
     return absl::ResourceExhaustedError(
         absl::StrCat("All ", kNumElems,
@@ -78,7 +79,7 @@ HostMemoryPool::HostMemoryPool(std::unique_ptr<se::MemoryAllocation> allocation,
                                PrimitiveType type)
     : allocation_(std::move(allocation)), type_(type) {
   for (int i = 0; i < kNumElems; ++i) {
-    free_list_.push(static_cast<char*>(allocation_->opaque()) +
+    free_list_.push(static_cast<char*>(allocation_->address().opaque()) +
                     i * primitive_util::ByteWidth(type_));
   }
 }

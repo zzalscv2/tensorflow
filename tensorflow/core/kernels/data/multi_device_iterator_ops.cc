@@ -19,6 +19,7 @@ limitations under the License.
 #include <utility>
 
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/notification.h"
 #include "absl/time/time.h"
 #include "tensorflow/core/common_runtime/input_colocation_exemption_registry.h"
 #include "tensorflow/core/common_runtime/process_function_library_runtime.h"
@@ -80,7 +81,7 @@ class MultiDeviceIterator : public ResourceBase {
   MultiDeviceIterator(
       Env* env, const DataTypeVector& output_types,
       const std::vector<PartialTensorShape>& output_shapes,
-      const std::vector<string>& devices,
+      const std::vector<std::string>& devices,
       std::unique_ptr<FunctionLibraryDefinition> flib_def,
       std::unique_ptr<ProcessFunctionLibraryRuntime> pflr,
       FunctionLibraryRuntime* flr,
@@ -103,9 +104,9 @@ class MultiDeviceIterator : public ResourceBase {
     VLOG(2) << "Destroying multi-device iterator.";
   }
 
-  string DebugString() const override {
-    return strings::StrCat("MultiDeviceIterator for ", devices_.size(),
-                           " devices");
+  std::string DebugString() const override {
+    return absl::StrCat("MultiDeviceIterator for ", devices_.size(),
+                        " devices");
   }
 
   absl::Status Init(std::unique_ptr<IteratorBase> iterator,
@@ -469,7 +470,7 @@ class MultiDeviceIterator : public ResourceBase {
   mutex mu_;
   const DataTypeVector output_types_;
   const std::vector<PartialTensorShape> output_shapes_;
-  const std::vector<string> devices_;
+  const std::vector<std::string> devices_;
   const std::unique_ptr<FunctionLibraryDefinition> flib_def_;
   FunctionLibraryRuntime* const flr_ = nullptr;  // not owned.
   const std::unique_ptr<ProcessFunctionLibraryRuntime> pflr_;
@@ -514,8 +515,8 @@ class MultiDeviceIteratorHandleOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* context) override TF_LOCKS_EXCLUDED(mu_) {
-    string unique_name = cinfo_.name();
-    string container_name = cinfo_.container();
+    std::string unique_name = cinfo_.name();
+    std::string container_name = cinfo_.container();
     {
       mutex_lock l(mu_);
       if (resource_ == nullptr) {
@@ -531,8 +532,8 @@ class MultiDeviceIteratorHandleOp : public OpKernel {
         MultiDeviceIterator* resource;
 
         if (name_ == ResourceHandle::ANONYMOUS_NAME) {
-          unique_name = strings::StrCat("_AnonymousMultiDeviceIterator",
-                                        current_id_.fetch_add(1));
+          unique_name = absl::StrCat("_AnonymousMultiDeviceIterator",
+                                     current_id_.fetch_add(1));
           container_name = kAnonymousMultiDeviceIterator;
           resource = new MultiDeviceIterator(
               context->env(), output_types_, output_shapes_, devices_,
@@ -593,9 +594,9 @@ class MultiDeviceIteratorHandleOp : public OpKernel {
   DataTypeVector output_types_;
   std::vector<PartialTensorShape> output_shapes_;
   const int graph_def_version_;
-  string name_;
-  string container_;
-  std::vector<string> devices_;
+  std::string name_;
+  std::string container_;
+  std::vector<std::string> devices_;
 };
 
 REGISTER_KERNEL_BUILDER(Name("MultiDeviceIterator").Device(DEVICE_CPU),
@@ -617,7 +618,7 @@ class AnonymousMultiDeviceIteratorOp
   }
 
  private:
-  string name() override { return kAnonymousMultiDeviceIterator; }
+  std::string name() override { return kAnonymousMultiDeviceIterator; }
 
   absl::Status CreateResource(
       OpKernelContext* ctx, std::unique_ptr<FunctionLibraryDefinition> flib_def,
@@ -631,7 +632,7 @@ class AnonymousMultiDeviceIteratorOp
     return absl::OkStatus();
   }
 
-  std::vector<string> devices_;
+  std::vector<std::string> devices_;
   DataTypeVector output_dtypes_;
   std::vector<PartialTensorShape> output_shapes_;
 };
@@ -704,7 +705,7 @@ class MultiDeviceIteratorGetNextFromShardOp : public AsyncOpKernel {
   void ComputeAsync(OpKernelContext* ctx, DoneCallback done) override {
     const Tensor* tensor_shard_num;
     OP_REQUIRES_OK_ASYNC(ctx, ctx->input("shard_num", &tensor_shard_num), done);
-    int32_t shard_num = tensor_shard_num->scalar<int32>()();
+    int32_t shard_num = tensor_shard_num->scalar<int32_t>()();
 
     const Tensor* tensor_incarnation_id;
     OP_REQUIRES_OK_ASYNC(
@@ -717,7 +718,7 @@ class MultiDeviceIteratorGetNextFromShardOp : public AsyncOpKernel {
 
     background_worker_.Schedule(std::bind(
         [ctx, iterator, shard_num, incarnation_id](DoneCallback done) {
-          Notification n;
+          absl::Notification n;
           absl::Time start_time = iterator->metrics_collector().RecordStart();
           MultiDeviceIteratorCallback callback = std::bind(
               [ctx, iterator, start_time, &n](const HostBufferElement& elem) {

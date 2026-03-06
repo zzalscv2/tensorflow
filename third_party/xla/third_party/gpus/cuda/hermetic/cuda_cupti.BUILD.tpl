@@ -1,7 +1,7 @@
 licenses(["restricted"])  # NVIDIA proprietary license
 load("@local_config_cuda//cuda:build_defs.bzl", "if_version_equal_or_greater_than")
 load(
-    "@local_xla//xla/tsl/platform/default:cuda_build_defs.bzl",
+    "@xla//xla/tsl/platform/default:cuda_build_defs.bzl",
     "cuda_rpath_flags",
 )
 
@@ -58,6 +58,11 @@ cc_library(
         %{comment}"%{libcupti_minor_version}",
         %{comment}"2024.0",
         %{comment}["include/cupti_common.h"],
+    %{comment}) + if_version_equal_or_greater_than(
+        %{comment}"%{libcupti_minor_version}",
+        %{comment}"2024.3",
+        %{comment}["include/cupti_pmsampling.h",
+        %{comment}"include/cupti_profiler_host.h"],
     %{comment}),
     include_prefix = "third_party/gpus/cuda/extras/CUPTI/include",
     includes = ["include/"],

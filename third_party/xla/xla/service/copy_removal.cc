@@ -32,8 +32,10 @@ limitations under the License.
 #include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "xla/hlo/analysis/alias_info.h"
 #include "xla/hlo/analysis/hlo_alias_analysis.h"
 #include "xla/hlo/analysis/hlo_dataflow_analysis.h"
+#include "xla/hlo/analysis/hlo_operand_index.h"
 #include "xla/hlo/analysis/hlo_ordering.h"
 #include "xla/hlo/analysis/hlo_reachability.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -46,7 +48,6 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/status_macros.h"
-#include "xla/tsl/platform/status.h"
 #include "xla/util.h"
 
 using absl::StrAppend;
@@ -318,7 +319,7 @@ bool ComputeRelativeLocation::AddControlDependenceForUnorderedOps() {
         VLOG(3) << "   Adding control dependence between:";
         VLOG(3) << "     predecessor: " << entry2->name();
         VLOG(3) << "       successor: " << entry1->name();
-        TF_CHECK_OK(entry2->AddControlDependencyTo(entry1));
+        CHECK_OK(entry2->AddControlDependencyTo(entry1));
       }
       reachability_map.UpdateReachabilityThroughInstruction(entry1);
       for (HloInstruction* entry2 : instr_it.second) {
@@ -345,8 +346,9 @@ bool ComputeRelativeLocation::ForceRuntimeOrder(
                "kBeforeStart or kAfterEnd";
     return false;
   }
-  auto ModifiesNonCopy = [](HloInstruction* instr, const HloInstruction* op) {
-    auto in_place = HloDataflowAnalysis::GetInPlaceInputOutputPairs(instr);
+  auto ModifiesNonCopy = [this](HloInstruction* instr,
+                                const HloInstruction* op) {
+    auto in_place = alias_info_->GetInPlaceInputOutputPairs(instr);
     if (in_place.empty()) {
       return false;
     }
@@ -434,7 +436,7 @@ bool ComputeRelativeLocation::InstructionCanIntercept(
     // If the instruction only uses the value, it can intercept only if it
     // modifies the buffer in place.
     for (const auto& operand_and_output_index :
-         HloDataflowAnalysis::GetInPlaceInputOutputPairs(instr)) {
+         alias_info_->GetInPlaceInputOutputPairs(instr)) {
       const HloOperandIndex& operand_index = operand_and_output_index.first;
       if (region.contains(
               instr->mutable_operand(operand_index.operand_number))) {
@@ -601,13 +603,15 @@ Relation::RuntimeOrder ComputeRelativeLocation::ComputeRuntimeOrdering(
 
 CopyRemover::CopyRemover(
     const HloModule& module, const HloAliasAnalysis& alias_analysis,
-    HloOrdering* ordering, bool check_live_range_ordering,
+    const AliasInfo* alias_info, HloOrdering* ordering,
     const absl::flat_hash_set<absl::string_view>& execution_threads)
-    : dataflow_(alias_analysis.dataflow_analysis()), ordering_(ordering) {
+    : dataflow_(alias_analysis.dataflow_analysis()),
+      alias_info_(alias_info),
+      ordering_(ordering) {
   // Instruction indices based on post order traversal of computations and
   // instructions. Used as an enhancement for getting strict weak ordering
   // used for sorting below.
-  absl::flat_hash_map<int, int64_t> instruction_ids;
+  absl::flat_hash_map<int64_t, int64_t> instruction_ids;
   int64_t id = 0;
 
   // Generate instruction ids for all instructions in the module, starting at
@@ -691,9 +695,19 @@ CopyRemover::CopyRemover(
           if (a == b) {
             return false;
           }
-          const bool a_has_smaller_id =
-              instruction_ids.at(a->defining_instruction()->unique_id()) <
-              instruction_ids.at(b->defining_instruction()->unique_id());
+
+          // instrion_ids does not contain entries for instructions in dead
+          // computations.
+          int64_t a_id =
+              a->defining_instruction()->parent()->IsDeadComputation()
+                  ? 0
+                  : instruction_ids.at(a->defining_instruction()->unique_id());
+          int64_t b_id =
+              b->defining_instruction()->parent()->IsDeadComputation()
+                  ? 0
+                  : instruction_ids.at(b->defining_instruction()->unique_id());
+
+          const bool a_has_smaller_id = a_id < b_id;
           // Use a_has_smaller_id as a hint for the order between a and b. In
           // case it's right, there is no need for two IsDefinedBefore() tests.
           if (a_has_smaller_id) {
@@ -727,7 +741,7 @@ CopyRemover::CopyRemover(
   CreateCopyMap(module, value_to_node);
 
   XLA_VLOG_LINES(3, ToString());
-  TF_DCHECK_OK(Verify());
+  DCHECK_OK(Verify());
 }
 
 // Add a list containing the given values to CopyRemover. This
@@ -847,35 +861,21 @@ LiveRangeRegions CopyRemover::ComputeLiveRangeRegions(const ValueNode* head) {
   return live_range;
 }
 
-bool CopyRemover::IsCopyToFromHost(const HloInstruction* copy) {
-  if (copy->shape().has_layout() && copy->operand(0)->shape().has_layout()) {
-    if (copy->shape().layout().memory_space() == Layout::kHostMemorySpace &&
-        copy->operand(0)->shape().layout().memory_space() !=
-            Layout::kHostMemorySpace) {
-      return true;
-    }
-    if (copy->shape().layout().memory_space() != Layout::kHostMemorySpace &&
-        copy->operand(0)->shape().layout().memory_space() ==
-            Layout::kHostMemorySpace) {
-      return true;
-    }
-  }
-  return false;
-}
 // Try to elide the given copy. Elision of a copy is possible only if no
 // live range interference is introduced by the copy's elimination. If
 // elision is possible, then the internal state (value lists) are updated,
 // and true is returned. Returns false otherwise.
 bool CopyRemover::TryElideCopy(
     const HloInstruction* copy, int64_t* region_analysis_limit,
-    bool insert_post_scheduling_control_dependencies) {
-  VLOG(3) << "TryElideCopy starting for: " << copy->name();
-  CHECK_NE(region_analysis_limit, nullptr);
-
-  // Don't elide copies to/from the host.
-  if (IsCopyToFromHost(copy)) {
+    bool insert_post_scheduling_control_dependencies,
+    std::function<bool(const HloInstruction* copy)> should_skip_removal) {
+  if (should_skip_removal != nullptr && should_skip_removal(copy)) {
+    VLOG(2) << copy->name()
+            << " is skipped due to should_skip_removal function.";
     return false;
   }
+  VLOG(3) << "TryElideCopy starting for: " << copy->name();
+  CHECK_NE(region_analysis_limit, nullptr);
 
   // Don't elide copies that are not in the copy map.
   if (!ContainsKey(copy_map_, copy)) {
@@ -883,7 +883,8 @@ bool CopyRemover::TryElideCopy(
     return false;
   }
 
-  // Don't elide copies with different shapes.
+  // Don't elide copies with different shapes. This includes checking that
+  // memory spaces are the same, so we don't elide copies to/from the host.
   if (!ShapeUtil::Equal(copy->shape(), copy->operand(0)->shape())) {
     VLOG(2) << copy->name() << " is not removable (shape mismatch)";
     return false;
@@ -1046,6 +1047,42 @@ bool CopyRemover::TryElideCopy(
     VLOG(2) << "TryElideCopy - copy (" << copy->name()
             << ") defines the first value in its buffer.";
     // Live range of (s_x, s_{x-1},...) must be before 'next_dest' (d_1);
+
+    // For a copy feeding into a variadic scatter (fusion), if the copy's source
+    // also feeds into the same scatter, the copy cannot be removed. Thus only
+    // one copy can be removed for each shared operand of the variadic scatter.
+    auto get_variadic_scatter_instruction =
+        [](HloInstruction* instruction) -> HloInstruction* {
+      HloInstruction* scatter_instruction = nullptr;
+      if (instruction->opcode() == HloOpcode::kScatter) {
+        scatter_instruction = instruction;
+      } else if (instruction->opcode() == HloOpcode::kFusion &&
+                 instruction->fused_expression_root()->opcode() ==
+                     HloOpcode::kScatter) {
+        scatter_instruction = instruction->fused_expression_root();
+      } else {
+        return nullptr;
+      }
+      if (scatter_instruction->shape().IsTuple()) {
+        return instruction;
+      }
+      return nullptr;
+    };
+    HloInstruction* variadic_scatter_instruction =
+        Next(*copy_node.dest) == nullptr
+            ? nullptr
+            : get_variadic_scatter_instruction(
+                  Next(*copy_node.dest)->value->defining_instruction());
+    if (variadic_scatter_instruction != nullptr) {
+      auto uses = copy_node.src->uses;
+      for (auto use : uses) {
+        if (use->instruction == variadic_scatter_instruction) {
+          VLOG(6) << "copy src is already used by scatter (fusion)";
+          return false;
+        }
+      }
+    }
+
     bool src_use_before_first_dest_def =
         CheckLiveRangeBefore(copy_node.src, Next(*copy_node.dest));
     std::string a = copy_node.src->value->ToShortString();
@@ -1172,7 +1209,7 @@ bool CopyRemover::TryElideCopy(
   RemoveCopyValue(copy_node.dest);
 
   XLA_VLOG_LINES(4, ToString());
-  TF_DCHECK_OK(Verify());
+  DCHECK_OK(Verify());
   VLOG(3) << "TryElideCopy succeeded for: " << copy->name();
   return true;
 }
@@ -1241,7 +1278,7 @@ bool CopyRemover::LiveRangeBefore(const ValueNode& a, const ValueNode& b) {
     return false;
   }
   return ordering_->UsesBeforeValueDefinition(
-      a.uses, *b.value, dataflow_,
+      a.uses, *b.value, dataflow_, alias_info_,
       /* use_is_always_before_def_in_same_instr=*/false);
 }
 
@@ -1273,7 +1310,7 @@ bool CopyRemover::ValuesInterfere(const ValueNode* src, const ValueNode* dest,
   VLOG(5) << "    ValuesInterfere destination live range:\n"
           << dest_live_range.ToString();
 
-  ComputeRelativeLocation relative_location_analysis(ordering_);
+  ComputeRelativeLocation relative_location_analysis(ordering_, alias_info_);
   auto rel1 = relative_location_analysis.ComputeBetweenLiveRangeRegions(
       src_live_range, dest_live_range);
   VLOG(3) << "    ValuesInterfere - location of dest in relation to src: ";

@@ -16,30 +16,4 @@ limitations under the License.
 #ifndef TENSORFLOW_TSL_PLATFORM_NOTIFICATION_H_
 #define TENSORFLOW_TSL_PLATFORM_NOTIFICATION_H_
 
-#include <chrono>              // NOLINT
-#include <condition_variable>  // NOLINT
-#include <cstdint>
-#include <mutex>  // NOLINT
-
-#include "absl/base/macros.h"
-#include "absl/synchronization/notification.h"
-#include "absl/time/time.h"
-
-// TODO: b/330223377 - This macro should eventually be provided by Abseil.
-#ifndef ABSL_DEPRECATE_AND_INLINE
-#define ABSL_DEPRECATE_AND_INLINE()
-#endif
-
-namespace tsl {
-
-using Notification ABSL_DEPRECATE_AND_INLINE() = absl::Notification;
-
-ABSL_DEPRECATE_AND_INLINE()
-inline bool WaitForNotificationWithTimeout(absl::Notification* n,
-                                           int64_t timeout_in_us) {
-  return n->WaitForNotificationWithTimeout(absl::Microseconds(timeout_in_us));
-}
-
-}  // namespace tsl
-
 #endif  // TENSORFLOW_TSL_PLATFORM_NOTIFICATION_H_

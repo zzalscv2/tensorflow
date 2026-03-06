@@ -500,7 +500,7 @@ cuda_py_strict_test(
         "//tensorflow/python/ops:variable_scope",
         "//third_party/py/numpy",
         "@absl_py//absl/testing:parameterized",
-        "@pypi_dill//:pkg",  # build_cleaner: keep
+        "@pypi//dill",  # build_cleaner: keep
     ],
 )
 
@@ -1209,6 +1209,12 @@ py_strict_library(
 tf_py_strict_test(
     name = "multi_worker_test_base_test",
     srcs = ["multi_worker_test_base_test.py"],
+    exec_properties = select({
+        # copybara:uncomment_begin(google-only)
+        # "//tools/cpp:asan_build": {"mem": "16g"},
+        # copybara:uncomment_end
+        "//conditions:default": None,
+    }),
     tags = [
         "no_oss",  # TODO(b/170834611)
     ],
@@ -1403,7 +1409,7 @@ cuda_py_strict_test(
         "//tensorflow/python/ops:math_ops",
         "//tensorflow/python/util:nest",
         "@absl_py//absl/testing:parameterized",
-        "@pypi_dill//:pkg",  # build_cleaner: keep
+        "@pypi//dill",  # build_cleaner: keep
     ],
 )
 
@@ -1719,7 +1725,7 @@ distribute_py_strict_test(
         "//tensorflow/python/ops:variable_scope",
         "//tensorflow/python/ops:variable_v1",
         "@absl_py//absl/testing:parameterized",
-        "@pypi_wrapt//:pkg",
+        "@pypi//wrapt",
     ],
 )
 
@@ -2238,8 +2244,8 @@ py_strict_library(
         "//tensorflow/python/framework:test_lib",
         "//tensorflow/python/util:tf_export",
         "@absl_py//absl/logging",
-        "@pypi_dill//:pkg",  # build_cleaner: keep
-        "@pypi_tblib//:pkg",  # build_cleaner: keep
+        "@pypi//dill",  # build_cleaner: keep
+        "@pypi//tblib",  # build_cleaner: keep
         "@six_archive//:six",
     ],
 )
@@ -2284,6 +2290,7 @@ cuda_py_strict_test(
     shard_count = 35,
     tags = [
         "multi_gpu",
+        "no_oss_py313",
         "no_pip",  # TODO(b/266520226)
     ],  # b/175904958
     deps = [
@@ -2578,9 +2585,6 @@ distribute_py_strict_test(
 tpu_py_strict_test(
     name = "tpu_strategy_model_parallelism_test",
     srcs = ["tpu_strategy_model_parallelism_test.py"],
-    args = [
-        "--xla_tpu_reserve_recv_ready_sync_flags=true",
-    ],
     disable_experimental = True,  # b/202779350
     disable_mlir_bridge = False,
     disable_v3_4chips = False,

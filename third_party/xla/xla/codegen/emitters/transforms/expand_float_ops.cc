@@ -17,10 +17,8 @@ limitations under the License.
 #include <cassert>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <utility>
 
-#include "absl/log/check.h"
 #include "llvm/ADT/APFloat.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -40,6 +38,7 @@ limitations under the License.
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "xla/codegen/emitters/implicit_arith_op_builder.h"
 #include "xla/codegen/emitters/transforms/passes.h"
 #include "xla/mlir_hlo/mhlo/IR/hlo_ops.h"
 #include "xla/mlir_hlo/mhlo/transforms/map_mhlo_to_scalar_op.h"
@@ -58,54 +57,7 @@ using mlir::Value;
 
 namespace {
 
-// Wraps a Value to provide operator overloading for more readable expressions.
-struct Val {
-  Value value;
-  mlir::ImplicitLocOpBuilder* b;
-
-  operator Value() const { return value; }  // NOLINT
-
-  Val operator+(int64_t rhs) const { return Binop<ma::AddIOp>(rhs); }
-  Val operator+(Value rhs) const { return Binop<ma::AddIOp>(rhs); }
-  Val operator-(int64_t rhs) const { return Binop<ma::SubIOp>(rhs); }
-  Val operator-(Value rhs) const { return Binop<ma::SubIOp>(rhs); }
-  Val operator*(int64_t rhs) const { return Binop<ma::MulIOp>(rhs); }
-  Val operator*(Value rhs) const { return Binop<ma::MulIOp>(rhs); }
-  Val operator&(Value rhs) const { return Binop<ma::AndIOp>(rhs); }
-  Val operator&(int64_t rhs) const { return Binop<ma::AndIOp>(rhs); }
-  Val operator|(Value rhs) const { return Binop<ma::OrIOp>(rhs); }
-  Val operator|(int64_t rhs) const { return Binop<ma::OrIOp>(rhs); }
-  Val operator^(Value rhs) const { return Binop<ma::XOrIOp>(rhs); }
-  Val shl(Value rhs) const { return Binop<ma::ShLIOp>(rhs); }
-  Val shl(int64_t rhs) const { return Binop<ma::ShLIOp>(rhs); }
-  Val shrui(Value rhs) const { return Binop<ma::ShRUIOp>(rhs); }
-  Val shrui(int64_t rhs) const { return Binop<ma::ShRUIOp>(rhs); }
-
-  Val cmp(ma::CmpIPredicate pred, Value rhs) const {
-    return {b->create<ma::CmpIOp>(pred, value, rhs), b};
-  }
-  Val cmp(ma::CmpIPredicate pred, int64_t rhs) const {
-    return cmp(pred, MakeConstant(rhs));
-  }
-  Val operator==(Value rhs) const { return cmp(ma::CmpIPredicate::eq, rhs); }
-  Val operator==(int64_t rhs) const { return cmp(ma::CmpIPredicate::eq, rhs); }
-  Val operator!=(int64_t rhs) const { return cmp(ma::CmpIPredicate::ne, rhs); }
-
-  Val MakeConstant(int64_t c) const {
-    return {b->create<ma::ConstantIntOp>(c, value.getType()), b};
-  }
-
- private:
-  template <typename Op>
-  Val Binop(Value rhs) const {
-    return {b->create<Op>(value, rhs), b};
-  }
-
-  template <typename Op>
-  Val Binop(int64_t rhs) const {
-    return Binop<Op>(MakeConstant(rhs));
-  }
-};
+using Val = ImplicitArithOpBuilder;
 
 struct RewriteErf32Pattern : public mlir::OpRewritePattern<mlir::math::ErfOp> {
   using OpRewritePattern::OpRewritePattern;
@@ -134,25 +86,25 @@ struct RewriteErf32Pattern : public mlir::OpRewritePattern<mlir::math::ErfOp> {
 
     mlir::ImplicitLocOpBuilder b(op.getLoc(), rewriter);
     auto c = [&](float v) -> Value {
-      return b.create<ma::ConstantFloatOp>(llvm::APFloat(v),
-                                           rewriter.getF32Type());
+      return ma::ConstantFloatOp::create(b, rewriter.getF32Type(),
+                                         llvm::APFloat(v));
     };
 
     auto poly = [&](auto x, auto coefficients) -> Value {
       auto r = c(coefficients[0]);
       for (int i = 1; i < coefficients.size(); ++i) {
-        r = b.create<mlir::math::FmaOp>(r, x, c(coefficients[i]));
+        r = mlir::math::FmaOp::create(b, r, x, c(coefficients[i]));
       }
       return r;
     };
 
     Value x = op.getOperand();
-    x = b.create<ma::MaximumFOp>(x, c(-kErfInvOneMinusHalfULP));
-    x = b.create<ma::MinimumFOp>(x, c(kErfInvOneMinusHalfULP));
-    Value x2 = b.create<ma::MulFOp>(x, x);
+    x = ma::MaximumFOp::create(b, x, c(-kErfInvOneMinusHalfULP));
+    x = ma::MinimumFOp::create(b, x, c(kErfInvOneMinusHalfULP));
+    Value x2 = ma::MulFOp::create(b, x, x);
 
     rewriter.replaceOpWithNewOp<ma::DivFOp>(
-        op, b.create<ma::MulFOp>(x, poly(x2, kAlpha)), poly(x2, kBeta));
+        op, ma::MulFOp::create(b, x, poly(x2, kAlpha)), poly(x2, kBeta));
 
     return mlir::success();
   }
@@ -175,39 +127,39 @@ bool IsFNUZ(mlir::FloatType ty) {
 Value IsInf(Value value, mlir::ImplicitLocOpBuilder& b) {
   auto ty = mlir::cast<mlir::FloatType>(value.getType());
   if (mlir::LLVM::isCompatibleOuterType(ty)) {
-    value = b.create<mlir::math::AbsFOp>(value);
-    Value inf = b.create<ma::ConstantFloatOp>(
-        llvm::APFloat::getInf(ty.getFloatSemantics()), ty);
-    return b.create<ma::CmpFOp>(ma::CmpFPredicate::OEQ, value, inf);
+    value = mlir::math::AbsFOp::create(b, value);
+    Value inf = ma::ConstantFloatOp::create(
+        b, ty, llvm::APFloat::getInf(ty.getFloatSemantics()));
+    return ma::CmpFOp::create(b, ma::CmpFPredicate::OEQ, value, inf);
   }
 
   assert(ty.getIntOrFloatBitWidth() <= 8);
   // F8E5M2, F8E4M3, F8E3M4 are the only 8 bit float with infinities.
   if (llvm::isa<mlir::Float8E5M2Type>(ty)) {
-    Val bits{b.create<ma::BitcastOp>(b.getI8Type(), value), &b};
+    Val bits{ma::BitcastOp::create(b, b.getI8Type(), value), &b};
     return (bits & 0x7F) == 0x7C;
   } else if (llvm::isa<mlir::Float8E4M3Type>(ty)) {
-    Val bits{b.create<ma::BitcastOp>(b.getI8Type(), value), &b};
+    Val bits{ma::BitcastOp::create(b, b.getI8Type(), value), &b};
     return (bits & 0x7F) == 0x78;
   } else if (llvm::isa<mlir::Float8E3M4Type>(ty)) {
-    Val bits{b.create<ma::BitcastOp>(b.getI8Type(), value), &b};
+    Val bits{ma::BitcastOp::create(b, b.getI8Type(), value), &b};
     return (bits & 0x7F) == 0x70;
   } else {
-    return b.create<ma::ConstantIntOp>(false, b.getI1Type());
+    return ma::ConstantIntOp::create(b, b.getI1Type(), false);
   }
 }
 
 Value IsNaN(Value value, mlir::ImplicitLocOpBuilder& b) {
   auto ty = value.getType();
   if (mlir::LLVM::isCompatibleOuterType(ty)) {
-    return b.create<ma::CmpFOp>(ma::CmpFPredicate::UNO, value, value);
+    return ma::CmpFOp::create(b, ma::CmpFPredicate::UNO, value, value);
   }
   if (llvm::isa<mlir::Float4E2M1FNType>(ty)) {
-    return b.create<ma::ConstantIntOp>(false, b.getI1Type());
+    return ma::ConstantIntOp::create(b, b.getI1Type(), false);
   }
 
   assert(ty.getIntOrFloatBitWidth() == 8);
-  Val bits{b.create<ma::BitcastOp>(b.getI8Type(), value), &b};
+  Val bits{ma::BitcastOp::create(b, b.getI8Type(), value), &b};
   if (llvm::isa<mlir::Float8E5M2Type>(ty)) {
     return (bits & 0b0111'1111).cmp(ma::CmpIPredicate::ugt, 0b0111'1100);
   } else if (llvm::isa<mlir::Float8E4M3Type>(ty)) {
@@ -231,25 +183,25 @@ Value EmitReducePrecision(Value value, int exponent_bits, int mantissa_bits,
       mlir::mhlo::ReducePrecisionOp>(
       b.getLoc(), value.getType(), {value.getType()},
       mlir::mhlo::ReducePrecisionOp::Adaptor(value, nullptr, properties),
-      /*attributes=*/std::nullopt, &b);
+      /*attributes=*/{}, &b);
 }
 
 Value EmitF16ToF8e5m2(Value in, mlir::ImplicitLocOpBuilder& b) {
-  Val in_bits{b.create<ma::BitcastOp>(b.getI16Type(), in), &b};
+  Val in_bits{ma::BitcastOp::create(b, b.getI16Type(), in), &b};
   // Use this method of checking for NaN because it's the same as what's used
   // in the reduce precision lowering.
   Value is_nan = (in_bits & 32767).cmp(ma::CmpIPredicate::ugt, 31744);
 
   Value value = EmitReducePrecision(in, 5, 2, b);
-  value = b.create<ma::BitcastOp>(b.getI16Type(), value);
-  value = b.create<ma::ShRUIOp>(value,
-                                b.create<ma::ConstantIntOp>(8, b.getI16Type()));
-  value = b.create<ma::TruncIOp>(b.getI8Type(), value);
+  value = ma::BitcastOp::create(b, b.getI16Type(), value);
+  value = ma::ShRUIOp::create(b, value,
+                              ma::ConstantIntOp::create(b, b.getI16Type(), 8));
+  value = ma::TruncIOp::create(b, b.getI8Type(), value);
   // When the input is NaN, just truncating can turn a NaN into an inf if the
   // mantissa becomes 0.
-  value = b.create<ma::SelectOp>(
-      is_nan, b.create<ma::ConstantIntOp>(0x7F, value.getType()), value);
-  return b.create<ma::BitcastOp>(b.getType<mlir::Float8E5M2Type>(), value);
+  value = ma::SelectOp::create(
+      b, is_nan, ma::ConstantIntOp::create(b, value.getType(), 0x7F), value);
+  return ma::BitcastOp::create(b, b.getType<mlir::Float8E5M2Type>(), value);
 }
 
 Value EmitFloatConversion(Value value, mlir::FloatType to_ty,
@@ -266,8 +218,8 @@ Value EmitFloatConversion(Value value, mlir::FloatType to_ty,
     // Going through f32 and f16 is significantly faster than the fallback code
     // below.
     return EmitF16ToF8e5m2(
-        b.create<ma::TruncFOp>(b.getF16Type(),
-                               b.create<ma::ExtFOp>(b.getF32Type(), value)),
+        ma::TruncFOp::create(b, b.getF16Type(),
+                             ma::ExtFOp::create(b, b.getF32Type(), value)),
         b);
   }
 
@@ -311,23 +263,23 @@ Value EmitFloatConversion(Value value, mlir::FloatType to_ty,
       return {v, &b};
     }
     if (ty.getIntOrFloatBitWidth() < v.getType().getIntOrFloatBitWidth()) {
-      return {b.create<ma::TruncIOp>(ty, v), &b};
+      return {ma::TruncIOp::create(b, ty, v), &b};
     }
-    return {b.create<ma::ExtUIOp>(ty, v), &b};
+    return {ma::ExtUIOp::create(b, ty, v), &b};
   };
 
   int64_t exp_offset = to_bias - from_bias;
   int digit_shift = to_mantissa - from_mantissa;
 
   int from_width = value.getType().getIntOrFloatBitWidth();
-  Val from_bits{b.create<ma::BitcastOp>(b.getIntegerType(from_width), value),
+  Val from_bits{ma::BitcastOp::create(b, b.getIntegerType(from_width), value),
                 &b};
   if (from_width < 8) {
     from_bits = convert_int(b.getIntegerType(8), from_bits);
   }
 
   auto cst = [&](mlir::Type ty, int64_t n) -> Val {
-    return {b.create<ma::ConstantIntOp>(n, ty), &b};
+    return {ma::ConstantIntOp::create(b, ty, n), &b};
   };
 
   // Shift bits to destination type, without sign bit.
@@ -362,7 +314,7 @@ Value EmitFloatConversion(Value value, mlir::FloatType to_ty,
 
   auto round_bits_to_nearest_even = [&](Val bits, Val roundoff,
                                         bool use_implicit_bit = false) {
-    assert(bits.value.getType() == roundoff.value.getType());
+    assert(bits.value().getType() == roundoff.value().getType());
     // Round to nearest even by adding a bias term.
     // Consider a bit pattern
     //   FFF...FLRTT...T,
@@ -414,8 +366,8 @@ Value EmitFloatConversion(Value value, mlir::FloatType to_ty,
     // `From` supports larger values than `To`, we may overflow.
     if (std::make_pair(to_max_exp, to_mantissa) <
         std::make_pair(from_max_exp, from_mantissa)) {
-      result = b.create<SelectOp>(
-          rounded_from_bits.cmp(CmpIPredicate::ugt, aligned_highest), to_inf,
+      result = SelectOp::create(
+          b, rounded_from_bits.cmp(CmpIPredicate::ugt, aligned_highest), to_inf,
           result);
     }
   }
@@ -432,7 +384,7 @@ Value EmitFloatConversion(Value value, mlir::FloatType to_ty,
 
     // Determine exponent in target type.
     Value clz = convert_int(
-        i32_ty, b.create<mlir::math::CountLeadingZerosOp>(from_bits));
+        i32_ty, mlir::math::CountLeadingZerosOp::create(b, from_bits));
     Value msb = cst(i32_ty, std::max(from_width, 8) - 1) - clz;
     Value normalization_factor = cst(i32_ty, from_mantissa) - msb;
 
@@ -453,8 +405,9 @@ Value EmitFloatConversion(Value value, mlir::FloatType to_ty,
         convert_int(wide_int_ty, biased_exponent).shl(from_mantissa);
 
     Value biased_exp_sle_zero = biased_exponent.cmp(CmpIPredicate::sle, 0);
-    bits.value =
-        b.create<SelectOp>(biased_exp_sle_zero, subnormal_bits, normal_bits);
+    bits = Val(
+        SelectOp::create(b, biased_exp_sle_zero, subnormal_bits, normal_bits),
+        &b);
     if (digit_shift >= 0) {
       bits = bits.shl(digit_shift);
     } else {
@@ -465,7 +418,7 @@ Value EmitFloatConversion(Value value, mlir::FloatType to_ty,
     }
     bits = convert_int(to_int_ty, bits);
 
-    result = b.create<SelectOp>(biased_from_exp == 0, bits, result);
+    result = SelectOp::create(b, biased_from_exp == 0, bits, result);
   } else if (to_min_exp > from_min_exp) {
     // `To` supports fewer exponents near zero which means that some values in
     // `From` may become subnormal.
@@ -496,17 +449,19 @@ Value EmitFloatConversion(Value value, mlir::FloatType to_ty,
             .shrui(exponent_shift_from_ty));
     // To avoid UB, limit rounding and shifting to the full mantissa plus
     // leading 1.
-    positive_bits.value = b.create<SelectOp>(
-        exponent_shift_i32.cmp(CmpIPredicate::sle, from_mantissa + 1),
-        positive_bits, to_zero);
+    positive_bits = Val(
+        SelectOp::create(
+            b, exponent_shift_i32.cmp(CmpIPredicate::sle, from_mantissa + 1),
+            positive_bits, to_zero),
+        &b);
 
     Val negative_bits = convert_int(to_int_ty, rounded_from_bits)
                             .shl(to_zero - exponent_shift_to_ty);
     Value bits =
-        b.create<SelectOp>(exponent_shift_i32.cmp(CmpIPredicate::sgt, 0),
-                           positive_bits, negative_bits);
-    result = b.create<SelectOp>(biased_to_exp.cmp(CmpIPredicate::sle, 0), bits,
-                                result);
+        SelectOp::create(b, exponent_shift_i32.cmp(CmpIPredicate::sgt, 0),
+                         positive_bits, negative_bits);
+    result = SelectOp::create(b, biased_to_exp.cmp(CmpIPredicate::sle, 0), bits,
+                              result);
   }
 
   Value result_is_inf = IsInf(value, b);
@@ -528,17 +483,17 @@ Value EmitFloatConversion(Value value, mlir::FloatType to_ty,
   }
 
   if (!llvm::isa<mlir::Float8E8M0FNUType>(from_ty)) {
-    result = b.create<SelectOp>(from_bits == 0, to_zero, result);
+    result = SelectOp::create(b, from_bits == 0, to_zero, result);
   }
-  result = b.create<SelectOp>(result_is_inf, to_inf, result);
-  result = b.create<SelectOp>(input_is_nan, to_nan, result);
+  result = SelectOp::create(b, result_is_inf, to_inf, result);
+  result = SelectOp::create(b, input_is_nan, to_nan, result);
 
   // Insert sign bit.
   if (!llvm::isa<mlir::Float8E8M0FNUType>(from_ty)) {
     Value neg_result = Val{result, &b} | (1ll << (to_int_ty.getWidth() - 1));
-    result = b.create<SelectOp>(from_sign_bit, neg_result, result);
+    result = SelectOp::create(b, from_sign_bit, neg_result, result);
   }
-  result = b.create<ma::BitcastOp>(to_ty, result);
+  result = ma::BitcastOp::create(b, to_ty, result);
   return result;
 }
 
@@ -548,6 +503,11 @@ struct RewriteTruncFPattern : public mlir::OpRewritePattern<ma::TruncFOp> {
   mlir::LogicalResult matchAndRewrite(
       ma::TruncFOp op, mlir::PatternRewriter& rewriter) const override {
     using FloatValue = mlir::TypedValue<mlir::FloatType>;
+
+    if (!op.getType().isFloat()) {
+      return rewriter.notifyMatchFailure(op, "not a scalar float");
+    }
+
     auto src = mlir::cast<FloatValue>(op.getOperand());
     auto dst_ty = mlir::cast<mlir::FloatType>(op.getType());
     if (dst_ty.getWidth() > 8) {
@@ -566,6 +526,11 @@ struct RewriteExtFPattern : public mlir::OpRewritePattern<ma::ExtFOp> {
   mlir::LogicalResult matchAndRewrite(
       ma::ExtFOp op, mlir::PatternRewriter& rewriter) const override {
     using FloatValue = mlir::TypedValue<mlir::FloatType>;
+
+    if (!op.getType().isFloat()) {
+      return rewriter.notifyMatchFailure(op, "not a scalar float");
+    }
+
     auto src = mlir::cast<FloatValue>(op.getOperand());
     auto dst_ty = mlir::cast<mlir::FloatType>(op.getType());
     if (src.getType().getWidth() > 8) {
@@ -584,6 +549,10 @@ struct RewriteF8Cst : public mlir::OpRewritePattern<ma::CmpFOp> {
 
   mlir::LogicalResult matchAndRewrite(
       ma::CmpFOp op, mlir::PatternRewriter& rewriter) const override {
+    if (!op.getLhs().getType().isFloat()) {
+      return rewriter.notifyMatchFailure(op, "not a scalar cmpf");
+    }
+
     using FloatValue = mlir::TypedValue<mlir::FloatType>;
     auto lhs = mlir::cast<FloatValue>(op.getLhs());
     auto rhs = mlir::cast<FloatValue>(op.getRhs());
@@ -598,7 +567,7 @@ struct RewriteF8Cst : public mlir::OpRewritePattern<ma::CmpFOp> {
     if (op.getPredicate() == ma::CmpFPredicate::UNE &&
         mlir::matchPattern(rhs, mlir::m_ConstantFloat(&rhs_cst))) {
       mlir::Type int_ty = rewriter.getIntegerType(lhs.getType().getWidth());
-      Val int_value{b.create<ma::BitcastOp>(int_ty, lhs), &b};
+      Val int_value{ma::BitcastOp::create(b, int_ty, lhs), &b};
       int64_t constant = rhs_cst.bitcastToAPInt().getZExtValue();
       // If we're comparing to +-0, compare the absolute values.
       if (rhs_cst.isZero() && !IsFNUZ(lhs.getType())) {
@@ -606,14 +575,14 @@ struct RewriteF8Cst : public mlir::OpRewritePattern<ma::CmpFOp> {
         int_value = int_value & mask;
         constant &= mask;
       }
-      auto cst = b.create<ma::ConstantIntOp>(constant, int_ty);
+      auto cst = ma::ConstantIntOp::create(b, int_ty, constant);
       rewriter.replaceOpWithNewOp<ma::CmpIOp>(op, ma::CmpIPredicate::ne,
                                               int_value, cst);
       return mlir::success();
     }
 
-    auto lhs_ext = b.create<ma::ExtFOp>(b.getF32Type(), lhs);
-    auto rhs_ext = b.create<ma::ExtFOp>(b.getF32Type(), rhs);
+    auto lhs_ext = ma::ExtFOp::create(b, b.getF32Type(), lhs);
+    auto rhs_ext = ma::ExtFOp::create(b, b.getF32Type(), rhs);
     rewriter.replaceOpWithNewOp<ma::CmpFOp>(op, op->getResultTypes(),
                                             mlir::ValueRange{lhs_ext, rhs_ext},
                                             op->getAttrs());
@@ -627,7 +596,10 @@ struct RewriteAbsFPattern : public mlir::OpRewritePattern<mlir::math::AbsFOp> {
   mlir::LogicalResult matchAndRewrite(
       mlir::math::AbsFOp op, mlir::PatternRewriter& rewriter) const override {
     using FloatValue = mlir::TypedValue<mlir::FloatType>;
-    auto src = mlir::cast<FloatValue>(op.getOperand());
+    auto src = mlir::dyn_cast<FloatValue>(op.getOperand());
+    if (!src) {
+      return rewriter.notifyMatchFailure(op, "not a scalar float");
+    }
     // LowerGpuOpsToNVVMOps has a lowering for abs that doesn't work with bf16.
     // Once that's removed, remove the code for BF16 here.
     if (src.getType().getWidth() > 8 && !src.getType().isBF16()) {
@@ -644,7 +616,7 @@ struct RewriteAbsFPattern : public mlir::OpRewritePattern<mlir::math::AbsFOp> {
 
     mlir::ImplicitLocOpBuilder b(op.getLoc(), rewriter);
     mlir::Type i_ty = rewriter.getIntegerType(src.getType().getWidth());
-    Val value{b.create<ma::BitcastOp>(i_ty, src), &b};
+    Val value{ma::BitcastOp::create(b, i_ty, src), &b};
     int64_t mask = (1ull << (src.getType().getWidth() - 1)) - 1;
     value = value & mask;
     rewriter.replaceOpWithNewOp<ma::BitcastOp>(op, src.getType(), value);
@@ -658,11 +630,11 @@ struct RewriteIToFpPattern : public mlir::OpRewritePattern<Op> {
 
   mlir::LogicalResult matchAndRewrite(
       Op op, mlir::PatternRewriter& rewriter) const override {
-    if (op.getType().getIntOrFloatBitWidth() > 8) {
+    if (!op.getType().isFloat() || op.getType().getIntOrFloatBitWidth() > 8) {
       return rewriter.notifyMatchFailure(op, "not an f8 (or less) itofp");
     }
     Value to_float =
-        rewriter.create<Op>(op.getLoc(), rewriter.getF32Type(), op.getIn());
+        Op::create(rewriter, op.getLoc(), rewriter.getF32Type(), op.getIn());
     rewriter.replaceOpWithNewOp<ma::TruncFOp>(op, op.getType(), to_float);
     return mlir::success();
   }
@@ -674,11 +646,12 @@ struct RewriteFpToIPattern : public mlir::OpRewritePattern<Op> {
 
   mlir::LogicalResult matchAndRewrite(
       Op op, mlir::PatternRewriter& rewriter) const override {
-    if (op.getIn().getType().getIntOrFloatBitWidth() > 8) {
+    if (!op.getIn().getType().isFloat() ||
+        op.getIn().getType().getIntOrFloatBitWidth() > 8) {
       return rewriter.notifyMatchFailure(op, "not an f8 (or less) fptoi");
     }
-    Value to_f32 = rewriter.create<ma::ExtFOp>(
-        op.getLoc(), rewriter.getF32Type(), op.getIn());
+    Value to_f32 = ma::ExtFOp::create(rewriter, op.getLoc(),
+                                      rewriter.getF32Type(), op.getIn());
     rewriter.replaceOpWithNewOp<Op>(op, op.getType(), to_f32);
     return mlir::success();
   }
@@ -695,7 +668,9 @@ class ExpandFloatOpsPass
                  RewriteIToFpPattern<ma::UIToFPOp>,
                  RewriteFpToIPattern<ma::FPToSIOp>,
                  RewriteFpToIPattern<ma::FPToUIOp>>(&getContext());
-    mlir::populatePolynomialApproximateTanhPattern(patterns);
+    if (approximate_tanh_) {
+      mlir::populatePolynomialApproximateTanhPattern(patterns);
+    }
     patterns.add<RewriteErf32Pattern>(&getContext());
     if (mlir::failed(
             mlir::applyPatternsGreedily(getOperation(), std::move(patterns)))) {
@@ -706,8 +681,10 @@ class ExpandFloatOpsPass
 
 }  // namespace
 
-std::unique_ptr<mlir::Pass> CreateExpandFloatOpsPass() {
-  return std::make_unique<ExpandFloatOpsPass>();
+std::unique_ptr<mlir::Pass> CreateExpandFloatOpsPass(bool aproximate_tanh) {
+  ExpandFloatOpsPassOptions options;
+  options.approximate_tanh_ = aproximate_tanh;
+  return std::make_unique<ExpandFloatOpsPass>(options);
 }
 
 }  // namespace emitters

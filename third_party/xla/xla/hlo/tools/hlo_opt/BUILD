@@ -1,3 +1,5 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//xla:internal"],
@@ -23,8 +25,8 @@ cc_library(
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
-        "@local_tsl//tsl/platform:path",
-        "@local_tsl//tsl/platform:platform_port",
+        "@tsl//tsl/platform:path",
+        "@tsl//tsl/platform:platform_port",
     ],
 )
 
@@ -38,7 +40,7 @@ cc_library(
         "//xla:literal_pool",
         "//xla:shape_util",
         "//xla:xla_data_proto_cc",
-        "//xla/hlo/analysis:indexed_array_analysis",
+        "//xla/hlo/analysis:alias_info",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/pass:hlo_pass_pipeline",
         "//xla/hlo/tools/tests:hlo_opt_test_only_passes",
@@ -48,7 +50,6 @@ cc_library(
         "//xla/hlo/transforms:defuser",
         "//xla/hlo/transforms:despecializer",
         "//xla/hlo/transforms:host_offload_legalize",
-        "//xla/hlo/transforms:host_offloader",
         "//xla/hlo/transforms:host_offloading_prepare",
         "//xla/hlo/transforms:literal_canonicalizer",
         "//xla/hlo/transforms:memory_space_propagation",
@@ -76,7 +77,6 @@ cc_library(
         "//xla/hlo/transforms/expanders:logistic_expander",
         "//xla/hlo/transforms/expanders:optimization_barrier_expander",
         "//xla/hlo/transforms/expanders:qr_expander",
-        "//xla/hlo/transforms/expanders:real_imag_expander",
         "//xla/hlo/transforms/expanders:reduce_decomposer",
         "//xla/hlo/transforms/expanders:reshape_decomposer",
         "//xla/hlo/transforms/expanders:rng_bit_generator_expander",

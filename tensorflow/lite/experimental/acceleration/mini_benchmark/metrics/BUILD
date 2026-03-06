@@ -14,6 +14,7 @@
 # ==============================================================================
 
 load("//tensorflow:strict.default.bzl", "py_strict_binary", "py_strict_library")
+load("//tensorflow/core/platform:build_config_root.bzl", "if_pywrap")
 
 # Building blocks for generating accuracy validation metric graphs.
 load("//tensorflow/lite/experimental/acceleration/mini_benchmark:build_defs.bzl", "validation_model", "validation_test")
@@ -25,7 +26,7 @@ default_visibility_group = [
 ] + minibenchmark_visibility_allowlist()
 
 package(
-    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = default_visibility_group,
     licenses = ["notice"],
 )
@@ -49,7 +50,9 @@ py_strict_binary(
         "//tensorflow:tensorflow_py",
         "//tensorflow/lite/python:lite",
         "//tensorflow/lite/tools:flatbuffer_utils",
-    ],
+    ] + if_pywrap(
+        if_true = ["//tensorflow/python:_pywrap_tensorflow"],
+    ),
 )
 
 genrule(
@@ -93,7 +96,9 @@ py_strict_binary(
         "//tensorflow:tensorflow_py",
         "//tensorflow/lite/python:lite",
         "//tensorflow/lite/tools:flatbuffer_utils",
-    ],
+    ] + if_pywrap(
+        if_true = ["//tensorflow/python:_pywrap_tensorflow"],
+    ),
 )
 
 genrule(

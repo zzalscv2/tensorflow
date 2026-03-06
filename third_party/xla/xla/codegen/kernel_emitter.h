@@ -19,42 +19,54 @@ limitations under the License.
 #include <memory>
 
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "xla/codegen/kernel_definition.h"
+#include "xla/codegen/kernel_source.h"
+#include "xla/tsl/platform/statusor.h"
 
 namespace xla {
 
-// TODO(ezhulenev): Do we need virtual KernelEmitterContext in API?
+//===----------------------------------------------------------------------===//
+// KernelEmitterBase.
+//===----------------------------------------------------------------------===//
+
+// A base class for emitting XLA kernels.
+class KernelEmitterBase {
+ public:
+  KernelEmitterBase() = default;
+  virtual ~KernelEmitterBase() = default;
+
+  virtual absl::string_view name() const = 0;
+
+  virtual absl::StatusOr<std::unique_ptr<KernelDefinitionBase>>
+  EmitKernelDefinitionBase() = 0;
+
+ protected:
+  KernelEmitterBase(KernelEmitterBase&&) = default;
+  KernelEmitterBase& operator=(KernelEmitterBase&&) = default;
+};
+
+//===----------------------------------------------------------------------===//
+// KernelEmitter.
+//===----------------------------------------------------------------------===//
 
 // KernelEmitter is an API that emits kernel definition from a given input
 // (i.e. it emits kernels compiled from HLO fusions).
-class KernelEmitter {
+template <typename Source>
+class KernelEmitter : public KernelEmitterBase {
  public:
-  virtual ~KernelEmitter() = default;
+  static_assert(std::is_base_of_v<KernelSource, Source>,
+                "Source must be a subclass of KernelSource");
 
+  using KernelDefinition = ::xla::KernelDefinition<Source>;
   virtual absl::StatusOr<KernelDefinition> EmitKernelDefinition() = 0;
-};
-
-// A base class for backend-specific kernel emitters.
-//
-// Example: XLA:GPU backend kernel emitter.
-//
-//   class xla::gpu::GpuPlatform;
-//
-//   class xla::gpu::HloFusionEmitter :
-//     public KernelEmitter<GpuPlatform, const HloFusionInstruction*>;
-//
-template <typename Platform, typename Operation>
-class KernelEmitterBase {
- public:
-  KernelEmitterBase(std::shared_ptr<Platform> platform, Operation operation)
-      : platform_(std::move(platform)), operation_(std::move(operation)) {}
-
-  const Operation& operation() const { return operation_; }
-  const Platform& platform() const { return *platform_; }
 
  private:
-  std::shared_ptr<Platform> platform_;
-  Operation operation_;
+  absl::StatusOr<std::unique_ptr<KernelDefinitionBase>>
+  EmitKernelDefinitionBase() final {
+    TF_ASSIGN_OR_RETURN(auto kernel_definition, EmitKernelDefinition());
+    return std::make_unique<KernelDefinition>(std::move(kernel_definition));
+  }
 };
 
 }  // namespace xla
